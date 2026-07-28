@@ -1,0 +1,309 @@
+name: Upstream sync and nightly release
+
+on:
+  schedule:
+    # 00:00 UTC every day
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force a release even when upstream has no new commits'
+        required: false
+        default: 'false'
+
+# Allow concurrent runs to be cancelled by a newer run; the sync job is
+# guarded by a concurrency group so two merges never race to push main.
+concurrency:
+  group: upstream-sync-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: xai-org/grok-build
+  UPSTREAM_BRANCH: main
+  CONFLICT_LABEL: upstream-sync-conflict
+  BINARY_PACKAGE: xai-grok-pager-bin
+  BINARY_NAME: xai-grok-pager
+
+jobs:
+  sync:
+    name: Merge upstream into fork
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      tag: ${{ steps.decide.outputs.tag }}
+      upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
+      date: ${{ steps.decide.outputs.date }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags --no-recurse-submodules
+
+      - name: Decide whether to release
+        id: decide
+        run: |
+          set -euo pipefail
+          date_tag="nightly-$(date -u +%Y-%m-%d)"
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          fork_sha="$(git rev-parse HEAD)"
+          ahead="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}" || echo 0)"
+          echo "Upstream HEAD: ${upstream_sha}"
+          echo "Fork HEAD:     ${fork_sha}"
+          echo "Commits upstream is ahead by: ${ahead}"
+
+          force="${{ github.event.inputs.force }}"
+          if [[ "${force}" == "true" ]]; then
+            echo "Force release requested."
+            should="true"
+          elif [[ "${ahead}" -gt 0 ]]; then
+            should="true"
+          else
+            should="false"
+          fi
+
+          # De-dupe same-day tag: if it already exists, append the short SHA.
+          if git rev-parse -q --verify "refs/tags/${date_tag}" >/dev/null; then
+            tag="${date_tag}-${upstream_sha:0:8}"
+          else
+            tag="${date_tag}"
+          fi
+
+          echo "should_release=${should}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+          echo "date=${date_tag#nightly-}" >> "${GITHUB_OUTPUT}"
+
+      - name: Merge upstream into fork main
+        if: steps.decide.outputs.should_release == 'true'
+        id: merge
+        run: |
+          set -euo pipefail
+          if ! git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}" -m \
+            "chore(sync): merge upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} into fork main"; then
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            echo "::group::Conflicting files"
+            git diff --name-only --diff-filter=U
+            echo "::endgroup::"
+            # Abandon the conflicted merge so the worktree stays clean.
+            git merge --abort || true
+            exit 0
+          fi
+          echo "conflict=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Open issue on merge conflict
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          body="$(cat <<'EOF'
+          The scheduled upstream sync could not merge \`xai-org/grok-build@main\` into this fork's \`main\` branch because of merge conflicts. Manual resolution is required.
+
+          - Upstream commit: ${{ steps.decide.outputs.upstream_sha }}
+          - Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Re-run the workflow locally to inspect the conflicts:
+
+          ```sh
+          git remote add upstream https://github.com/xai-org/grok-build.git
+          git fetch upstream main
+          git merge upstream/main
+          ```
+
+          Once resolved and pushed, the next scheduled run will close this issue automatically.
+          EOF
+          )"
+          # Re-use an open issue with the conflict label instead of filing a duplicate.
+          existing="$(gh issue list --label "${CONFLICT_LABEL}" --state open --json number --jq '.[0].number // empty' || true)"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --body "${body}"
+          else
+            gh issue create \
+              --title "Upstream sync conflict needs manual resolution" \
+              --body "${body}" \
+              --label "${CONFLICT_LABEL}"
+          fi
+
+      - name: Stop when a conflict was reported
+        if: steps.merge.outputs.conflict == 'true'
+        run: |
+          echo "Merge conflict detected; an issue has been opened. Stopping before push/release."
+          exit 1
+
+      - name: Push merged main
+        if: steps.decide.outputs.should_release == 'true' && steps.merge.outputs.conflict != 'true'
+        run: |
+          git push origin HEAD:main
+
+      - name: Close stale conflict issues after a successful sync
+        if: steps.decide.outputs.should_release == 'true' && steps.merge.outputs.conflict != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for n in $(gh issue list --label "${CONFLICT_LABEL}" --state open --json number --jq '.[].number' || true); do
+            gh issue close "${n}" --comment "Upstream sync succeeded in run ${{ github.run_id }}; closing this conflict issue."
+          done
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: sync
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        env:
+          PROTOC: protoc
+        run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
+
+      - name: Strip release binary (Linux)
+        if: runner.os == 'Linux'
+        run: strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      - name: Strip release binary (macOS)
+        if: runner.os == 'macOS'
+        run: strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          staging="grok-${{ needs.sync.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "${staging}"
+          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" "${staging}/"
+          cp SOURCE_REV "${staging}/"
+          {
+            echo "grok nightly build"
+            echo "tag:      ${{ needs.sync.outputs.tag }}"
+            echo "target:   ${{ matrix.target }}"
+            echo "upstream: ${{ needs.sync.outputs.upstream_sha }}"
+            echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${staging}/VERSION"
+          if [[ "${{ matrix.archive }}" == "tar.gz" ]]; then
+            tar -czf "${staging}.tar.gz" "${staging}"
+          else
+            zip -r "${staging}.zip" "${staging}"
+          fi
+          sha256sum "${staging}.tar.gz" | tee "${staging}.tar.gz.sha256" || \
+            shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          echo "asset_path=${staging}.tar.gz" >> "${GITHUB_ENV}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-${{ matrix.target }}
+          path: |
+            grok-*.tar.gz
+            grok-*.tar.gz.sha256
+          retention-days: 7
+
+  release:
+    name: Publish nightly release
+    needs: [sync, build]
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: List assets
+        run: find assets -type f -maxdepth 1 | sort
+
+      - name: Create tag
+        run: |
+          set -euo pipefail
+          tag="${{ needs.sync.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; skipping tag creation."
+          else
+            git tag "${tag}"
+            git push origin "${tag}"
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.sync.outputs.tag }}"
+          title="Grok nightly ${{ needs.sync.outputs.date }}"
+          notes="$(cat <<EOF
+          Automated nightly build synced from [xai-org/grok-build@main](https://github.com/xai-org/grok-build/commit/${{ needs.sync.outputs.upstream_sha }}).
+
+          - Upstream commit: ${{ needs.sync.outputs.upstream_sha }}
+          - Source revision (SOURCE_REV): see the bundled file in each archive.
+
+          Each archive contains the \`xai-grok-pager\` release binary (shipped upstream as \`grok\`), the \`SOURCE_REV\` file, and a \`VERSION\` manifest. Download the archive matching your platform, extract it, and place the binary on your \`PATH\`.
+          EOF
+          )"
+          # Create the release (idempotent: update if it already exists).
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --title "${title}" --notes "${notes}"
+          else
+            gh release create "${tag}" --title "${title}" --notes "${notes}" --prerelease
+          fi
+          # Upload all archives + checksums.
+          gh release upload "${tag}" assets/*.tar.gz assets/*.sha256 --clobber
