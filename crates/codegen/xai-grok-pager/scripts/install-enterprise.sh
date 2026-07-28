@@ -164,18 +164,25 @@ mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 platform="${os}-${arch}"
 CHANNEL="enterprise"
 
-# Pick a working BASE_URL: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no explicit TARGET was passed, so the happy path costs zero
-# extra HTTP requests.
-if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
-probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
-if [ -n "$probe_result" ]; then
-    BASE_URL="$BASE_URL_PRIMARY"
-else
-    echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
-    BASE_URL="$BASE_URL_FALLBACK"
+# Pick a working BASE_URL. When GROK_CLI_BASE_URL is set (self-hosted releases),
+# use it alone with no upstream fallback. Otherwise probe the Cloudflare-fronted
+# x.ai endpoint first and fall back to direct GCS if it's unreachable. The probe
+# doubles as the channel-pointer fetch when no explicit TARGET was passed, so the
+# happy path costs zero extra HTTP requests.
+if [ -n "$GROK_CLI_BASE_URL" ]; then
+    BASE_URL="$GROK_CLI_BASE_URL"
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version from ${BASE_URL}..." >&2; fi
     probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+else
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
+    probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
+    if [ -n "$probe_result" ]; then
+        BASE_URL="$BASE_URL_PRIMARY"
+    else
+        echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
+        BASE_URL="$BASE_URL_FALLBACK"
+        probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+    fi
 fi
 
 if [ -n "$TARGET" ]; then

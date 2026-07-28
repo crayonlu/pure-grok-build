@@ -1163,7 +1163,9 @@ async fn download_cli_artifact_from_gcs(
 }
 
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<()> {
-    install_internal_from_bases(target, update_config, crate::version::CLI_BASE_URLS).await
+    let bases = crate::version::cli_base_urls();
+    let bases_refs: Vec<&str> = bases.iter().copied().collect();
+    install_internal_from_bases(target, update_config, &bases_refs).await
 }
 
 /// Try the base-dependent install phase ([`download_verified_from_base`]:
@@ -2031,6 +2033,7 @@ async fn agent_exe_differs(
 
 /// Download a single asset from a GitHub release via `gh release download`.
 async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -> Result<()> {
+    let repo = crate::version::gh_release_repo();
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -2045,7 +2048,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         "download",
         tag,
         "--repo",
-        crate::version::GH_RELEASE_REPO,
+        repo,
         "--pattern",
         pattern,
         "--output",
@@ -2067,7 +2070,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
             "gh release download failed for {} tag {} from {}: {}",
             pattern,
             tag,
-            crate::version::GH_RELEASE_REPO,
+            repo,
             stderr.trim()
         );
     }

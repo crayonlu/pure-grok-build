@@ -26,6 +26,54 @@ pub(crate) const CLI_BASE_URL_FALLBACK: &str =
 /// download, in-app updater) try each in turn and stop at the first success.
 pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_FALLBACK];
 
+/// Environment variable that overrides the CLI download base URL. When set
+/// (e.g. `https://releases.example.com/cli`), every channel-pointer fetch and
+/// binary download goes through that host alone, bypassing the upstream
+/// `x.ai/cli` / GCS fallbacks. Lets a fork host its own build artifacts
+/// without source changes beyond this gate.
+const ENV_CLI_BASE_URL: &str = "GROK_CLI_BASE_URL";
+
+/// Environment variable that overrides the GitHub repository used by the
+/// `gh-release` installer for version checks and binary downloads. Expects
+/// `owner/repo` (e.g. `crayonlu/pure-grok-build`). Unset falls back to the
+/// upstream `xai-org-shared/grok-build`.
+const ENV_UPDATE_REPO: &str = "GROK_UPDATE_REPO";
+
+/// Resolve the active CLI base URLs.
+///
+/// When `GROK_CLI_BASE_URL` is set, returns a single-element slice containing
+/// just that URL (no fallback to the upstream CDN). Otherwise returns the
+/// default primary + fallback pair. Read once per call so an env change takes
+/// effect on the next update check without a process restart.
+pub(crate) fn cli_base_urls() -> Vec<&'static str> {
+    // SAFETY: the env value is owned by the process and lives for the whole
+    // program lifetime, so leaking it to obtain a `'static` handle is sound.
+    // This keeps the return type compatible with existing `&[&str]` callers.
+    match std::env::var(ENV_CLI_BASE_URL) {
+        Ok(base) if !base.trim().is_empty() => {
+            let leaked: &'static str = Box::leak(base.trim().to_string().into_boxed_str());
+            vec![leaked]
+        }
+        _ => CLI_BASE_URLS.to_vec(),
+    }
+}
+
+/// Resolve the GitHub repository used by the `gh-release` installer path.
+///
+/// `GROK_UPDATE_REPO` (format `owner/repo`) overrides the upstream default so
+/// a fork can point version checks and `gh release download` at its own
+/// GitHub Releases. Returns the env value when set, otherwise the upstream
+/// constant. The returned string is `'static` (env values are process-global).
+pub fn gh_release_repo() -> &'static str {
+    match std::env::var(ENV_UPDATE_REPO) {
+        Ok(repo) if !repo.trim().is_empty() => {
+            let leaked: &'static str = Box::leak(repo.trim().to_string().into_boxed_str());
+            leaked
+        }
+        _ => GH_RELEASE_REPO,
+    }
+}
+
 /// Minimal configuration the update system needs from the environment.
 ///
 /// Constructed once from `GrokBuildEnvironment` at startup and threaded through the
@@ -188,11 +236,12 @@ pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
 }
 
 async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
+    let repo = gh_release_repo();
     let mut args = vec![
         "release",
         "list",
         "--repo",
-        GH_RELEASE_REPO,
+        repo,
         "--limit",
         "1",
         "--exclude-drafts",
@@ -219,7 +268,7 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
     // Tags are formatted as "v0.1.141", strip the leading "v"
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
     if version.is_empty() {
-        anyhow::bail!("No releases found in {}", GH_RELEASE_REPO);
+        anyhow::bail!("No releases found in {}", repo);
     }
     Ok(version)
 }
@@ -238,12 +287,13 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
 /// backoff (1s, 2s, 4s) on transient failures before falling through to the
 /// next base.
 pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
+    let bases = cli_base_urls();
     let mut last_err: Option<anyhow::Error> = None;
-    for (i, base) in CLI_BASE_URLS.iter().enumerate() {
+    for (i, base) in bases.iter().enumerate() {
         match fetch_gcs_version_from_base(channel, base).await {
             Ok(v) => return Ok(v),
             Err(e) => {
-                if i + 1 < CLI_BASE_URLS.len() {
+                if i + 1 < bases.len() {
                     tracing::warn!(
                         "channel pointer fetch from {} failed ({:#}); trying next base URL",
                         base,
@@ -489,8 +539,9 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
 /// return `None`; the label will populate on the next successful TTL check
 /// (~30 min). This keeps startup and post-install paths fast.
 pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
+    let bases = cli_base_urls();
     tokio::time::timeout(Duration::from_millis(500), async {
-        for base in CLI_BASE_URLS {
+        for base in &bases {
             if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {
                 return Some(v);
             }
@@ -780,5 +831,71 @@ mod tests {
         use xai_grok_shell::env::GrokBuildEnvironment;
         let cfg = UpdateConfig::from_environment(&GrokBuildEnvironment::Production);
         assert_eq!(cfg.channel, "stable");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Self-hosted update source overrides (GROK_CLI_BASE_URL / GROK_UPDATE_REPO)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cli_base_urls_default_is_primary_plus_fallback() {
+        // Guard against a stale env var left by another test run.
+        let prev = std::env::var(ENV_CLI_BASE_URL).ok();
+        std::env::remove_var(ENV_CLI_BASE_URL);
+        let bases = cli_base_urls();
+        assert_eq!(bases.len(), 2);
+        assert_eq!(bases[0], CLI_BASE_URL_PRIMARY);
+        assert_eq!(bases[1], CLI_BASE_URL_FALLBACK);
+        if let Some(v) = prev {
+            std::env::set_var(ENV_CLI_BASE_URL, v);
+        }
+    }
+
+    #[test]
+    fn test_cli_base_urls_override_uses_single_self_hosted_url() {
+        let prev = std::env::var(ENV_CLI_BASE_URL).ok();
+        std::env::set_var(ENV_CLI_BASE_URL, "https://releases.example.test/cli");
+        let bases = cli_base_urls();
+        assert_eq!(bases.len(), 1);
+        assert_eq!(bases[0], "https://releases.example.test/cli");
+        match prev {
+            Some(v) => std::env::set_var(ENV_CLI_BASE_URL, v),
+            None => std::env::remove_var(ENV_CLI_BASE_URL),
+        }
+    }
+
+    #[test]
+    fn test_cli_base_urls_override_ignores_empty_value() {
+        let prev = std::env::var(ENV_CLI_BASE_URL).ok();
+        std::env::set_var(ENV_CLI_BASE_URL, "   ");
+        let bases = cli_base_urls();
+        // An empty/whitespace override must fall back to the defaults rather
+        // than producing a zero-base slice (which would break every fetch).
+        assert_eq!(bases.len(), 2);
+        match prev {
+            Some(v) => std::env::set_var(ENV_CLI_BASE_URL, v),
+            None => std::env::remove_var(ENV_CLI_BASE_URL),
+        }
+    }
+
+    #[test]
+    fn test_gh_release_repo_default_is_upstream() {
+        let prev = std::env::var(ENV_UPDATE_REPO).ok();
+        std::env::remove_var(ENV_UPDATE_REPO);
+        assert_eq!(gh_release_repo(), GH_RELEASE_REPO);
+        if let Some(v) = prev {
+            std::env::set_var(ENV_UPDATE_REPO, v);
+        }
+    }
+
+    #[test]
+    fn test_gh_release_repo_override_points_at_fork() {
+        let prev = std::env::var(ENV_UPDATE_REPO).ok();
+        std::env::set_var(ENV_UPDATE_REPO, "crayonlu/pure-grok-build");
+        assert_eq!(gh_release_repo(), "crayonlu/pure-grok-build");
+        match prev {
+            Some(v) => std::env::set_var(ENV_UPDATE_REPO, v),
+            None => std::env::remove_var(ENV_UPDATE_REPO),
+        }
     }
 }

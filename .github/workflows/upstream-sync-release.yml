@@ -35,6 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
       tag: ${{ steps.decide.outputs.tag }}
       upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
       date: ${{ steps.decide.outputs.date }}
@@ -59,13 +60,18 @@ jobs:
         id: decide
         run: |
           set -euo pipefail
-          date_tag="nightly-$(date -u +%Y-%m-%d)"
+          # Date-derived semver (YYYY.M.D): valid semver, monotonically
+          # increasing by day, and greater than the upstream 0.x stable line
+          # so the in-app auto-updater treats each nightly as newer.
+          version="$(date -u +%Y).$(date -u +%-m).$(date -u +%-d)"
+          tag="v${version}"
           upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
           fork_sha="$(git rev-parse HEAD)"
           ahead="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}" || echo 0)"
           echo "Upstream HEAD: ${upstream_sha}"
           echo "Fork HEAD:     ${fork_sha}"
           echo "Commits upstream is ahead by: ${ahead}"
+          echo "Nightly version: ${version} (tag ${tag})"
 
           force="${{ github.event.inputs.force }}"
           if [[ "${force}" == "true" ]]; then
@@ -77,17 +83,20 @@ jobs:
             should="false"
           fi
 
-          # De-dupe same-day tag: if it already exists, append the short SHA.
-          if git rev-parse -q --verify "refs/tags/${date_tag}" >/dev/null; then
-            tag="${date_tag}-${upstream_sha:0:8}"
-          else
-            tag="${date_tag}"
+          # Same-day re-run guard: if today's semver tag already exists, do not
+          # publish again (a second tag would be a semver pre-release of the
+          # existing release and confuse the auto-updater's version compare).
+          if [[ "${should}" == "true" ]] \
+            && git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; skipping release."
+            should="false"
           fi
 
           echo "should_release=${should}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
-          echo "date=${date_tag#nightly-}" >> "${GITHUB_OUTPUT}"
+          echo "date=$(date -u +%Y-%m-%d)" >> "${GITHUB_OUTPUT}"
 
       - name: Merge upstream into fork main
         if: steps.decide.outputs.should_release == 'true'
@@ -216,33 +225,51 @@ jobs:
       - name: Package binary
         run: |
           set -euo pipefail
-          staging="grok-${{ needs.sync.outputs.tag }}-${{ matrix.target }}"
+          version="${{ needs.sync.outputs.version }}"
+          target="${{ matrix.target }}"
+          arch="${target%%-*}"
+          # Map the Rust target triple to the auto-updater's platform string
+          # (macos-aarch64, linux-x86_64, windows-x86_64). The updater
+          # downloads an asset named grok-<version>-<platform>, so the raw
+          # binary must use this name (not the triple).
+          case "${target}" in
+            *-apple-darwin)    platform="macos-${arch}" ;;
+            *-unknown-linux-*) platform="linux-${arch}" ;;
+            *-pc-windows-*)    platform="windows-${arch}" ;;
+            *)                 platform="${target}" ;;
+          esac
+          raw_name="grok-${version}-${platform}"
+          cp "target/${target}/release/${{ env.BINARY_NAME }}" "${raw_name}"
+          if [[ "${platform}" == windows-* ]]; then
+            mv "${raw_name}" "${raw_name}.exe"
+            raw_name="${raw_name}.exe"
+          fi
+
+          # Human-friendly archive with provenance files.
+          staging="grok-${version}-${platform}-bundle"
           mkdir -p "${staging}"
-          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}" "${staging}/"
+          cp "target/${target}/release/${{ env.BINARY_NAME }}" "${staging}/"
           cp SOURCE_REV "${staging}/"
           {
             echo "grok nightly build"
+            echo "version:  ${version}"
             echo "tag:      ${{ needs.sync.outputs.tag }}"
-            echo "target:   ${{ matrix.target }}"
+            echo "target:   ${target}"
             echo "upstream: ${{ needs.sync.outputs.upstream_sha }}"
             echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "${staging}/VERSION"
-          if [[ "${{ matrix.archive }}" == "tar.gz" ]]; then
-            tar -czf "${staging}.tar.gz" "${staging}"
-          else
-            zip -r "${staging}.zip" "${staging}"
-          fi
-          sha256sum "${staging}.tar.gz" | tee "${staging}.tar.gz.sha256" || \
-            shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
-          echo "asset_path=${staging}.tar.gz" >> "${GITHUB_ENV}"
+          tar -czf "${staging}.tar.gz" "${staging}"
+          shasum -a 256 "${raw_name}" > "${raw_name}.sha256" || sha256sum "${raw_name}" > "${raw_name}.sha256"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256" || sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          ls -lh "${raw_name}" "${staging}.tar.gz"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: grok-${{ matrix.target }}
           path: |
-            grok-*.tar.gz
-            grok-*.tar.gz.sha256
+            grok-*
+            *.sha256
           retention-days: 7
 
   release:
@@ -288,22 +315,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          version="${{ needs.sync.outputs.version }}"
           tag="${{ needs.sync.outputs.tag }}"
-          title="Grok nightly ${{ needs.sync.outputs.date }}"
+          title="Grok nightly ${{ needs.sync.outputs.date }} (${version})"
           notes="$(cat <<EOF
           Automated nightly build synced from [xai-org/grok-build@main](https://github.com/xai-org/grok-build/commit/${{ needs.sync.outputs.upstream_sha }}).
 
+          - Version: ${version}
           - Upstream commit: ${{ needs.sync.outputs.upstream_sha }}
-          - Source revision (SOURCE_REV): see the bundled file in each archive.
 
-          Each archive contains the \`xai-grok-pager\` release binary (shipped upstream as \`grok\`), the \`SOURCE_REV\` file, and a \`VERSION\` manifest. Download the archive matching your platform, extract it, and place the binary on your \`PATH\`.
+          Two kinds of assets are attached:
+
+          1. Raw binaries named \`grok-<version>-<platform>\` (e.g. \`grok-${version}-macos-aarch64\`) — the exact object name the in-app auto-updater downloads. These are what the self-hosted update flow consumes.
+          2. \`*-bundle.tar.gz\` archives for manual download, each containing the binary plus \`SOURCE_REV\` and a \`VERSION\` manifest.
+
+          Update channels (set one before launching grok):
+
+          - \`GROK_UPDATE_REPO\` — point the auto-updater at this fork's GitHub Releases directly: the updater runs \`gh release list --repo <repo>\` and downloads the matching raw binary.
+          - \`GROK_CLI_BASE_URL\` — mirror the raw binaries plus the \`stable\` pointer file below to your own host; the updater fetches \`<base>/stable\` for the version and \`<base>/grok-<version>-<platform>\` for the binary.
           EOF
           )"
-          # Create the release (idempotent: update if it already exists).
           if gh release view "${tag}" >/dev/null 2>&1; then
             gh release edit "${tag}" --title "${title}" --notes "${notes}"
           else
             gh release create "${tag}" --title "${title}" --notes "${notes}" --prerelease
           fi
-          # Upload all archives + checksums.
-          gh release upload "${tag}" assets/*.tar.gz assets/*.sha256 --clobber
+          # Channel pointer file: plain-text semver consumed by the
+          # GROK_CLI_BASE_URL path (mirror it to <base>/stable on your host).
+          echo "${version}" > stable
+          # Upload raw binaries + bundles + checksums + channel pointer.
+          gh release upload "${tag}" \
+            assets/grok-* stable --clobber
