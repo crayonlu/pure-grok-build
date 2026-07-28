@@ -103,6 +103,9 @@ pub struct MockModelEntry {
     pub api_backend: Option<String>,
     /// Emitted as `supportsBackendSearch` when true.
     pub supports_backend_search: bool,
+    /// Emitted as `supportsVision` when false (defaults to true, mirroring
+    /// the production model catalog: vision-capable models omit the field).
+    pub supports_vision: bool,
     /// Emitted as `supportsReasoningEffort` (top-level) when true.
     pub supports_reasoning_effort: bool,
     /// Emitted as `reasoningEffort` (top-level) when set.
@@ -144,6 +147,11 @@ impl MockModelEntry {
         self
     }
 
+    pub fn with_supports_vision(mut self, supports: bool) -> Self {
+        self.supports_vision = supports;
+        self
+    }
+
     pub fn with_supports_reasoning_effort(mut self, supports: bool) -> Self {
         self.supports_reasoning_effort = supports;
         self
@@ -174,6 +182,9 @@ impl MockModelEntry {
         }
         if self.supports_backend_search {
             obj["supportsBackendSearch"] = json!(true);
+        }
+        if !self.supports_vision {
+            obj["supportsVision"] = json!(false);
         }
         if self.supports_reasoning_effort {
             obj["supportsReasoningEffort"] = json!(true);
