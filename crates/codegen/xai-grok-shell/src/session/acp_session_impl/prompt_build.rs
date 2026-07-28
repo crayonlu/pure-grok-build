@@ -835,11 +835,12 @@ impl SessionActor {
             // active model cannot consume image pixels, and the describe call
             // would route through a vision endpoint that may not exist).
             let persisted =
-                crate::session::image_describe::persist_user_images(&session_dir, images)
-                    .map_err(|e| {
+                crate::session::image_describe::persist_user_images(&session_dir, images).map_err(
+                    |e| {
                         acp::Error::internal_error()
                             .data(format!("failed to save user images to assets dir: {e}"))
-                    })?;
+                    },
+                )?;
             let image_paths: Vec<String> = persisted
                 .iter()
                 .map(|p| p.path.to_string_lossy().into_owned())

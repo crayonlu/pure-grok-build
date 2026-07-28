@@ -32,10 +32,7 @@ jobs:
           rustup component add rustfmt clippy
 
       - name: cargo fmt --check
-        # Report formatting drift but do not fail the job: we want the
-        # cargo check / clippy steps to run so they surface real compile
-        # errors even when formatting needs touching up.
-        run: cargo fmt --all -- --check || true
+        run: cargo fmt --all -- --check
 
       - name: cargo check (affected crates + tests)
         run: cargo check -p xai-grok-sampler -p xai-grok-shell --all-targets --locked
