@@ -28,6 +28,11 @@ env:
   CONFLICT_LABEL: upstream-sync-conflict
   BINARY_PACKAGE: xai-grok-pager-bin
   BINARY_NAME: xai-grok-pager
+  # Cloudflare R2 mirror — CI uploads nightly binaries and the channel
+  # pointer here so forks can use GROK_CLI_BASE_URL for self-hosted updates.
+  # Requires the CLOUDFLARE_API_TOKEN repo secret (R2 read+write scope).
+  R2_BUCKET: grok-build
+  R2_PUBLIC_BASE_URL: https://grok.cyncyn.xyz/cli
 
 jobs:
   sync:
@@ -332,7 +337,7 @@ jobs:
           Update channels (set one before launching grok):
 
           - \`GROK_UPDATE_REPO\` — point the auto-updater at this fork's GitHub Releases directly: the updater runs \`gh release list --repo <repo>\` and downloads the matching raw binary.
-          - \`GROK_CLI_BASE_URL\` — mirror the raw binaries plus the \`stable\` pointer file below to your own host; the updater fetches \`<base>/stable\` for the version and \`<base>/grok-<version>-<platform>\` for the binary.
+          - \`GROK_CLI_BASE_URL\` - the updater fetches \`<base>/stable\` for the version and \`<base>/grok-<version>-<platform>\` for the binary. This fork mirrors all artifacts to \`${R2_PUBLIC_BASE_URL}\` on Cloudflare R2 - set \`export GROK_CLI_BASE_URL=${R2_PUBLIC_BASE_URL}\` to use it.
           EOF
           )"
           if gh release view "${tag}" >/dev/null 2>&1; then
@@ -346,3 +351,57 @@ jobs:
           # Upload raw binaries + bundles + checksums + channel pointer.
           gh release upload "${tag}" \
             assets/grok-* stable --clobber
+
+      - name: Check Cloudflare R2 configuration
+        id: r2_check
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [[ -n "${CF_TOKEN}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Cloudflare API token found; R2 upload enabled."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLOUDFLARE_API_TOKEN secret is not set; skipping R2 mirror upload."
+          fi
+
+      - name: Upload artifacts to Cloudflare R2
+        if: steps.r2_check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || '6eb9ddbde814b5def318c50efc93a54f' }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.sync.outputs.version }}"
+
+          # Install wrangler (pinned to v3 for stability).
+          npm install -g wrangler@3
+
+          # Upload raw binaries with long-term cache (immutable: versioned
+          # URLs that never change once published).
+          for platform in macos-x86_64 macos-aarch64 linux-x86_64 linux-aarch64; do
+            file="assets/grok-${version}-${platform}"
+            if [[ -f "${file}" ]]; then
+              echo "  Uploading ${file} -> ${R2_BUCKET}/cli/grok-${version}-${platform}"
+              wrangler r2 object put "${R2_BUCKET}/cli/grok-${version}-${platform}" \
+                --file="${file}" \
+                --content-type="application/octet-stream" \
+                --cache-control="public, max-age=31536000, immutable"
+            else
+              echo "::warning::Binary not found: ${file}"
+            fi
+          done
+
+          # Upload channel pointer with no-cache so version updates propagate
+          # immediately (the updater fetches this on every version check).
+          if [[ -f "assets/stable" ]]; then
+            echo "  Uploading channel pointer -> ${R2_BUCKET}/cli/stable"
+            wrangler r2 object put "${R2_BUCKET}/cli/stable" \
+              --file="assets/stable" \
+              --content-type="text/plain" \
+              --cache-control="no-cache"
+          fi
+
+          echo ""
+          echo "R2 mirror updated. Users can now set:"
+          echo "  export GROK_CLI_BASE_URL=${R2_PUBLIC_BASE_URL}"
