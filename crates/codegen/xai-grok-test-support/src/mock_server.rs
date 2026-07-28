@@ -120,6 +120,7 @@ impl MockModelEntry {
             agent_type: None,
             api_backend: None,
             supports_backend_search: false,
+            supports_vision: true,
             supports_reasoning_effort: false,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
