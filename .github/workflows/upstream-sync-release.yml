@@ -184,9 +184,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            runner: macos-13
-            archive: tar.gz
           - target: aarch64-apple-darwin
             runner: macos-14
             archive: tar.gz
@@ -379,7 +376,7 @@ jobs:
 
           # Upload raw binaries with long-term cache (immutable: versioned
           # URLs that never change once published).
-          for platform in macos-x86_64 macos-aarch64 linux-x86_64 linux-aarch64; do
+          for platform in macos-aarch64 linux-x86_64 linux-aarch64; do
             file="assets/grok-${version}-${platform}"
             if [[ -f "${file}" ]]; then
               echo "  Uploading ${file} -> ${R2_BUCKET}/cli/grok-${version}-${platform}"
