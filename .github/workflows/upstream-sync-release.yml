@@ -205,26 +205,30 @@ jobs:
 
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          echo "PROTOC=protoc" >> "$GITHUB_ENV"
 
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: |
+          brew install protobuf
+          echo "PROTOC=protoc" >> "$GITHUB_ENV"
 
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip" -OutFile protoc.zip
           Expand-Archive protoc.zip -DestinationPath $HOME\protoc
           echo "$HOME\protoc\bin" >> $env:GITHUB_PATH
+          echo "PROTOC=$HOME\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
       - name: Build release binary
-        env:
-          PROTOC: protoc
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
 
       - name: Strip release binary (Linux)
