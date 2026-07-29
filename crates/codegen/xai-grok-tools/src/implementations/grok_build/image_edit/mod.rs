@@ -19,7 +19,7 @@ use image::ImageReader;
 use reqwest::header::AUTHORIZATION;
 
 use crate::attribution::ToolConsumer;
-use crate::implementations::grok_build::image_gen::{ImageGenClient, ImageGenResponse};
+use crate::implementations::grok_build::image_gen::ImageGenClient;
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
@@ -349,30 +349,58 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         }
         tracing::info!(count = data_urls.len(), "resolved image references");
 
-        let base = client.base_url().trim_end_matches('/');
-        let url = format!("{base}/images/edits");
+        let url = client.edit_url();
 
-        let mut payload = serde_json::json!({
-            "model": client.edit_model(),
-            "prompt": input.prompt,
-            "n": 1,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
+        // Build the request payload. When a provider config is present,
+        // use its format; otherwise fall back to the x.ai Imagine shape.
+        let mut payload = match client.provider() {
+            Some(p) => {
+                let mut pl = serde_json::json!({ "prompt": input.prompt });
+                // Merge static extra fields (e.g. output_format, model, n).
+                for (k, v) in &p.extra_fields {
+                    pl[k.clone()] = v.clone();
+                }
+                pl
+            }
+            None => serde_json::json!({
+                "model": client.edit_model(),
+                "prompt": input.prompt,
+                "n": 1,
+                "resolution": "1k",
+                "response_format": "b64_json",
+            }),
+        };
 
-        // API: single ref → "image" object; multiple → "images" array.
+        // Image parameter: single ref → "image"; multiple → "images" array.
         // For single-image edits the API auto-detects aspect ratio from the
-        // input image and ignores the `aspect_ratio` field. Only send it
+        // input image and ignores the aspect_ratio field. Only send it
         // for multi-image edits where the API needs an explicit ratio.
+        let edit_as_string = client
+            .provider()
+            .map(|p| matches!(p.edit_image_format, super::image_gen::EditImageFormat::String))
+            .unwrap_or(false);
         let mut imgs: Vec<serde_json::Value> = data_urls
             .iter()
-            .map(|u| serde_json::json!({ "url": u }))
+            .map(|u| {
+                if edit_as_string {
+                    serde_json::Value::String(u.clone())
+                } else {
+                    serde_json::json!({ "url": u })
+                }
+            })
             .collect();
         if imgs.len() == 1 {
             payload["image"] = imgs.pop().unwrap();
         } else {
             payload["images"] = serde_json::Value::Array(imgs);
-            payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
+            // For multi-image edits, send the size/aspect ratio if the
+            // provider uses a named size field.
+            if let Some(p) = client.provider() {
+                let size_val = p.resolve_size(&input.aspect_ratio);
+                payload[p.size_field.clone()] = serde_json::Value::String(size_val.to_string());
+            } else {
+                payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
+            }
         }
 
         let sent_bearer = client.current_bearer().await;
@@ -408,28 +436,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine edit API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image edit response: {e} — body preview: {preview}"
-            ))
-        })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image edit returned no image data.",
-            ));
-        }
-
-        let image_bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
-                ))
-            })?;
+        let image_bytes = client.extract_image_bytes(&body).await?;
 
         let session_folder = {
             let res = resources.lock().await;

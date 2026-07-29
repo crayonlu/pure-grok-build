@@ -427,6 +427,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 model_override: None,
                                 edit_model_override: None,
                                 tier_restricted: false,
+                                provider: None,
                             },
                             VideoGenConfig::Enabled {
                                 api_key: token.clone(),

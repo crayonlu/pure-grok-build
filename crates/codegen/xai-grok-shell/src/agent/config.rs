@@ -1386,6 +1386,11 @@ pub struct Config {
     pub shell_environment_policy: ShellEnvironmentPolicyKnownKeys,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// `[image_gen]` — provider-agnostic image generation API config.
+    /// When present, overrides the default x.ai Imagine behavior with a
+    /// configurable endpoint, request body, and response format.
+    #[serde(default, skip_serializing)]
+    pub image_gen: Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1814,6 +1819,7 @@ impl Default for Config {
             toolset: ShellToolsetConfig::default(),
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
+            image_gen: None,
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
