@@ -203,8 +203,21 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip" -OutFile protoc.zip
+          Expand-Archive protoc.zip -DestinationPath $HOME\protoc
+          echo "$HOME\protoc\bin" >> $env:GITHUB_PATH
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
