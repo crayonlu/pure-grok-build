@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: cargo check / clippy / fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Configure protoc
+        run: echo "PROTOC=protoc" >> "$GITHUB_ENV"
+
+      - name: Rust toolchain
+        run: |
+          # rust-toolchain.toml pins the version; ensure rustfmt/clippy components are present.
+          rustup component add rustfmt clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo check (affected crates + tests)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p xai-grok-sampler -p xai-grok-shell --all-targets --locked
+
+      - name: cargo clippy (affected crates)
+        # Informational: clippy runs without -D warnings so pre-existing
+        # upstream lints (e.g. bool_assert_comparison) do not block the
+        # build. Newly introduced warnings still show up in the log.
+        run: cargo clippy -p xai-grok-sampler -p xai-grok-shell --all-targets --no-deps || true
