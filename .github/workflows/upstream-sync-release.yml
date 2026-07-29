@@ -193,6 +193,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -207,6 +210,10 @@ jobs:
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protobuf -y
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -376,11 +383,15 @@ jobs:
 
           # Upload raw binaries with long-term cache (immutable: versioned
           # URLs that never change once published).
-          for platform in macos-aarch64 linux-x86_64 linux-aarch64; do
-            file="assets/grok-${version}-${platform}"
+          for platform in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            suffix=""
+            if [[ "${platform}" == windows-* ]]; then
+              suffix=".exe"
+            fi
+            file="assets/grok-${version}-${platform}${suffix}"
             if [[ -f "${file}" ]]; then
-              echo "  Uploading ${file} -> ${R2_BUCKET}/cli/grok-${version}-${platform}"
-              wrangler r2 object put "${R2_BUCKET}/cli/grok-${version}-${platform}" \
+              echo "  Uploading ${file} -> ${R2_BUCKET}/cli/grok-${version}-${platform}${suffix}"
+              wrangler r2 object put "${R2_BUCKET}/cli/grok-${version}-${platform}${suffix}" \
                 --file="${file}" \
                 --content-type="application/octet-stream" \
                 --cache-control="public, max-age=31536000, immutable"

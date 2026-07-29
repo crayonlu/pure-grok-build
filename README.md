@@ -112,11 +112,9 @@ The date-based versioning (`YYYY.M.D`) ensures nightly builds are always semver-
 | Platform | Binary suffix |
 |---|---|
 | macOS Apple Silicon | `macos-aarch64` |
-| macOS Intel | `macos-x86_64` |
 | Linux x86_64 | `linux-x86_64` |
 | Linux aarch64 | `linux-aarch64` |
-
-Windows is not currently built by the nightly CI.
+| Windows x86_64 | `windows-x86_64.exe` |
 
 ## License
 
