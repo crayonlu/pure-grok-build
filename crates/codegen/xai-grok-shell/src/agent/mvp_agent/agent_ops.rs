@@ -1643,20 +1643,63 @@ impl MvpAgent {
     }
     /// Build image generation config.
     ///
-    /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
-    /// `sampling_config.api_key` carries the OAuth bearer for session users (the
-    /// `api_key_provider` refreshes it per request), so IC authenticates and
-    /// meters Imagine usage per-user.
+    /// When `[image_gen]` is present in config.toml, uses the provider-agnostic
+    /// configuration (own base_url, env_key-resolved credentials, and API
+    /// format) instead of piggybacking on the primary model's key + x.ai
+    /// endpoint. Falls back to the original x.ai Imagine behavior otherwise.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        let cfg = self.cfg.borrow();
+
+        // Provider-agnostic path: [image_gen] config section present.
+        if let Some(ref provider) = cfg.image_gen {
+            // Resolve credentials: literal api_key first, then env_key.
+            let api_key = provider.api_key.clone().or_else(|| {
+                provider
+                    .env_key
+                    .as_deref()
+                    .and_then(|name| {
+                        std::env::var(name)
+                            .ok()
+                            .filter(|k| !k.trim().is_empty())
+                    })
+            });
+            let Some(api_key) = api_key else {
+                tracing::warn!(
+                    "image_gen disabled: no API key resolved from [image_gen] config \
+                     (checked api_key field and env_key)"
+                );
+                return ImageGenConfig::Disabled;
+            };
+
+            let version = cfg
+                .client_version
+                .clone()
+                .unwrap_or_else(|| xai_grok_version::VERSION.to_string());
+            let mut headers = indexmap::IndexMap::new();
+            headers.insert("user-agent".to_string(), format!("xai-grok-build/{version}"));
+
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url: provider.base_url.clone(),
+                extra_headers: headers,
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: None,
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: Some(provider.clone()),
+            };
+        }
+
+        // Original x.ai Imagine path (fallback).
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
         };
         let tier_restricted = self.is_tier_restricted_capability();
-        let cfg = self.cfg.borrow();
         let base_url = cfg.endpoints.xai_api_base_url.clone();
         let version = cfg
             .client_version
@@ -1680,6 +1723,7 @@ impl MvpAgent {
             model_override: cfg.resolve_image_gen_model_override(),
             edit_model_override: cfg.resolve_image_edit_model_override(),
             tier_restricted,
+            provider: None,
         }
     }
     /// Build deploy-service config. The tool talks directly to the deployer service.

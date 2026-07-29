@@ -26,6 +26,107 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
+// ---------------------------------------------------------------------------
+// Provider-agnostic image generation configuration
+// ---------------------------------------------------------------------------
+
+/// How the size/aspect-ratio is represented in the request body.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeFormat {
+    /// Pixel dimensions, e.g. `"1024x1024"`. Requires `size_map` to
+    /// translate Grok aspect ratios into provider-specific pixel strings.
+    #[default]
+    Dimensions,
+    /// Aspect ratio string, e.g. `"1:1"`. Passed through as-is.
+    Ratio,
+}
+
+/// How the HTTP response carries the generated image.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    /// Image bytes are base64-encoded inline in the JSON response.
+    #[default]
+    Base64,
+    /// The response contains a URL that must be downloaded to get the bytes.
+    Url,
+}
+
+/// How the `image` parameter is formatted in edit requests.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditImageFormat {
+    /// Plain data-URL string: `"data:image/png;base64,..."`.
+    #[default]
+    String,
+    /// Wrapped in an object: `{"url": "data:image/png;base64,..."}`.
+    ObjectUrl,
+}
+
+/// Provider-agnostic image generation API configuration. All fields have
+/// x.ai-compatible defaults so a partial `[image_gen]` section works for
+/// any Imagine-compatible API.
+///
+/// Credentials (`env_key` / `api_key`) are resolved by the shell; the
+/// tools crate only uses the format fields.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ImageGenProviderConfig {
+    /// Environment variable name(s) holding the API key (shell resolves).
+    pub env_key: Option<String>,
+    /// Literal API key (prefer `env_key` for secrets).
+    pub api_key: Option<String>,
+    /// Base URL, e.g. `"https://api.ppio.com"`.
+    pub base_url: String,
+    /// Path appended to `base_url` for text-to-image.
+    pub gen_path: String,
+    /// Path appended to `base_url` for image edit.
+    pub edit_path: String,
+    /// Request-body field name for the size/aspect-ratio value.
+    pub size_field: String,
+    /// How to represent the size.
+    pub size_format: SizeFormat,
+    /// Extra static key-value pairs merged into every request body.
+    pub extra_fields: indexmap::IndexMap<String, serde_json::Value>,
+    /// How the response carries image data.
+    pub response_mode: ResponseMode,
+    /// Top-level JSON field containing the image data array.
+    pub response_field: String,
+    /// Subfield within each array element. Empty string means the array
+    /// elements are plain strings (URL or base64).
+    pub response_subfield: String,
+    /// How the `image` parameter is formatted in edit requests.
+    pub edit_image_format: EditImageFormat,
+    /// Mapping from Grok aspect-ratio strings to provider size strings.
+    /// Only consulted when `size_format` is `Dimensions`.
+    pub size_map: indexmap::IndexMap<String, String>,
+}
+
+impl ImageGenProviderConfig {
+    /// Build the full URL for a text-to-image request.
+    pub fn gen_url(&self) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), self.gen_path)
+    }
+
+    /// Build the full URL for an image-edit request.
+    pub fn edit_url(&self) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), self.edit_path)
+    }
+
+    /// Map a Grok aspect-ratio string to the provider's size value.
+    pub fn resolve_size<'a>(&'a self, aspect_ratio: &'a str) -> &'a str {
+        match self.size_format {
+            SizeFormat::Ratio => aspect_ratio,
+            SizeFormat::Dimensions => self
+                .size_map
+                .get(aspect_ratio)
+                .map(|s| s.as_str())
+                .unwrap_or("auto"),
+        }
+    }
+}
+
 /// Default Imagine model for `image_gen`. Used unless an explicit
 /// `model_override` is supplied via `ImageGenConfig::Enabled`.
 const XAI_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
@@ -70,6 +171,10 @@ pub struct ImageGenClient {
     /// HTTP call and return the SuperGrok upsell prose instead. See
     /// [`ImageGenClient::is_tier_restricted`].
     tier_restricted: bool,
+    /// Provider-agnostic API format config. When `Some`, the client uses
+    /// the provider's endpoint paths, request body format, and response
+    /// parsing instead of the default x.ai Imagine behavior.
+    provider: Option<ImageGenProviderConfig>,
 }
 
 impl ImageGenClient {
@@ -84,6 +189,7 @@ impl ImageGenClient {
             model_override,
             edit_model_override,
             tier_restricted,
+            provider,
             ..
         } = config
         else {
@@ -149,6 +255,7 @@ impl ImageGenClient {
             api_key_provider,
             attribution_callback: None,
             tier_restricted: *tier_restricted,
+            provider: provider.clone(),
         })
     }
 
@@ -178,6 +285,7 @@ impl ImageGenClient {
         crate::attribution::emit_401(self.attribution_callback.as_ref(), consumer, sent_bearer);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -194,21 +302,157 @@ impl ImageGenClient {
         &self.edit_model
     }
 
+    /// Provider-agnostic API format config, if any.
+    pub(crate) fn provider(&self) -> Option<&ImageGenProviderConfig> {
+        self.provider.as_ref()
+    }
+
+    /// Build the full URL for a text-to-image request.
+    pub(crate) fn gen_url(&self) -> String {
+        match &self.provider {
+            Some(p) => p.gen_url(),
+            None => format!("{}/images/generations", self.base_url.trim_end_matches('/')),
+        }
+    }
+
+    /// Build the full URL for an image-edit request.
+    pub(crate) fn edit_url(&self) -> String {
+        match &self.provider {
+            Some(p) => p.edit_url(),
+            None => format!("{}/images/edits", self.base_url.trim_end_matches('/')),
+        }
+    }
+
+    /// Build the request body for a text-to-image call.
+    pub(crate) fn build_gen_payload(&self, prompt: &str, aspect_ratio: &str) -> serde_json::Value {
+        match &self.provider {
+            Some(p) => {
+                let mut payload = serde_json::json!({ "prompt": prompt });
+                let size_value = p.resolve_size(aspect_ratio);
+                payload[p.size_field.clone()] = serde_json::Value::String(size_value.to_string());
+                for (k, v) in &p.extra_fields {
+                    payload[k.clone()] = v.clone();
+                }
+                payload
+            }
+            None => serde_json::json!({
+                "model": self.model,
+                "prompt": prompt,
+                "n": 1,
+                "aspect_ratio": aspect_ratio,
+                "resolution": "1k",
+                "response_format": "b64_json",
+            }),
+        }
+    }
+
+    /// Extract image bytes from an HTTP response body. Handles both
+    /// base64-inline and URL-download modes depending on the provider config.
+    pub(crate) async fn extract_image_bytes(
+        &self,
+        body: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        match &self.provider {
+            Some(p) => {
+                let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+                    let preview: String = body.chars().take(500).collect();
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Failed to parse image generation response: {e} — body preview: {preview}"
+                    ))
+                })?;
+                let arr = json
+                    .get(&p.response_field)
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| {
+                        xai_tool_runtime::ToolError::invalid_arguments(format!(
+                            "Image response missing '{}' array field",
+                            p.response_field
+                        ))
+                    })?;
+                let first = arr.first().ok_or_else(|| {
+                    xai_tool_runtime::ToolError::invalid_arguments(
+                        "Image generation returned no image data.".to_string(),
+                    )
+                })?;
+                let data_str = if p.response_subfield.is_empty() {
+                    first.as_str().ok_or_else(|| {
+                        xai_tool_runtime::ToolError::invalid_arguments(
+                            "Image response array element is not a string".to_string(),
+                        )
+                    })?
+                } else {
+                    first
+                        .get(&p.response_subfield)
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Image response missing '{}' subfield",
+                                p.response_subfield
+                            ))
+                        })?
+                };
+                match p.response_mode {
+                    ResponseMode::Base64 => base64::engine::general_purpose::STANDARD
+                        .decode(data_str)
+                        .map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to decode base64 image data: {e}"
+                            ))
+                        }),
+                    ResponseMode::Url => {
+                        let download_client = reqwest::Client::new();
+                        let resp = download_client.get(data_str).send().await.map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to download image from URL: {e}"
+                            ))
+                        })?;
+                        if !resp.status().is_success() {
+                            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Image download failed with HTTP {}",
+                                resp.status()
+                            )));
+                        }
+                        let bytes = resp.bytes().await.map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to read image download body: {e}"
+                            ))
+                        })?;
+                        Ok(bytes.to_vec())
+                    }
+                }
+            }
+            None => {
+                let resp_json: ImageGenResponse = serde_json::from_str(body).map_err(|e| {
+                    let preview: String = body.chars().take(500).collect();
+                    tracing::warn!("Imagine API returned unparseable body: {preview}");
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Failed to parse image generation response: {e} — body preview: {preview}"
+                    ))
+                })?;
+                let b64_data = resp_json.b64_data().unwrap_or("");
+                if b64_data.is_empty() {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "Image generation returned no image data.".to_string(),
+                    ));
+                }
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64_data)
+                    .map_err(|e| {
+                        xai_tool_runtime::ToolError::invalid_arguments(format!(
+                            "Failed to decode base64 image data: {e}"
+                        ))
+                    })
+            }
+        }
+    }
+
     pub async fn generate(
         &self,
         prompt: &str,
         aspect_ratio: &str,
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
-        let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
-
-        let payload = serde_json::json!({
-            "model": self.model,
-            "prompt": prompt,
-            "n": 1,
-            "aspect_ratio": aspect_ratio,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
+        let url = self.gen_url();
+        let payload = self.build_gen_payload(prompt, aspect_ratio);
 
         // Capture the bearer once so the request and the 401-attribution
         // emit see the same value (even if the provider rotates between
@@ -246,29 +490,7 @@ impl ImageGenClient {
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image generation response: {e} — body preview: {preview}"
-            ))
-        })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image generation returned no image data.",
-            ));
-        }
-
-        base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
-                ))
-            })
+        self.extract_image_bytes(&body).await
     }
 }
 
@@ -296,6 +518,10 @@ pub enum ImageGenConfig {
         /// host from the subscription tier; always `false` for team /
         /// API-key / workspace callers.
         tier_restricted: bool,
+        /// Provider-agnostic API format config. When `Some`, overrides the
+        /// default x.ai Imagine behavior with a configurable endpoint,
+        /// request body, and response format.
+        provider: Option<ImageGenProviderConfig>,
     },
 }
 
@@ -511,6 +737,7 @@ mod tests {
             model_override: Some("grok-imagine-image".into()),
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
         };
         assert!(cfg.has_credentials());
         assert!(!cfg.image_gen_enabled());
@@ -531,6 +758,7 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
         };
         let hdrs = |cfg: &ImageGenConfig| match cfg {
             ImageGenConfig::Enabled { extra_headers, .. } => extra_headers.clone(),
@@ -569,6 +797,7 @@ mod tests {
             model_override: model_override.map(String::from),
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
         };
         // No override → default quality model.
         assert_eq!(
@@ -600,6 +829,7 @@ mod tests {
             model_override: None,
             edit_model_override: edit_model_override.map(String::from),
             tier_restricted: false,
+            provider: None,
         };
         assert_eq!(
             ImageGenClient::new(&mk(None), None).unwrap().edit_model(),
@@ -653,6 +883,7 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: true,
+            provider: None,
         };
         let mut resources = crate::types::resources::Resources::new();
         resources.insert(ImageGenClient::new(&cfg, None).unwrap());
