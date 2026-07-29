@@ -157,17 +157,29 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
 $Channel = if ($env:GROK_CHANNEL) { $env:GROK_CHANNEL } else { 'stable' }
 
-# Pick a working BaseUrl: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no -Version was passed, so the happy path costs zero extra requests.
-if (-not $Version) { Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray }
-$probeResult = Download-String "$BaseUrlPrimary/$Channel"
-if ($probeResult) {
-    $BaseUrl = $BaseUrlPrimary
-} else {
-    Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
-    $BaseUrl = $BaseUrlFallback
+# Pick a working BaseUrl. When GROK_CLI_BASE_URL is set (self-hosted releases),
+# use it alone with no upstream fallback. Otherwise probe the Cloudflare-fronted
+# x.ai endpoint first and fall back to direct GCS if it's unreachable. The probe
+# doubles as the channel-pointer fetch when no -Version was passed, so the happy
+# path costs zero extra requests.
+if ($env:GROK_CLI_BASE_URL) {
+    $BaseUrl = $env:GROK_CLI_BASE_URL
+    if (-not $Version) { Write-Host "Fetching latest $Channel version from $BaseUrl..." -ForegroundColor DarkGray }
     $probeResult = Download-String "$BaseUrl/$Channel"
+} elseif (-not $Version) {
+    Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray
+    $probeResult = Download-String "$BaseUrlPrimary/$Channel"
+    if ($probeResult) {
+        $BaseUrl = $BaseUrlPrimary
+    } else {
+        Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
+        $BaseUrl = $BaseUrlFallback
+        $probeResult = Download-String "$BaseUrl/$Channel"
+    }
+} else {
+    # A specific -Version was requested and GROK_CLI_BASE_URL is unset: defer
+    # base selection to the download step using the primary endpoint.
+    $BaseUrl = $BaseUrlPrimary
 }
 
 if ($Version) {
