@@ -39,7 +39,10 @@ fn manual_install_cmd() -> &'static str {
 fn reinstall_hint(installer: &str) -> String {
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        "gh-release" => format!(
+            "Please reinstall via GitHub Releases:\n  gh release download --repo {} --pattern 'grok-*' --output grok && chmod +x grok",
+            crate::version::gh_release_repo()
+        ),
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
@@ -2103,7 +2106,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     Ok(())
 }
 
-/// Download and install grok from GitHub Releases (xai-org-shared/grok-build).
+/// Download and install grok from the configured GitHub Releases repository.
 ///
 /// Uses `gh release download` to fetch the binary matching the current platform.
 /// This works anywhere the `gh` CLI is authenticated, without needing npm or
