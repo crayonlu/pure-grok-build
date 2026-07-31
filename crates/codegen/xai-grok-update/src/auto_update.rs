@@ -2361,6 +2361,52 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
 /// binary (see the pager's post-update leader relaunch) — that signal must
 /// fire even when the download itself was skipped, so a stale leader still
 /// picks up a binary someone else installed.
+/// Fetch release notes for a given version from the fork's GitHub Releases.
+///
+/// Uses the `GROK_UPDATE_REPO` env var to determine the repo
+/// (e.g. `crayonlu/pure-grok-build`). If not set, returns `None` and the
+/// changelog display is silently skipped.
+///
+/// Calls the GitHub REST API:
+///   `GET https://api.github.com/repos/{owner}/{repo}/releases/tags/v{version}`
+///
+/// Unauthenticated requests are fine for personal forks (60 req/hour per IP).
+/// On any error (network, rate limit, non-200, parse failure) returns `None`.
+async fn fetch_release_notes(version: &str) -> Option<String> {
+    let repo = std::env::var("GROK_UPDATE_REPO").ok()?;
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/v{}",
+        repo, version
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "grok-build-updater")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("body")
+        .and_then(|b| b.as_str())
+        .map(|s| s.to_string())
+}
+
 pub async fn run_update(
     force: bool,
     pinned_version: Option<&str>,
@@ -2527,9 +2573,24 @@ pub async fn run_update(
         );
         &effective_current
     } else {
-        eprintln!("Updating Grok {} → {}", effective_current, install_target);
+        eprintln!("Updating Grok {} -> {}", effective_current, install_target);
         &install_target
     };
+
+    // Best-effort: fetch and display release notes from GitHub Releases.
+    // Requires GROK_UPDATE_REPO to be set (e.g. "crayonlu/pure-grok-build").
+    // Silently skipped if not set or if the API call fails.
+    if let Some(notes) = fetch_release_notes(&install_target).await {
+        eprintln!();
+        eprintln!("  ── Changes ──");
+        for line in notes.lines().take(20) {
+            let line = line.trim();
+            if !line.is_empty() {
+                eprintln!("  {}", line);
+            }
+        }
+        eprintln!();
+    }
 
     eprintln!();
     run_install_script(installer, Some(target_version), update_config).await?;

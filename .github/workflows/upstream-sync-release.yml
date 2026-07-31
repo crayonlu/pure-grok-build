@@ -336,21 +336,31 @@ jobs:
           version="${{ needs.sync.outputs.version }}"
           tag="${{ needs.sync.outputs.tag }}"
           title="Grok nightly ${{ needs.sync.outputs.date }} (${version})"
+
+          # Generate changelog from git log since the previous tag.
+          prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")"
+          if [[ -n "${prev_tag}" ]]; then
+            changelog="$(git log --oneline --no-merges "${prev_tag}..HEAD" | head -30)"
+          else
+            changelog="(first release)"
+          fi
+
           notes="$(cat <<EOF
+          ## Changes
+
+          ${changelog}
+
+          ---
+
           Automated nightly build synced from [xai-org/grok-build@main](https://github.com/xai-org/grok-build/commit/${{ needs.sync.outputs.upstream_sha }}).
 
           - Version: ${version}
           - Upstream commit: ${{ needs.sync.outputs.upstream_sha }}
 
-          Two kinds of assets are attached:
+          Update channels:
 
-          1. Raw binaries named \`grok-<version>-<platform>\` (e.g. \`grok-${version}-macos-aarch64\`) — the exact object name the in-app auto-updater downloads. These are what the self-hosted update flow consumes.
-          2. \`*-bundle.tar.gz\` archives for manual download, each containing the binary plus \`SOURCE_REV\` and a \`VERSION\` manifest.
-
-          Update channels (set one before launching grok):
-
-          - \`GROK_UPDATE_REPO\` — point the auto-updater at this fork's GitHub Releases directly: the updater runs \`gh release list --repo <repo>\` and downloads the matching raw binary.
-          - \`GROK_CLI_BASE_URL\` - the updater fetches \`<base>/stable\` for the version and \`<base>/grok-<version>-<platform>\` for the binary. This fork mirrors all artifacts to \`${R2_PUBLIC_BASE_URL}\` on Cloudflare R2 - set \`export GROK_CLI_BASE_URL=${R2_PUBLIC_BASE_URL}\` to use it.
+          - \`GROK_CLI_BASE_URL\` - set to \`${R2_PUBLIC_BASE_URL}\` to download binaries from Cloudflare R2.
+          - \`GROK_UPDATE_REPO\` - set to this repo to enable changelog display during \`grok update\`.
           EOF
           )"
           if gh release view "${tag}" >/dev/null 2>&1; then

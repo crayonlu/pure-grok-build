@@ -30,8 +30,9 @@ curl -fSL -o grok "https://grok.cyncyn.xyz/cli/grok-${VERSION}-macos-aarch64"
 chmod +x grok
 sudo mv grok /usr/local/bin/grok    # or anywhere on your PATH
 
-# 4. Enable auto-updates from the R2 mirror
+# 4. Enable auto-updates from the R2 mirror + changelog display
 echo 'export GROK_CLI_BASE_URL=https://grok.cyncyn.xyz/cli' >> ~/.zshrc
+echo 'export GROK_UPDATE_REPO=crayonlu/pure-grok-build' >> ~/.zshrc
 source ~/.zshrc
 
 grok --version
