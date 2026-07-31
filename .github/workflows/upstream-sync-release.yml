@@ -411,10 +411,12 @@ jobs:
 
           # Upload channel pointer with no-cache so version updates propagate
           # immediately (the updater fetches this on every version check).
-          if [[ -f "assets/stable" ]]; then
+          # Note: the `stable` file is created by `echo "${version}" > stable`
+          # in the release step above (current directory), not in assets/.
+          if [[ -f "stable" ]]; then
             echo "  Uploading channel pointer -> ${R2_BUCKET}/cli/stable"
             wrangler r2 object put "${R2_BUCKET}/cli/stable" \
-              --file="assets/stable" \
+              --file="stable" \
               --content-type="text/plain" \
               --cache-control="no-cache"
           fi
