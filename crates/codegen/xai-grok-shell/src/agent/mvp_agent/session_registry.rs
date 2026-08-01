@@ -157,6 +157,17 @@ impl SessionRegistry {
         }
         events
     }
+    /// Mark the session as requiring a gateway (test-only; the production
+    /// path stamps `ResidentResources::require_gateway` when a gateway
+    /// session is registered). Upstream calls this from
+    /// `remove_session_releases_workspace_binding_and_side_maps` without a
+    /// definition — fixed here.
+    #[cfg(test)]
+    pub(super) fn mark_require_gateway(&self, id: &acp::SessionId) {
+        self.edit(id, |e| {
+            e.resident.get_or_insert_default().require_gateway = true;
+        });
+    }
     pub(super) fn set_codebase_index(
         &self,
         id: &acp::SessionId,
