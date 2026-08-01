@@ -316,7 +316,11 @@ impl acp::Agent for MvpAgent {
             }),
             ),
         );
-        let mut has_cached_token = init_has_current;
+        // Open mode is API-key/BYOK-first: a stale `~/.grok/auth.json` from
+        // an earlier xAI login must not silently win auth-method selection and
+        // route the session back through the first-party proxy.  The
+        // compatibility mode keeps the upstream cached-token behavior.
+        let mut has_cached_token = !self.cfg.borrow().fork.is_open() && init_has_current;
         if !self.cfg.borrow().fork.is_open() && !init_has_current && init_is_expired {
             let refreshed = matches!(
                 tokio::time::timeout(

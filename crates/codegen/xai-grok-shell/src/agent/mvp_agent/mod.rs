@@ -2050,6 +2050,13 @@ impl MvpAgent {
             maybe_sync_bundle_to_root,
         };
         use std::sync::atomic::Ordering;
+        // The bundle endpoint is an xAI/cli-chat-proxy service, not a
+        // provider-neutral model API.  Never contact it implicitly in the
+        // open fork; users who need Grok's managed bundle can opt into
+        // `GROK_FORK_MODE=xai_compat`.
+        if self.cfg.borrow().fork.is_open() {
+            return;
+        }
         let am = self.auth_manager.clone();
         let deployment_key = self.deployment_key();
         if !has_bundle_credentials(Some(&am), deployment_key.as_deref()) {
