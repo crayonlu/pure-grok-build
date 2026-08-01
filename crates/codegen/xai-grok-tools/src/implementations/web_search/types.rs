@@ -1,18 +1,5 @@
 use indexmap::IndexMap;
 
-/// Wire protocol used by the web-search adapter.
-///
-/// xAI exposes search as an OpenAI Responses tool, while PPIO exposes a
-/// standalone `POST /v3/web-search` endpoint. Keeping this distinction in the
-/// config prevents a custom key from being sent to an incompatible endpoint.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebSearchBackend {
-    #[default]
-    XaiResponses,
-    Ppio,
-}
-
 /// Configuration for the web search tool.
 ///
 /// Use `Disabled` when no API key is available or web search should be turned off.
@@ -26,8 +13,6 @@ pub enum WebSearchConfig {
         api_key: String,
         base_url: String,
         model: String,
-        #[serde(default)]
-        backend: WebSearchBackend,
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         extra_headers: IndexMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,14 +36,12 @@ impl WebSearchConfig {
             Self::Enabled {
                 base_url,
                 model,
-                backend,
                 extra_headers,
                 ..
             } => Self::Enabled {
                 api_key: "***REDACTED***".to_string(),
                 base_url: base_url.clone(),
                 model: model.clone(),
-                backend: *backend,
                 extra_headers: extra_headers.clone(),
                 alpha_test_key: None,
             },
@@ -82,7 +65,6 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "test-web-search-model".to_string(),
-            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
@@ -97,7 +79,6 @@ mod tests {
             api_key: "secret-key-12345".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "test-web-search-model".to_string(),
-            backend: WebSearchBackend::XaiResponses,
             extra_headers: headers,
             alpha_test_key: Some("alpha-secret".to_string()),
         };
@@ -107,14 +88,12 @@ mod tests {
                 api_key,
                 base_url,
                 model,
-                backend,
                 extra_headers,
                 alpha_test_key,
             } => {
                 assert_eq!(api_key, "***REDACTED***");
                 assert_eq!(base_url, "https://api.x.ai/v1");
                 assert_eq!(model, "test-web-search-model");
-                assert_eq!(backend, WebSearchBackend::XaiResponses);
                 assert_eq!(extra_headers.get("X-Custom").unwrap(), "value");
                 assert!(alpha_test_key.is_none());
             }
@@ -128,7 +107,6 @@ mod tests {
             api_key: "key".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "test-web-search-model".to_string(),
-            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };

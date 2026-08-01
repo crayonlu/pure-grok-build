@@ -77,7 +77,7 @@ pub struct ImageGenProviderConfig {
     pub env_key: Option<String>,
     /// Literal API key (prefer `env_key` for secrets).
     pub api_key: Option<String>,
-    /// Base URL, e.g. `"https://api.ppio.com"`.
+    /// Base URL for an explicitly configured image-generation endpoint.
     pub base_url: String,
     /// Path appended to `base_url` for text-to-image.
     pub gen_path: String,

@@ -483,30 +483,13 @@ pub(crate) async fn spawn_session_actor(
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(cfg) = web_search_sampling_config {
         if let Some(api_key) = cfg.api_key {
-            let backend = if crate::util::is_xai_api_url(&cfg.base_url)
-                || crate::util::is_cli_chat_proxy_url(&cfg.base_url)
-            {
-                Some(xai_grok_tools::implementations::WebSearchBackend::XaiResponses)
-            } else if is_ppio_endpoint(&cfg.base_url) {
-                Some(xai_grok_tools::implementations::WebSearchBackend::Ppio)
-            } else {
-                tracing::warn!(
-                    base_url = %cfg.base_url,
-                    "web_search disabled: custom endpoint has no registered search protocol"
-                );
-                None
-            };
-            backend.map_or(
-                xai_grok_tools::implementations::WebSearchConfig::Disabled,
-                |backend| xai_grok_tools::implementations::WebSearchConfig::Enabled {
-                    api_key,
-                    base_url: cfg.base_url,
-                    model: cfg.model,
-                    backend,
-                    extra_headers: cfg.extra_headers,
-                    alpha_test_key: credentials.alpha_test_key.clone(),
-                },
-            )
+            xai_grok_tools::implementations::WebSearchConfig::Enabled {
+                api_key,
+                base_url: cfg.base_url,
+                model: cfg.model,
+                extra_headers: cfg.extra_headers,
+                alpha_test_key: credentials.alpha_test_key.clone(),
+            }
         } else {
             tracing::warn!("web_search disabled: resolved config has no API key");
             xai_grok_tools::implementations::WebSearchConfig::Disabled
@@ -2160,12 +2143,6 @@ pub(crate) async fn spawn_session_actor(
     ))
 }
 
-fn is_ppio_endpoint(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "ppio.com" || host.ends_with(".ppio.com"))
-}
 /// Handle for a session's dedicated thread. Stored separately from `SessionHandle`
 /// (which derives `Clone`) because `JoinHandle` is not `Clone`.
 pub struct SessionThread {

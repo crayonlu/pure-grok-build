@@ -2,4 +2,4 @@ pub mod client;
 mod tool;
 mod types;
 
-pub use types::{WebSearchBackend, WebSearchConfig};
+pub use types::WebSearchConfig;

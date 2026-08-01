@@ -152,8 +152,8 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
                     request
                 };
                 // These headers are private xAI proxy metadata. A custom
-                // OpenAI-compatible provider (for example PPIO) must receive
-                // only the standard Authorization/body contract.
+                // OpenAI-compatible endpoints must receive only the standard
+                // Authorization/body contract.
                 let request = if is_xai_owned_url(&self.api_base) {
                     request
                         .header("X-XAI-Token-Auth", "xai-grok-cli")
