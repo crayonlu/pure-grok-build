@@ -6,13 +6,8 @@ use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::AppView;
 use crate::scrollback::block::RenderBlock;
-use std::time::Duration;
-use xai_grok_telemetry::events::{SuperGrokUpsell, SuperGrokUpsellClicked};
+use xai_grok_telemetry::events::SuperGrokUpsell;
 use xai_grok_telemetry::session_ctx::log_event;
-
-/// How long the pager auto-checks subscription status before stopping.
-/// After this, the user can still manually check via the [Refresh] button.
-pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
 ///
@@ -387,97 +382,6 @@ pub(super) fn handle_billing_fetched(
     vec![]
 }
 
-pub(super) fn handle_gate_refreshed(
-    app: &mut AppView,
-    settings: Option<xai_grok_shell::util::config::RemoteSettings>,
-) -> Vec<Effect> {
-    let Some(rs) = settings else {
-        return vec![];
-    };
-    app.usage_billing_redirect_url = rs.usage_billing_redirect_url.clone();
-    if let Some(secs) = rs.subscription_watch_interval_secs {
-        app.subscription_watch_interval_secs = Some(secs);
-    }
-    match AppView::gate_from_settings(&rs) {
-        Some(gate) => app.impose_gate(gate),
-        None => app.lift_gate(),
-    }
-}
-
-/// `x.ai/auth/check_subscription` completed. Meta is authoritative
-/// (`apply_auth_meta` also drops any deferred gate). A failed check only
-/// promotes the deferred gate it was verifying (`verify` generation);
-/// generic watch/focus/paywall-chain failures never touch it.
-pub(super) fn handle_check_subscription_complete(
-    app: &mut AppView,
-    verify: Option<u64>,
-    meta: Option<serde_json::Value>,
-) -> Vec<Effect> {
-    let was_blocked = !app.has_access();
-    let applied = match meta {
-        Some(meta_val) => {
-            match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta_val) {
-                Ok(auth_meta) => {
-                    app.apply_auth_meta(&auth_meta);
-                    true
-                }
-                Err(e) => {
-                    // Shell sent meta we can't decode — a protocol bug, not
-                    // a transient failure. The check result is lost, so a
-                    // verify deferral falls through to promotion below.
-                    crate::unified_log::error(
-                        "subscription.check.meta_parse_failed",
-                        None,
-                        Some(serde_json::json!({
-                            "verify": verify,
-                            "error": e.to_string(),
-                        })),
-                    );
-                    false
-                }
-            }
-        }
-        // meta: None = shell reports "not authenticated" or the check RPC
-        // failed (already logged as subscription.check.rpc_failed).
-        None => false,
-    };
-    if !applied && let Some(generation) = verify {
-        app.promote_deferred_gate(generation, "check_failed");
-    }
-    crate::unified_log::info(
-        "subscription.check.complete",
-        None,
-        Some(serde_json::json!({
-            "verify": verify,
-            "meta_applied": applied,
-            "was_blocked": was_blocked,
-            "gated": !app.has_access(),
-            "tier": app.subscription_tier,
-        })),
-    );
-    maybe_start_paywall_chain(app, was_blocked)
-}
-
-/// Safety net for a hung verification check: show the still-pending
-/// deferred gate (err on blocking).
-pub(super) fn handle_gate_verify_timeout(app: &mut AppView, generation: u64) -> Vec<Effect> {
-    let was_blocked = !app.has_access();
-    app.promote_deferred_gate(generation, "verify_timeout");
-    maybe_start_paywall_chain(app, was_blocked)
-}
-
-/// Arm the 5s paywall auto-check chain on an ungated→gated transition, so a
-/// paywall shown by verify-before-paywall self-lifts exactly like the
-/// login-path one. Guarded so steady-state paywall-poller responses and
-/// repeated checks can't fan out extra timers.
-fn maybe_start_paywall_chain(app: &mut AppView, was_blocked: bool) -> Vec<Effect> {
-    if !was_blocked && !app.has_access() && app.paywall_check_started.is_none() {
-        app.paywall_check_started = Some(std::time::Instant::now());
-        return vec![Effect::SchedulePaywallCheck];
-    }
-    vec![]
-}
-
 pub(super) fn handle_credit_limit_recheck_complete(
     app: &mut AppView,
     agent_id: AgentId,
@@ -527,27 +431,4 @@ pub(super) fn handle_credit_limit_recheck_complete(
     });
     note_peek_page_flip(app, agent_id, drain.page_flip_entry);
     drain.effects
-}
-
-// Action handlers.
-
-pub(super) fn dispatch_open_supergrok_url(app: &mut AppView) -> Vec<Effect> {
-    log_event(SuperGrokUpsellClicked {
-        source: SuperGrokUpsell::WelcomeScreen,
-        auth_method: app.login_method_id.as_ref().map(|id| id.0.to_string()),
-    });
-    let url = app
-        .gate
-        .as_ref()
-        .and_then(|g| g.url.as_deref())
-        .unwrap_or("https://grok.com/supergrok?referrer=grok-build");
-    // Funnel attribution: tag CLI-originated SuperGrok upsell clicks
-    // with `referrer=grok-build`, matching the OAuth consent flow and
-    // x.ai/cli marketing links. Applied even when the URL came from
-    // remote settings's `gate_url`, so we don't depend on the remote flag
-    // being correctly configured. If the URL already specifies a
-    // referrer it's left alone.
-    let url = crate::app::link_opener::ensure_query_param(url, "referrer", "grok-build");
-    super::ctx::open_url_or_show(app, &url);
-    vec![]
 }

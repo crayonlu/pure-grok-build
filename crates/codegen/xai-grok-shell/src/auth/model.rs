@@ -390,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(auth_issuer_env)]
     fn is_xai_auth_matrix() {
         use crate::auth::XAI_OAUTH2_ISSUER;
         let with_issuer = |mode: AuthMode, issuer: Option<&str>| GrokAuth {
@@ -408,6 +409,33 @@ mod tests {
         // ApiKey / WebLogin stay false even with an x.ai issuer set.
         assert!(!with_issuer(AuthMode::ApiKey, Some(XAI_OAUTH2_ISSUER)).is_xai_auth());
         assert!(!with_issuer(AuthMode::WebLogin, Some(XAI_OAUTH2_ISSUER)).is_xai_auth());
+    }
+
+    /// When `GROK_OAUTH2_ISSUER` is explicitly set (self-hosted IdP), a token
+    /// minted against it classifies as first-party so refresh and auth
+    /// classification work; unset keeps the upstream allowlist.
+    #[test]
+    #[serial_test::serial(auth_issuer_env)]
+    fn is_xai_auth_honors_env_oauth2_issuer() {
+        use crate::env::EnvVarGuard;
+        let with_issuer = |issuer: Option<&str>| GrokAuth {
+            oidc_issuer: issuer.map(str::to_owned),
+            ..make_auth(AuthMode::Oidc)
+        };
+
+        // A single guard for the whole test: `EnvVarGuard` holds the global
+        // env mutex, so nested guards would deadlock. Update in place instead.
+        let g = EnvVarGuard::set("GROK_OAUTH2_ISSUER", "https://idp.acme.example");
+        assert!(with_issuer(Some("https://idp.acme.example")).is_xai_auth());
+        // Trailing-slash env and stored issuer normalize to the same value.
+        g.set_value("https://idp.acme.example/");
+        assert!(with_issuer(Some("https://idp.acme.example")).is_xai_auth());
+        // Unrelated issuers still rejected.
+        assert!(!with_issuer(Some("https://other.example")).is_xai_auth());
+        drop(g);
+
+        let _g = EnvVarGuard::remove("GROK_OAUTH2_ISSUER");
+        assert!(!with_issuer(Some("https://idp.acme.example")).is_xai_auth());
     }
 
     #[test]

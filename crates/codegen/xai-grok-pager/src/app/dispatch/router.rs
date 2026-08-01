@@ -3,7 +3,6 @@ use super::auth::{
     dispatch_cancel_login, dispatch_login, dispatch_logout, dispatch_submit_auth_code,
     dispatch_switch_account,
 };
-use super::billing::dispatch_open_supergrok_url;
 use super::ctx::{
     active_agent_session_id, get_active_agent_mut, navigate_clearing_selection, open_url_or_show,
     sync_sleep_inhibitor, with_active_agent, with_scrollback,
@@ -1080,8 +1079,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PermissionCancel => dispatch_permission_cancel(app),
         Action::Logout => dispatch_logout(app),
         Action::SwitchAccount => dispatch_switch_account(app),
-        Action::CheckSubscription => vec![Effect::CheckSubscription { verify: None }],
-        Action::OpenSupergrokUrl => dispatch_open_supergrok_url(app),
         Action::OpenUrl(url) => {
             if url.starts_with("file://") {
                 let opened = url::Url::parse(&url)

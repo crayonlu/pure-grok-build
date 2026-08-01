@@ -537,38 +537,6 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
         .map(|ms| Duration::from_millis(ms.min(ESC_DOUBLE_PRESS_TEST_MS)))
         .unwrap_or(PendingAction::ESC_DOUBLE_PRESS_TTL)
 }
-/// Slash commands unavailable on the free and X Basic subscription tiers.
-///
-/// To restrict another command for these tiers, add its canonical name
-/// (no leading `/`) here — matching covers aliases automatically via
-/// [`crate::slash::registry::CommandRegistry::set_restricted_commands`].
-///
-/// Current set:
-/// - `usage` — coding credit / billing UI (alias: `/cost`)
-/// - `imagine` — image generation entry point
-/// - `imagine-video` — video generation entry point
-/// - `voice` — voice dictation entry point (the Ctrl+Space / F8 keybinding is
-///   gated separately in [`crate::app::dispatch::voice`], since it bypasses the
-///   slash registry)
-pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] =
-    &["usage", "imagine", "imagine-video", "voice"];
-/// Whether a subscription-tier display name is a tier with restricted
-/// commands: the free tier (no subscription ⇒ `None`, or an explicit
-/// "Free") and X Basic (CCP display name "X Basic"; JWT claim fallback
-/// "x_basic"). Everything else — paid tiers and unknown future names —
-/// is unrestricted (fail-open).
-///
-/// The string classification is shared with the shell's capability
-/// (toolset) gate via [`xai_grok_shell::tier::is_restricted_tier_name`] so
-/// the two can't drift. The pager's *cosmetic* slash-command gate treats an
-/// absent tier (`None`) as restricted (it recovers live on the next settings
-/// update); the shell's capability gate treats absence as unrestricted.
-fn is_restricted_tier(tier: Option<&str>) -> bool {
-    match tier {
-        None => true,
-        Some(t) => xai_grok_shell::tier::is_restricted_tier_name(t),
-    }
-}
 /// True for API-key labels from shell/CCP: `"ApiKey"`, `"API Key"`, `"api_key"`.
 pub(crate) fn is_api_key_label(s: &str) -> bool {
     s.trim().to_ascii_lowercase().replace([' ', '_', '-'], "") == "apikey"
@@ -700,11 +668,10 @@ pub struct AppView {
     /// External `auth_provider_command` deployment.
     /// No grok.com billing session exists; `/usage` and credit UI stay off.
     pub has_external_auth_provider: bool,
-    /// Slash commands denied for the current subscription tier
-    /// ([`TIER_RESTRICTED_COMMANDS`] when the user is on the free / X Basic
-    /// tier, empty otherwise). Recomputed by [`Self::apply_tier_restrictions`]
-    /// and fanned out to every slash registry (welcome prompt, agents,
-    /// dashboard); deny wins over all other visibility gates.
+    /// Legacy slash-command deny list retained for ACP/session shape
+    /// compatibility. The BYOK fork does not populate it from subscription
+    /// tiers, so it remains empty unless a caller supplies an explicit local
+    /// policy.
     pub tier_restricted_commands: Vec<String>,
     /// Whether the pager is connected via a leader (leader mode). The Agent
     /// Dashboard entry points (`/dashboard`, `Ctrl+\`, `grok dashboard`, the
@@ -855,8 +822,12 @@ pub struct AppView {
     /// Hit-test rect for the "show full URL" fallback link.
     pub welcome_auth_fallback_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the "[Refresh]" button on the paywall tier line.
+    /// Fork: kept for shape tolerance; the paywall click handler was removed.
+    #[allow(dead_code)]
     pub welcome_refresh_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the gate URL link on the paywall CTA.
+    /// Fork: kept for shape tolerance; the paywall click handler was removed.
+    #[allow(dead_code)]
     pub welcome_gate_url_rect: Option<ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
     /// (click → `AnnouncementsOpenCta(Welcome)`).
@@ -1113,7 +1084,6 @@ pub struct AppView {
     /// `grok_build_usage_redirect_url`, targeted at personal-team users).
     /// `None` (default) fetches usage from the backend.
     pub usage_billing_redirect_url: Option<String>,
-    pub access_gate_shown_logged: bool,
     /// (hide-key, surface) pairs whose `AnnouncementCtaShown` impression was
     /// already logged — once per pager process, cleared on logout. Keyed by
     /// `announcement_hide_key` (stable even for id-less items, unlike the
@@ -1124,18 +1094,6 @@ pub struct AppView {
     pub gate: Option<xai_grok_shell::auth::GateInfo>,
     /// User-friendly subscription tier name (e.g. "SuperGrok", "Free").
     pub subscription_tier: Option<String>,
-    /// When the pager started auto-checking subscriptions (for 10-min timeout).
-    pub paywall_check_started: Option<std::time::Instant>,
-    /// Debounce stamp for watch/focus subscription checks (see
-    /// [`super::subscription`]).
-    pub last_subscription_check_at: Option<std::time::Instant>,
-    /// Server override (seconds) for the subscription-watch cadence.
-    pub subscription_watch_interval_secs: Option<u64>,
-    /// A stale-source gate held out of `gate` while a live check verifies
-    /// it (see [`super::subscription`]).
-    pub pending_gate_verification: Option<xai_grok_shell::auth::GateInfo>,
-    /// Generation stamp of the current gate verification.
-    pub gate_verify_gen: u64,
     /// Whether a leader reconnect is in progress (blocks prompt submission).
     pub reconnect_pending: bool,
     /// Structured startup warnings collected from the terminal diagnostics
@@ -1304,26 +1262,19 @@ impl AppView {
         })
     }
     /// Apply typed auth metadata from the shell.
+    ///
+    /// Fork: subscription-gate transitions (paywall watch, gate deferral,
+    /// `SubscriptionActivated` events) were removed with the paywall system;
+    /// the `gate` field is still populated from the protocol payload but is no
+    /// longer consumed by a paywall UI. Billing-surface sync is kept.
     pub fn apply_auth_meta(&mut self, meta: &xai_grok_shell::auth::AuthMeta) {
-        self.pending_gate_verification = None;
-        let was_gated = self.gate.is_some();
         self.team_id = meta.team_id.clone();
         self.team_name = meta.team_name.clone();
         self.is_zdr = meta.is_zdr;
         self.team_role = meta.team_role.clone();
         self.coding_data_retention_opt_out = meta.coding_data_retention_opt_out;
         self.gate = meta.gate.clone();
-        if was_gated && self.gate.is_none() {
-            self.paywall_check_started = None;
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::SubscriptionActivated {
-                    auth_method: self.login_method_id.as_ref().map(|id| id.0.to_string()),
-                    upsell_shown_this_session: self.access_gate_shown_logged,
-                },
-            );
-        }
         self.subscription_tier = meta.subscription_tier.clone();
-        let was_api_key = self.is_api_key_auth;
         self.is_api_key_auth = meta.auth_mode.as_deref().is_some_and(is_api_key_label)
             || meta
                 .subscription_tier
@@ -1332,13 +1283,8 @@ impl AppView {
         self.usage_visible =
             meta.team_name.is_none() && !self.is_api_key_auth && !self.has_external_auth_provider;
         self.sync_billing_surface_to_agents();
-        self.apply_tier_restrictions();
         if self.is_api_key_auth {
             self.ensure_voice_for_api_key();
-        } else if was_api_key && is_restricted_tier(self.subscription_tier.as_deref()) {
-            self.voice_reset();
-            self.voice_ui_active = false;
-            self.apply_voice_mode_enabled(false);
         }
         if let Some(show) = meta.show_resolved_model {
             self.show_resolved_model = show;
@@ -1561,15 +1507,9 @@ impl AppView {
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
-            access_gate_shown_logged: false,
             announcement_cta_impressions_logged: Default::default(),
             gate: None,
             subscription_tier: None,
-            paywall_check_started: None,
-            last_subscription_check_at: None,
-            subscription_watch_interval_secs: None,
-            pending_gate_verification: None,
-            gate_verify_gen: 0,
             reconnect_pending: false,
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
@@ -1639,7 +1579,7 @@ impl AppView {
     }
     /// Whether launch may spawn the background STT pipeline (independent of
     /// `/voice`). Gated on the voice gate + a build that compiled in audio
-    /// capture. Free-tier upsell is separate ([`Self::is_voice_tier_restricted`]).
+    /// capture. Voice has no subscription-tier gate in this fork.
     pub fn voice_can_start_pipeline(&self) -> bool {
         self.voice_mode_enabled && xai_grok_voice::AUDIO_SUPPORTED
     }
@@ -1683,42 +1623,8 @@ impl AppView {
             dashboard.set_auto_mode_available(available);
         }
     }
-    /// Recompute the tier-restricted slash commands from the current auth
-    /// state and sync the deny list into every slash surface (welcome
-    /// prompt, all agents, dashboard) so restricted commands hide/show in
-    /// lockstep. Mirrors [`Self::apply_voice_mode_enabled`].
-    ///
-    /// Called from [`Self::apply_auth_meta`] (startup / login) and from the
-    /// `x.ai/settings/update` handler when the subscription tier changes, so
-    /// a mid-session upgrade lifts the restrictions without a restart.
-    pub fn apply_tier_restrictions(&mut self) {
-        let restricted = self.team_name.is_none()
-            && !self.is_api_key_auth
-            && !self.has_external_auth_provider
-            && is_restricted_tier(self.subscription_tier.as_deref());
-        let names: Vec<String> = if restricted {
-            TIER_RESTRICTED_COMMANDS
-                .iter()
-                .map(|n| (*n).to_string())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        for agent in self.agents.values_mut() {
-            agent.set_restricted_commands(&names);
-        }
-        self.welcome_prompt.set_restricted_commands(&names);
-        if let Some(dashboard) = self.dashboard.as_mut() {
-            dashboard.set_restricted_commands(&names);
-        }
-        self.tier_restricted_commands = names;
-    }
-    /// Whether voice mode is withheld for the current subscription tier
-    /// (free / X Basic personal accounts). Derived from the computed
-    /// [`Self::tier_restricted_commands`] deny list so it stays in lockstep
-    /// with the slash-command gate. Used to gate the Ctrl+Space / F8 voice
-    /// keybinding, which bypasses the slash registry entirely (see
-    /// [`crate::app::dispatch::voice`]).
+    /// Legacy compatibility query for callers that still inspect the deny
+    /// list. Subscription tiers do not populate it in the BYOK fork.
     pub fn is_voice_tier_restricted(&self) -> bool {
         self.tier_restricted_commands.iter().any(|c| c == "voice")
     }
@@ -3108,7 +3014,11 @@ struct WelcomeInputCtx<'a> {
     import_banner_rect: Option<&'a ratatui::layout::Rect>,
     auth_url_rect: Option<&'a ratatui::layout::Rect>,
     auth_fallback_rect: Option<&'a ratatui::layout::Rect>,
+    // Fork: paywall hit-test rects kept for wire/shape tolerance; the
+    // subscription gate's click handlers were removed.
+    #[allow(dead_code)]
     refresh_rect: Option<&'a ratatui::layout::Rect>,
+    #[allow(dead_code)]
     gate_url_rect: Option<&'a ratatui::layout::Rect>,
     /// Hit-test rect for the welcome hero upgrade CTA `[label]` button
     /// (click → open the promo url).
@@ -3878,16 +3788,6 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                         );
                     }
                 }
-                if let Some(rect) = ctx.refresh_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::CheckSubscription);
-                }
-                if let Some(rect) = ctx.gate_url_rect
-                    && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
-                {
-                    return InputOutcome::Action(Action::OpenSupergrokUrl);
-                }
                 if let Some(rect) = ctx.upgrade_cta_rect
                     && rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
                 {
@@ -4112,13 +4012,14 @@ fn dispatch_zdr_menu_action(index: usize) -> InputOutcome {
         _ => InputOutcome::Unchanged,
     }
 }
-/// Menu actions when user is access-gated: 0 = Subscribe CTA, 1 = Logout, 2 = Quit.
-/// "Refresh" (ctrl-r) is handled as a direct key shortcut, not a menu item.
+/// Menu actions when the user is access-gated: Logout / Quit.
+/// Fork: the Subscribe CTA (SuperGrok upsell) was removed with the paywall
+/// system; the gate itself still surfaces for x.ai sessions blocked by
+/// `grok_build_access_gate`.
 fn dispatch_access_gate_menu_action(index: usize) -> InputOutcome {
     match index {
-        0 => InputOutcome::Action(Action::OpenSupergrokUrl),
-        1 => InputOutcome::Action(Action::Logout),
-        2 => InputOutcome::Action(Action::Quit),
+        0 => InputOutcome::Action(Action::Logout),
+        1 => InputOutcome::Action(Action::Quit),
         _ => InputOutcome::Unchanged,
     }
 }
@@ -4636,19 +4537,6 @@ impl AppView {
                                 cached_lines,
                                 compact,
                                 &theme,
-                            );
-                        }
-                        if !has_access && !self.access_gate_shown_logged {
-                            self.access_gate_shown_logged = true;
-                            xai_grok_telemetry::session_ctx::log_event(
-                                xai_grok_telemetry::events::SuperGrokUpsellShown {
-                                    source:
-                                        xai_grok_telemetry::events::SuperGrokUpsell::WelcomeScreen,
-                                    auth_method: self
-                                        .login_method_id
-                                        .as_ref()
-                                        .map(|id| id.0.to_string()),
-                                },
                             );
                         }
                         if let Some(tutorial) = self.tutorial.as_mut() {
@@ -6004,15 +5892,9 @@ pub(crate) mod tests {
             ask_user_question_timeout_enabled: None,
             zdr_access_enabled: false,
             usage_billing_redirect_url: None,
-            access_gate_shown_logged: false,
             announcement_cta_impressions_logged: Default::default(),
             gate: None,
             subscription_tier: None,
-            paywall_check_started: None,
-            last_subscription_check_at: None,
-            subscription_watch_interval_secs: None,
-            pending_gate_verification: None,
-            gate_verify_gen: 0,
             bundle_state: BundleState::default(),
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
@@ -7330,171 +7212,6 @@ pub(crate) mod tests {
         app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
         assert!(!app.is_api_key_auth);
         assert!(app.usage_visible);
-    }
-    #[test]
-    fn apply_auth_meta_api_key_enables_voice_and_skips_tier_gate() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        assert!(!app.voice_mode_enabled);
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
-            auth_mode: Some("ApiKey".into()),
-            subscription_tier: Some("API Key".into()),
-            ..Default::default()
-        });
-        assert!(app.is_api_key_auth);
-        assert!(!app.usage_visible);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        assert!(!app.is_voice_tier_restricted());
-        assert!(app.voice_mode_enabled);
-        let mut app = test_app();
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
-            subscription_tier: Some("api_key".into()),
-            ..Default::default()
-        });
-        assert!(app.is_api_key_auth);
-        assert!(app.voice_mode_enabled);
-        assert!(app.tier_restricted_commands.is_empty());
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
-            auth_mode: Some("Oidc".into()),
-            subscription_tier: Some("Free".into()),
-            ..Default::default()
-        });
-        assert!(!app.is_api_key_auth);
-        assert!(!app.voice_mode_enabled);
-        assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-    }
-    fn expected_tier_restricted_commands() -> Vec<String> {
-        TIER_RESTRICTED_COMMANDS
-            .iter()
-            .map(|n| (*n).to_string())
-            .collect()
-    }
-    /// Make every tier-restricted command visible on the welcome prompt so the
-    /// present/absent assertions exercise the deny list, not incidental
-    /// fail-closed hiding:
-    /// - `/imagine`, `/imagine-video` are `required_tools()`-gated, so advertise
-    ///   their tools (otherwise the registry fail-closes them).
-    /// - `/voice` is fail-closed hidden until the remote flag turns it on, so
-    ///   reveal it via the registry directly. (We drive the prompt's registry
-    ///   rather than `apply_voice_mode_enabled`, which also flips a process-global
-    ///   atomic and would leak across parallel tests.)
-    fn advertise_media_tools(app: &mut AppView) {
-        app.welcome_prompt
-            .slash_controller
-            .registry_mut()
-            .set_available_tools(
-                ["image_gen", "image_to_video"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect(),
-            );
-        app.welcome_prompt.set_voice_visible(true);
-    }
-    fn assert_tier_restricted_commands_absent(app: &AppView) {
-        let reg = app.welcome_prompt.slash_controller.registry();
-        for name in TIER_RESTRICTED_COMMANDS {
-            assert!(
-                reg.get(name).is_none(),
-                "/{name} must be denied on a restricted tier"
-            );
-        }
-        assert!(reg.get("cost").is_none(), "/cost alias must be denied");
-    }
-    fn assert_tier_restricted_commands_present(app: &AppView) {
-        let reg = app.welcome_prompt.slash_controller.registry();
-        for name in TIER_RESTRICTED_COMMANDS {
-            assert!(
-                reg.get(name).is_some(),
-                "/{name} must be available when not tier-restricted (tools advertised)"
-            );
-        }
-    }
-    #[test]
-    fn apply_auth_meta_restricts_usage_for_free_tier() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert_eq!(
-            app.tier_restricted_commands,
-            expected_tier_restricted_commands()
-        );
-        assert_tier_restricted_commands_absent(&app);
-        assert!(app.usage_visible);
-    }
-    #[test]
-    fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        let meta = xai_grok_shell::auth::AuthMeta {
-            subscription_tier: Some("X Basic".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert_eq!(
-            app.tier_restricted_commands,
-            expected_tier_restricted_commands()
-        );
-        assert_tier_restricted_commands_absent(&app);
-    }
-    #[test]
-    fn apply_auth_meta_lifts_restrictions_for_paid_tiers_and_teams() {
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        let meta = xai_grok_shell::auth::AuthMeta {
-            subscription_tier: Some("SuperGrok".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        let mut app = test_app();
-        advertise_media_tools(&mut app);
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert!(!app.tier_restricted_commands.is_empty());
-        app.subscription_tier = Some("SuperGrok".into());
-        app.apply_tier_restrictions();
-        assert!(app.tier_restricted_commands.is_empty());
-        assert_tier_restricted_commands_present(&app);
-        let mut app = test_app();
-        let meta = xai_grok_shell::auth::AuthMeta {
-            team_id: Some("team-uuid".into()),
-            team_name: Some("Acme Corp".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(app.tier_restricted_commands.is_empty());
-    }
-    #[test]
-    fn is_restricted_tier_classification() {
-        assert!(is_restricted_tier(None));
-        assert!(is_restricted_tier(Some("")));
-        assert!(is_restricted_tier(Some("Free")));
-        assert!(is_restricted_tier(Some("X Basic")));
-        assert!(is_restricted_tier(Some("x_basic")));
-        assert!(!is_restricted_tier(Some("SuperGrok")));
-        assert!(!is_restricted_tier(Some("SuperGrok Heavy")));
-        assert!(!is_restricted_tier(Some("X Premium")));
-        assert!(!is_restricted_tier(Some("X Premium+")));
-        assert!(!is_restricted_tier(Some("SomeFutureTier")));
-    }
-    #[test]
-    fn voice_included_in_tier_restricted_commands() {
-        assert!(TIER_RESTRICTED_COMMANDS.contains(&"voice"));
-    }
-    #[test]
-    fn is_voice_tier_restricted_tracks_tier() {
-        let mut app = test_app();
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
-        assert!(app.is_voice_tier_restricted());
-        let mut app = test_app();
-        let meta = xai_grok_shell::auth::AuthMeta {
-            subscription_tier: Some("SuperGrok".into()),
-            ..Default::default()
-        };
-        app.apply_auth_meta(&meta);
-        assert!(!app.is_voice_tier_restricted());
     }
     #[test]
     fn apply_auth_meta_clears_gate_on_subscription() {

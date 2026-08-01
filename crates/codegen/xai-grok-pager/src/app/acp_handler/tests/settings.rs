@@ -42,8 +42,12 @@
         assert!(app.voice_mode_enabled);
         assert!(app.voice_ui_active);
 
-        // Same update can stamp API Key while remote settings sends voice false.
+        // A settings payload may still contain a legacy tier stamp, but auth
+        // mode is established by auth metadata / the advertised method. It
+        // must not be re-derived from that tier string.
         let mut app = make_app_with_agent("sess-combined");
+        app.is_api_key_auth = true;
+        app.apply_voice_mode_enabled(true);
         let notif = acp::ExtNotification::new(
             "x.ai/settings/update",
             std::sync::Arc::from(
@@ -61,40 +65,24 @@
     }
 
     #[test]
-    fn settings_non_api_key_tier_clears_stale_api_key_flag() {
-        let mut app = make_app_with_agent("sess-stale-key");
-        assert!(handle_ext_notification(
-            &tier_settings_update("API Key"),
-            &mut app
-        ));
-        assert!(app.is_api_key_auth);
-        assert!(!app.usage_visible);
-        assert!(app.tier_restricted_commands.is_empty());
-        assert!(app.voice_mode_enabled);
-
-        // Later personal Free stamp must not keep API-key bypass or force-on voice.
+    fn settings_tier_stamp_does_not_change_auth_mode() {
+        let mut app = make_app_with_agent("sess-key");
+        app.is_api_key_auth = true;
+        app.apply_voice_mode_enabled(true);
         assert!(handle_ext_notification(
             &tier_settings_update("Free"),
             &mut app
         ));
-        assert!(!app.is_api_key_auth);
-        assert!(app.usage_visible);
-        assert!(!app.tier_restricted_commands.is_empty());
-        assert!(!app.voice_mode_enabled);
+        assert!(app.is_api_key_auth);
+        assert!(app.voice_mode_enabled);
+        assert!(app.tier_restricted_commands.is_empty());
 
-        // Paid tier after API Key must not force voice off (omit voice field).
-        let mut app = make_app_with_agent("sess-paid-keep-voice");
+        let mut app = make_app_with_agent("sess-oauth");
         assert!(handle_ext_notification(
             &tier_settings_update("API Key"),
             &mut app
         ));
-        assert!(app.voice_mode_enabled);
-        assert!(handle_ext_notification(
-            &tier_settings_update("SuperGrok"),
-            &mut app
-        ));
         assert!(!app.is_api_key_auth);
-        assert!(app.voice_mode_enabled);
         assert!(app.tier_restricted_commands.is_empty());
     }
 

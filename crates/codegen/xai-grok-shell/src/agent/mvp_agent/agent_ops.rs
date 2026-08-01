@@ -1466,9 +1466,9 @@ impl MvpAgent {
         )?;
         Some(acp::AuthMethodId::new(id))
     }
-    /// Shared exit for missing/expired/legacy `cached_token`: fall through with
-    /// `use_oauth` only when the target is interactive `grok.com`. When
-    /// `preferred_method` is pinned, fail instead of falling through.
+    /// Shared exit for missing/expired/legacy `cached_token`: fall through to
+    /// the non-interactive API-key method when it is available. The fork has
+    /// no implicit `grok.com` fallback; OIDC must be explicitly pinned.
     pub(super) async fn authenticate_after_cached_token_unavailable(
         &self,
         arguments: acp::AuthenticateRequest,
@@ -1476,10 +1476,12 @@ impl MvpAgent {
         let Some(method_id) = self.cached_token_fallthrough_method_id() else {
             let preferred = self.cfg.borrow().grok_com_config.preferred_method;
             let msg = match preferred {
-                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
+                Some(crate::auth::PreferredAuthMethod::ApiKey) | None => {
                     auth_method::PREFERRED_API_KEY_UNAVAILABLE
                 }
-                _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
+                Some(crate::auth::PreferredAuthMethod::Oidc) => {
+                    auth_method::PREFERRED_OIDC_UNAVAILABLE
+                }
             };
             tracing::info!(%msg, "cached_token unavailable; preferred_method forbids fallthrough");
             xai_grok_telemetry::unified_log::warn(
@@ -2223,32 +2225,13 @@ impl MvpAgent {
     /// SuperGrok upsell prose (see `ImageGenConfig`/`VideoGenConfig`'s
     /// `tier_restricted`).
     ///
-    /// Fails **open** (returns `false`) whenever we can't positively confirm a
-    /// restricted personal tier — no auth yet, BYOK / API-key sessions, team
-    /// accounts, and an unknown/absent tier all pass. The server
-    /// authoritatively zero-limits Imagine for free & X Basic (429), so this
-    /// client gate is a UX optimization (a clean in-chat upsell instead of a
-    /// doomed request), never the security boundary — under-restricting is safe,
-    /// over-restricting would wrongly disable a paid feature.
-    ///
-    /// Mirrors the pager's cosmetic slash-command gate
-    /// ([`crate::tier::is_restricted_tier_name`]); the only difference is the
-    /// absent-tier policy (the pager hides on `None`, we fail open on `None`).
+    /// Fork: the subscription-tier system was removed, so this is always
+    /// `false` — no x.ai OAuth session can be tier-gated, and BYOK/API-key
+    /// sessions were already fail-open. The server remains the authoritative
+    /// zero-limiter for free & X Basic tiers; this client gate was only a UX
+    /// optimization.
     fn is_tier_restricted_capability(&self) -> bool {
-        let Some(auth) = self.auth_manager.current() else {
-            return false;
-        };
-        if !auth.is_xai_auth() || auth.team_id.is_some() {
-            return false;
-        }
-        let tier = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|rs| rs.subscription_tier_display.clone())
-            .or_else(|| jwt_tier_claim(&auth.key));
-        tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
+        false
     }
     /// Build image generation config.
     ///
@@ -2597,9 +2580,6 @@ impl MvpAgent {
             ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            post_unblock_jwt_retry_in_flight: Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            ),
             workspace_ops: RefCell::new(None),
             #[cfg(all(feature = "local-workspace", unix))]
             local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),

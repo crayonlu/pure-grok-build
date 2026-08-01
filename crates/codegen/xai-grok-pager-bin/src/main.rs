@@ -184,7 +184,7 @@ async fn run_setup_command(json: bool) {
                 println!("{out}");
                 if !report.configured {
                     eprintln!(
-                        "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                        "Your team doesn't have a managed configuration yet. A team admin can set one up."
                     );
                 }
             }
@@ -199,7 +199,7 @@ async fn run_setup_command(json: bool) {
         SetupOutcome::Installed => eprintln!("Applied managed configuration."),
         SetupOutcome::NothingConfigured => {
             eprintln!(
-                "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                "Your team doesn't have a managed configuration yet. A team admin can set one up."
             );
         }
         SetupOutcome::Skipped => {
@@ -2080,19 +2080,14 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 )
                 .await;
             }
-            Command::Login {
-                legacy: _,
-                oauth,
-                device_auth,
-                devbox,
-            } => {
+            Command::Login { api_key } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
+                xai_grok_shell::auth::run_cli_login(&config, api_key.as_deref()).await?;
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
