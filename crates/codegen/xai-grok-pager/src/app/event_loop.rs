@@ -1030,6 +1030,14 @@ pub(crate) async fn run(
         }
     }
 
+    // Billing/usage is an xAI cloud-product surface. Keep it hidden in open
+    // mode even when a stale auth metadata payload says it is available; this
+    // prevents the automatic billing effect from leaving the machine.
+    if xai_grok_shell::agent::service_policy::mode_from_disk().is_open() {
+        app.usage_visible = false;
+        app.sync_billing_surface_to_agents();
+    }
+
     // After auth so API-key + managed policy resolve correctly.
     let voice_mode_enabled = crate::app::resolve_voice_mode_live(
         remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
@@ -1576,11 +1584,14 @@ pub(crate) async fn run(
                 return Ok(make_run_result(&app));
             }
         }
-        // Fetch changelog off the render path so the welcome screen
-        // can display bullets and /release-notes uses the cached result.
-        let effs = vec![super::actions::Effect::FetchChangelog];
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+        // Fetch changelog off the render path so the welcome screen can
+        // display bullets. Open mode keeps the optional xAI CDN surface
+        // offline unless a self-hosted mirror is configured.
+        if super::should_fetch_changelog() {
+            let effs = vec![super::actions::Effect::FetchChangelog];
+            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                return Ok(make_run_result(&app));
+            }
         }
     }
 

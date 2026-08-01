@@ -407,7 +407,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         use xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig;
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
-        use xai_grok_tools::implementations::web_search::WebSearchConfig;
+        use xai_grok_tools::implementations::web_search::{WebSearchBackend, WebSearchConfig};
         let fs = Arc::new(xai_grok_tools::computer::local::LocalFs)
             as Arc<dyn xai_grok_tools::computer::types::AsyncFileSystem>;
         let notification_handle = xai_grok_tools::notification::ToolNotificationHandle::noop();
@@ -416,32 +416,58 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 let cred = auth.current();
                 match cred {
                     xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
-                        let headers = build_proxy_headers(url);
+                        let xai_compatible = is_xai_compatible_endpoint(url);
+                        let ppio = is_ppio_endpoint(url);
+                        let headers = xai_compatible
+                            .then(|| build_proxy_headers(url))
+                            .unwrap_or_default();
                         (
-                            ImageGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                image_gen_enabled: true,
-                                image_edit_enabled: true,
-                                model_override: None,
-                                edit_model_override: None,
-                                tier_restricted: false,
-                                provider: None,
+                            if xai_compatible {
+                                ImageGenConfig::Enabled {
+                                    api_key: token.clone(),
+                                    base_url: url.clone(),
+                                    extra_headers: headers.clone(),
+                                    image_gen_enabled: true,
+                                    image_edit_enabled: true,
+                                    model_override: None,
+                                    edit_model_override: None,
+                                    tier_restricted: false,
+                                    provider: None,
+                                }
+                            } else {
+                                ImageGenConfig::default()
                             },
-                            VideoGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                zdr_video_output_s3: None,
-                                tier_restricted: false,
+                            if xai_compatible {
+                                VideoGenConfig::Enabled {
+                                    api_key: token.clone(),
+                                    base_url: url.clone(),
+                                    extra_headers: headers.clone(),
+                                    zdr_video_output_s3: None,
+                                    tier_restricted: false,
+                                }
+                            } else {
+                                VideoGenConfig::default()
                             },
-                            WebSearchConfig::Enabled {
-                                api_key: token,
-                                base_url: url.clone(),
-                                model: default_web_search_model(),
-                                extra_headers: headers,
-                                alpha_test_key: None,
+                            if xai_compatible {
+                                WebSearchConfig::Enabled {
+                                    api_key: token,
+                                    base_url: url.clone(),
+                                    model: default_web_search_model(),
+                                    backend: WebSearchBackend::XaiResponses,
+                                    extra_headers: headers,
+                                    alpha_test_key: None,
+                                }
+                            } else if ppio {
+                                WebSearchConfig::Enabled {
+                                    api_key: token,
+                                    base_url: url.clone(),
+                                    model: default_web_search_model(),
+                                    backend: WebSearchBackend::Ppio,
+                                    extra_headers: indexmap::IndexMap::new(),
+                                    alpha_test_key: None,
+                                }
+                            } else {
+                                WebSearchConfig::default()
                             },
                             AppBuilderDeployerConfig::default(),
                         )
@@ -500,6 +526,42 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         IDS.clone()
     }
 }
+/// Whether this endpoint implements the upstream xAI auxiliary-tool contract.
+/// Image/video generation currently have no provider-neutral adapter, so these
+/// tools are exposed only for xAI's API/proxy URLs.
+fn is_xai_compatible_endpoint(base_url: &str) -> bool {
+    let host = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "grok.com"
+        || host.ends_with(".grok.com")
+        || host == "cli-chat-proxy.grok.com"
+}
+
+fn is_ppio_endpoint(base_url: &str) -> bool {
+    let host = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "ppio.com" || host.ends_with(".ppio.com")
+}
 /// Build extra headers for API calls routed through the chat proxy.
 /// Mirrors the shell's `inject_proxy_headers` logic.
 fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
@@ -514,7 +576,7 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         "x-grok-client-identifier".to_string(),
         std::env::var("GROK_CLIENT_NAME").unwrap_or_else(|_| "grok-shell".to_string()),
     );
-    if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
+    if is_cli_chat_proxy_endpoint(base_url) {
         headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
         headers.insert(
             "x-authenticateresponse".to_string(),
@@ -522,6 +584,13 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         );
     }
     headers
+}
+
+fn is_cli_chat_proxy_endpoint(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "cli-chat-proxy.grok.com")
 }
 /// Build web fetch config. Enabled with default params unless
 /// `GROK_DISABLE_WEB_FETCH=1` is set.

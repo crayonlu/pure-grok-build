@@ -1,5 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
+    use serial_test::serial;
+    use xai_grok_test_support::EnvGuard;
 
     #[test]
     fn voice_kill_switch_clears_pending_spawn() {
@@ -29,7 +31,10 @@
     }
 
     #[test]
+    #[serial]
     fn settings_api_key_keeps_voice_despite_remote_false() {
+        let _fork_mode = EnvGuard::set("GROK_FORK_MODE", "xai_compat");
+        let _voice_mode = EnvGuard::set("GROK_VOICE_MODE", "true");
         // Remote false alone must not disable an already API-key session.
         let mut app = make_app_with_agent("sess-api-key");
         app.is_api_key_auth = true;
@@ -87,7 +92,10 @@
     }
 
     #[test]
+    #[serial]
     fn voice_remote_true_re_enables_after_kill_switch() {
+        let _fork_mode = EnvGuard::set("GROK_FORK_MODE", "xai_compat");
+        let _voice_mode = EnvGuard::set("GROK_VOICE_MODE", "true");
         let mut app = make_app_with_agent("sess-1");
         app.apply_voice_mode_enabled(false);
         assert!(!app.voice_mode_enabled);

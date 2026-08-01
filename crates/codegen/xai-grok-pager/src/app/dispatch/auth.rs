@@ -381,8 +381,11 @@ pub(super) fn handle_auth_complete(
         if app.usage_visible {
             effects.push(Effect::FetchAppBilling);
         }
-        // Fetch changelog (mirrors startup path for interactive login).
-        effects.push(Effect::FetchChangelog);
+        // Fetch changelog (mirrors startup path for interactive login) only
+        // when the fork policy permits the optional CDN surface.
+        if crate::app::should_fetch_changelog() {
+            effects.push(Effect::FetchChangelog);
+        }
 
         // ZDR-blocked users stay on the welcome screen — discard any
         // deferred startup (they cannot start a session).

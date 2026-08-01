@@ -385,7 +385,9 @@ pub async fn run_stdio_agent(
             // drive a token refresh before bootstrap reads policy; the same manager goes to the agent.
             let auth_manager = Arc::new(agent_config.create_auth_manager());
             // Proactive token refresh; runs until process exit.
-            auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            if !agent_config.fork.is_open() {
+                auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            }
             // Pause refreshes across system sleep so an OIDC refresh can't straddle a
             // suspend (which can revoke the refresh token and force re-login).
             // `grok agent stdio` is a local/interactive entrypoint (spawned by
@@ -447,6 +449,11 @@ async fn run_headless_inner(
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
     xai_grok_telemetry::unified_log::set_version(xai_grok_version::VERSION);
+    if agent_config.fork.is_open() {
+        anyhow::bail!(
+            "Headless relay mode is disabled in open fork mode; use `grok agent stdio` with a provider API key"
+        );
+    }
     // `grok agent [headless]` serves non-TUI automation; stamp proxy requests
     // as headless. IDE-facing `grok agent stdio` stays interactive.
     crate::http::set_process_client_mode_headless();
@@ -606,7 +613,9 @@ async fn run_headless_inner(
                 let gateway = GatewaySender::new(gw_tx);
                 let auth_manager = shared_auth_manager;
                 // Proactive token refresh for the headless agent.
-                auth_manager.start_proactive_refresh(agent_cancel.clone());
+                if !agent_config_clone.fork.is_open() {
+                    auth_manager.start_proactive_refresh(agent_cancel.clone());
+                }
                 // Restore managed policy right before bootstrap reads it (no stale window after relay setup).
                 crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
                 let mut agent =
@@ -811,6 +820,9 @@ fn relay_config_for_session(
     agent_config: &AgentConfig,
     shared_auth_manager: &Arc<AuthManager>,
 ) -> Option<crate::agent::relay::RelayConfig> {
+    if agent_config.fork.is_open() {
+        return None;
+    }
     let session = auth?;
     // Seed the shared manager with the startup-resolved session unless it
     // already holds an equal-or-fresher token. See `should_seed_shared_session`
@@ -1234,7 +1246,11 @@ pub async fn run_leader(
     // (~5s) refresh only. A session-less-but-mintable leader is minted by the
     // post-readiness background task below, so readiness never blocks on the
     // provider command (which could take up to STARTUP_AUTH_TIMEOUT ~60s).
-    let auth: Option<GrokAuth> = crate::auth::try_noninteractive_auth_no_mint(ctx).await;
+    let auth: Option<GrokAuth> = if agent_config.fork.is_open() {
+        None
+    } else {
+        crate::auth::try_noninteractive_auth_no_mint(ctx).await
+    };
 
     // ── Phase 6b: Legacy devbox auth migration ─────────────────────────────
     let auth: Option<GrokAuth> = migrate_devbox_auth_if_legacy(auth, &agent_config).await;
@@ -1286,7 +1302,9 @@ pub async fn run_leader(
 
     let shared_auth_manager = Arc::new(agent_config_for_spawn.create_auth_manager());
     // Proactive token refresh for the leader; cancelled on shutdown.
-    shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
+    if !agent_config_for_spawn.fork.is_open() {
+        shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
+    }
     // Pause refreshes across system sleep on this local (laptop) leader
     // process so a refresh can't straddle a suspend.
     shared_auth_manager.start_system_power_listener();

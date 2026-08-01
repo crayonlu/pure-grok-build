@@ -573,6 +573,9 @@ impl MvpAgent {
     fn feedback_credentials(
         &self,
     ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         if !self.has_proxy_credentials() {
             return None;
         }
@@ -590,6 +593,10 @@ impl MvpAgent {
     pub(super) fn ensure_telemetry_client(&self) {
         crate::auth::credential_provider::sync_external_otel_identity();
         let cfg = self.cfg.borrow();
+        if cfg.fork.is_open() {
+            tracing::debug!("telemetry client disabled in open mode");
+            return;
+        }
         let mode = cfg.resolve_telemetry_mode().value;
         if !mode.is_disabled() {
             let Some(auth) = self
@@ -640,6 +647,9 @@ impl MvpAgent {
     pub(super) fn build_registry_config(
         &self,
     ) -> Option<crate::session::RegistryConfig> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         let remote = self
             .cfg
             .borrow()
@@ -681,6 +691,9 @@ impl MvpAgent {
     pub(crate) fn conversations_client(
         &self,
     ) -> Option<crate::remote::ConversationsClient> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         if !crate::session::unified_list::conversations_lane_active() {
             return None;
         }
@@ -1555,7 +1568,9 @@ impl MvpAgent {
     /// them, so a settings-targeted (not env-set) team would otherwise never
     /// register. Idempotent: a no-op once installed.
     fn reapply_official_marketplace(&self) {
-        if self.cfg.borrow().resolve_official_marketplace_auto_register().value {
+        if !self.cfg.borrow().fork.is_open()
+            && self.cfg.borrow().resolve_official_marketplace_auto_register().value
+        {
             crate::extensions::marketplace::ensure_official_marketplace_source(
                 &crate::util::grok_home::grok_home(),
             );
@@ -1569,7 +1584,7 @@ impl MvpAgent {
         }
         let resolved_mode = {
             let cfg = self.cfg.borrow();
-            if cfg.mode == crate::agent::config::AgentMode::Generic {
+            if cfg.mode == crate::agent::config::AgentMode::Generic || cfg.fork.is_open() {
                 return;
             }
             let has_xai_auth = self
@@ -1716,8 +1731,19 @@ impl MvpAgent {
             crate::util::config::cache_remote_mcp_startup_timeout_secs(
                 cfg.remote_settings.as_ref().and_then(|s| s.mcp_startup_timeout_secs),
             );
-            let telemetry_mode = cfg.resolve_telemetry_mode();
-            let trace_upload = cfg.resolve_trace_upload();
+            let telemetry_mode = if cfg.fork.is_open() {
+                crate::agent::config::Resolved::new(
+                    crate::agent::config::TelemetryMode::Disabled,
+                    crate::agent::config::ConfigSource::Default,
+                )
+            } else {
+                cfg.resolve_telemetry_mode()
+            };
+            let trace_upload = if cfg.fork.is_open() {
+                crate::agent::config::Resolved::new(false, crate::agent::config::ConfigSource::Default)
+            } else {
+                cfg.resolve_trace_upload()
+            };
             tracing::info!(
                 telemetry = %telemetry_mode,
                 trace_upload = %trace_upload,
@@ -1817,6 +1843,10 @@ impl MvpAgent {
     /// Fire-and-forget remote settings refresh for new sessions (at most one
     /// in flight).
     pub(super) fn spawn_settings_reapply(&self) {
+        if self.cfg.borrow().fork.is_open() {
+            tracing::debug!("settings reapply skipped in open fork mode");
+            return;
+        }
         let agent_ref = LocalRef::new(self);
         let auth_manager = self.auth_manager.clone();
         let _spawned = self
@@ -1871,7 +1901,14 @@ impl MvpAgent {
     /// process exit ends it. Skipped under `cfg!(test)` like the
     /// managed-config sync (PTY e2e runs the real binary and is unaffected).
     pub(super) fn spawn_announcements_refresh(&self) {
-        if cfg!(test) || self.announcements_refresh_started.replace(true) {
+        if cfg!(test) {
+            return;
+        }
+        if crate::agent::service_policy::mode_from_disk().is_open() {
+            tracing::debug!("announcements refresh disabled in open mode");
+            return;
+        }
+        if self.announcements_refresh_started.replace(true) {
             return;
         }
         let agent_ref = LocalRef::new(self);
@@ -2247,6 +2284,16 @@ impl MvpAgent {
 
         // Provider-agnostic path: [image_gen] config section present.
         if let Some(ref provider) = cfg.image_gen {
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&provider.base_url)
+                    || crate::util::is_cli_chat_proxy_url(&provider.base_url))
+            {
+                tracing::warn!(
+                    base_url = %provider.base_url,
+                    "image_gen disabled in open mode: refusing an xAI-owned endpoint; set [fork].mode = \"xai_compat\" or use a provider-neutral endpoint"
+                );
+                return ImageGenConfig::Disabled;
+            }
             // Resolve credentials: literal api_key first, then env_key.
             let api_key = provider.api_key.clone().or_else(|| {
                 provider
@@ -2286,7 +2333,11 @@ impl MvpAgent {
             };
         }
 
-        // Original x.ai Imagine path (fallback).
+        // Original x.ai Imagine path (fallback) is compatibility-only. An
+        // open-mode session must never send its primary BYOK key to xAI.
+        if cfg.fork.is_open() {
+            return ImageGenConfig::Disabled;
+        }
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
@@ -2331,6 +2382,10 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
+        if cfg.fork.is_open() {
+            tracing::debug!("video_gen disabled in open mode: no provider-neutral adapter configured");
+            return VideoGenConfig::Disabled;
+        }
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
@@ -2384,6 +2439,16 @@ impl MvpAgent {
             client_version,
             &self.cfg.borrow().endpoints,
         )?;
+        if self.cfg.borrow().fork.is_open()
+            && (crate::util::is_xai_api_url(&cfg.base_url)
+                || crate::util::is_cli_chat_proxy_url(&cfg.base_url))
+        {
+            tracing::debug!(
+                base_url = %cfg.base_url,
+                "web_search disabled in open mode: xAI Responses search is compatibility-only"
+            );
+            return None;
+        }
         inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
@@ -2472,7 +2537,8 @@ impl MvpAgent {
         let has_xai_auth = auth_manager
             .current_or_expired()
             .is_some_and(|a| a.is_xai_auth());
-        let relay_sync_enabled = tui_mode && relay_config_enabled && has_xai_auth;
+        let relay_sync_enabled =
+            tui_mode && relay_config_enabled && has_xai_auth && !cfg.fork.is_open();
         let config_root = crate::config::load_effective_config().ok();
         let empty_config = toml::Value::Table(toml::map::Map::new());
         let raw = config_root.as_ref().unwrap_or(&empty_config);
@@ -3235,6 +3301,9 @@ impl MvpAgent {
         crate::upload::turn::TraceUploadReason,
     ) {
         use crate::upload::turn::TraceUploadReason;
+        if self.cfg.borrow().fork.is_open() {
+            return (None, TraceUploadReason::FeatureOff);
+        }
         if self.is_data_collection_disabled() {
             crate::upload::trace::spawn_startup_spill_reconcile(
                 crate::util::grok_home::grok_home(),

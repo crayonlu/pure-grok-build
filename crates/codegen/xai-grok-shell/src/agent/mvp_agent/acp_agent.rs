@@ -317,7 +317,7 @@ impl acp::Agent for MvpAgent {
             ),
         );
         let mut has_cached_token = init_has_current;
-        if !init_has_current && init_is_expired {
+        if !self.cfg.borrow().fork.is_open() && !init_has_current && init_is_expired {
             let refreshed = matches!(
                 tokio::time::timeout(
                     crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
@@ -3488,6 +3488,10 @@ impl acp::Agent for MvpAgent {
         #[allow(unused_mut)]
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
+        if self.cfg.borrow().fork.is_open() && open_mode_blocks_cloud_method(method.as_ref()) {
+            return Err(acp::Error::invalid_request()
+                .data("This xAI cloud service is disabled in open fork mode"));
+        }
         let result = match method.as_ref() {
             "x.ai/getApiKey" | "x.ai/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
@@ -4219,6 +4223,25 @@ impl acp::Agent for MvpAgent {
         Ok(())
     }
 }
+
+fn open_mode_blocks_cloud_method(method: &str) -> bool {
+    method.starts_with("x.ai/cloud/")
+        || method.starts_with("x.ai/review")
+        || method.starts_with("x.ai/bundle/")
+        || matches!(
+            method,
+            "x.ai/billing"
+                | "x.ai/auto-topup-rule"
+                | "x.ai/session/load_history"
+                | "x.ai/share_session"
+                | "x.ai/feedback"
+                | "x.ai/feedback/dismiss"
+                | "x.ai/privacy/setCodingDataRetention"
+                | "x.ai/rollout/survey"
+                | "x.ai/auth/get_url"
+                | "x.ai/auth/submit_code"
+        )
+}
 #[cfg(test)]
 mod tool_overrides_capability_tests {
     use super::tool_overrides_capability;
@@ -4233,5 +4256,43 @@ mod tool_overrides_capability_tests {
                 "x_thread_fetch": false,
             }),
         );
+    }
+}
+
+#[cfg(test)]
+mod open_mode_cloud_method_tests {
+    use super::open_mode_blocks_cloud_method;
+
+    #[test]
+    fn blocks_first_party_cloud_and_data_capture_methods() {
+        for method in [
+            "x.ai/cloud/env/list",
+            "x.ai/billing",
+            "x.ai/session/load_history",
+            "x.ai/share_session",
+            "x.ai/feedback",
+            "x.ai/review/comment",
+            "x.ai/bundle/sync",
+            "x.ai/privacy/setCodingDataRetention",
+            "x.ai/rollout/survey",
+            "x.ai/auth/get_url",
+        ] {
+            assert!(open_mode_blocks_cloud_method(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn keeps_local_and_provider_neutral_methods_available() {
+        for method in [
+            "x.ai/btw",
+            "x.ai/recap",
+            "x.ai/session/usage",
+            "x.ai/session/search",
+            "x.ai/search/content",
+            "x.ai/marketplace/list",
+            "x.ai/suggest",
+        ] {
+            assert!(!open_mode_blocks_cloud_method(method), "{method}");
+        }
     }
 }

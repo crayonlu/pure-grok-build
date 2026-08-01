@@ -777,6 +777,10 @@ async fn try_ensure_fresh_auth_with(auth_manager: &Arc<AuthManager>) -> Option<G
 pub(crate) async fn try_noninteractive_auth_no_mint(
     grok_com_config: &GrokComConfig,
 ) -> Option<GrokAuth> {
+    if crate::agent::service_policy::mode_from_disk().is_open() {
+        tracing::debug!("startup xAI auth resolution skipped in open fork mode");
+        return None;
+    }
     try_noninteractive_auth_no_mint_with(&build_startup_auth_manager(grok_com_config)).await
 }
 

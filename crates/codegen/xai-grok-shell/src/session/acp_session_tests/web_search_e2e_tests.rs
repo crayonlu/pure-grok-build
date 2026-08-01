@@ -103,6 +103,7 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
             api_key: web_search_sampling.api_key.clone().unwrap(),
             base_url: web_search_sampling.base_url.clone(),
             model: web_search_sampling.model.clone(),
+            backend: xai_grok_tools::implementations::web_search::WebSearchBackend::XaiResponses,
             extra_headers: web_search_sampling.extra_headers.clone(),
             // The optional extra access key is no longer carried on
             // `SamplerConfig`. The shell-level value flows in via

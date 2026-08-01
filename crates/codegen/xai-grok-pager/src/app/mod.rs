@@ -236,12 +236,26 @@ pub(crate) fn resolve_voice_mode_enabled(
 }
 /// Resolve from live policy + env + remote + API-key state.
 pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
+    if !xai_grok_shell::agent::service_policy::mode_from_disk().allows_xai_compat() {
+        tracing::debug!("voice disabled in open mode: the built-in STT endpoint is xAI-owned");
+        return false;
+    }
     resolve_voice_mode_enabled(
         voice_mode_requirement_pin(),
         voice_mode_config_value(),
         remote,
         is_api_key,
     )
+}
+
+/// Changelog content is an optional xAI CDN surface. Open mode keeps the
+/// automatic fetch offline unless the operator explicitly points it at a
+/// self-hosted mirror; xAI compatibility mode retains the upstream default.
+pub(crate) fn should_fetch_changelog() -> bool {
+    !xai_grok_shell::agent::service_policy::mode_from_disk().is_open()
+        || std::env::var("GROK_CHANGELOG_BASE_URL")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 #[cfg(test)]
 mod voice_gate_tests {

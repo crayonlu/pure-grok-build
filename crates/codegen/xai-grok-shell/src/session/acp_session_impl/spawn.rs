@@ -483,13 +483,30 @@ pub(crate) async fn spawn_session_actor(
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(cfg) = web_search_sampling_config {
         if let Some(api_key) = cfg.api_key {
-            xai_grok_tools::implementations::WebSearchConfig::Enabled {
-                api_key,
-                base_url: cfg.base_url,
-                model: cfg.model,
-                extra_headers: cfg.extra_headers,
-                alpha_test_key: credentials.alpha_test_key.clone(),
-            }
+            let backend = if crate::util::is_xai_api_url(&cfg.base_url)
+                || crate::util::is_cli_chat_proxy_url(&cfg.base_url)
+            {
+                Some(xai_grok_tools::implementations::WebSearchBackend::XaiResponses)
+            } else if is_ppio_endpoint(&cfg.base_url) {
+                Some(xai_grok_tools::implementations::WebSearchBackend::Ppio)
+            } else {
+                tracing::warn!(
+                    base_url = %cfg.base_url,
+                    "web_search disabled: custom endpoint has no registered search protocol"
+                );
+                None
+            };
+            backend.map_or(
+                xai_grok_tools::implementations::WebSearchConfig::Disabled,
+                |backend| xai_grok_tools::implementations::WebSearchConfig::Enabled {
+                    api_key,
+                    base_url: cfg.base_url,
+                    model: cfg.model,
+                    backend,
+                    extra_headers: cfg.extra_headers,
+                    alpha_test_key: credentials.alpha_test_key.clone(),
+                },
+            )
         } else {
             tracing::warn!("web_search disabled: resolved config has no API key");
             xai_grok_tools::implementations::WebSearchConfig::Disabled
@@ -828,9 +845,20 @@ pub(crate) async fn spawn_session_actor(
             auth_manager.as_ref(),
             api_key_provider.clone(),
         );
+        let embedding_allowed = !crate::agent::service_policy::mode_from_disk().is_open()
+            || (!crate::util::is_xai_api_url(&embed_base_url)
+                && !crate::util::is_cli_chat_proxy_url(&embed_base_url));
+        if !embedding_allowed {
+            tracing::debug!(
+                base_url = %embed_base_url,
+                "memory embeddings disabled in open mode: primary endpoint is xAI-owned"
+            );
+        }
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
-            embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
+            embed_config: embedding_allowed
+                .then(|| memory_config.as_ref().map(|mc| mc.embedding.clone()))
+                .flatten(),
             embed_base_url: embed_base_url.clone(),
             embed_api_key: embed_api_key.clone(),
             search_config: memory_config
@@ -1879,7 +1907,13 @@ pub(crate) async fn spawn_session_actor(
             .unwrap_or_default();
         let embed_dims = embed_config.dimensions;
         let sampling_base_url = embed_base_url.clone();
-        let sampling_api_key = embed_api_key.clone();
+        let embedding_allowed_for_reindex = !crate::agent::service_policy::mode_from_disk()
+            .is_open()
+            || (!crate::util::is_xai_api_url(&sampling_base_url)
+                && !crate::util::is_cli_chat_proxy_url(&sampling_base_url));
+        let sampling_api_key = embedding_allowed_for_reindex
+            .then(|| embed_api_key.clone())
+            .flatten();
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -2124,6 +2158,13 @@ pub(crate) async fn spawn_session_actor(
         system_prompt,
         session_done_rx,
     ))
+}
+
+fn is_ppio_endpoint(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "ppio.com" || host.ends_with(".ppio.com"))
 }
 /// Handle for a session's dedicated thread. Stored separately from `SessionHandle`
 /// (which derives `Clone`) because `JoinHandle` is not `Clone`.

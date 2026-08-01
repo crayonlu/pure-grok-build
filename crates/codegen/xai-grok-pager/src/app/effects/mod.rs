@@ -1880,6 +1880,10 @@ pub(crate) fn execute(
                 });
         }
         Effect::FetchChangelog => {
+            if !crate::app::should_fetch_changelog() {
+                tracing::debug!("changelog fetch skipped by open-mode policy");
+                return (false, meta);
+            }
             tasks
                 .spawn(async move {
                     let changelog = tokio::task::spawn_blocking(|| {

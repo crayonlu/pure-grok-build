@@ -51,13 +51,20 @@ async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
     // Never return a hard-expired AT. Still surface wire-valid session ATs and
     // static/BYOK keys (process model key / env / disk api_key) so non-session
     // sessions keep working when AuthManager has no OIDC entry.
-    let token = match agent.auth_manager.get_valid_token().await {
-        Ok(token) => Some(token),
-        Err(_) => agent
-            .auth_manager
-            .current_wire_valid()
-            .map(|a| a.key)
-            .or_else(|| agent.auth_manager.static_api_key_for_export()),
+    // Open mode must not silently refresh an xAI OIDC token just because a
+    // client asks for a bearer token.  A BYOK session only needs the local
+    // static key; compatibility mode retains the upstream refresh behavior.
+    let token = if crate::agent::service_policy::mode_from_disk().is_open() {
+        agent.auth_manager.static_api_key_for_export()
+    } else {
+        match agent.auth_manager.get_valid_token().await {
+            Ok(token) => Some(token),
+            Err(_) => agent
+                .auth_manager
+                .current_wire_valid()
+                .map(|a| a.key)
+                .or_else(|| agent.auth_manager.static_api_key_for_export()),
+        }
     };
     ExtMethodResult::success(serde_json::json!({ "token": token }))
         .to_ext_response()
@@ -205,12 +212,16 @@ fn handle_info(agent: &MvpAgent) -> ExtResult {
     // display time via a custom protocol handler. The handler proxies
     // through cli-chat-proxy's /asset endpoint; Electron's HTTP cache
     // handles reuse. No disk-cache or network call needed here.
-    let profile_image_url = match raw_asset_id.as_deref().filter(|k| !k.is_empty()) {
-        Some(key) if key.starts_with("http://") || key.starts_with("https://") => {
-            Some(key.to_owned())
+    let profile_image_url = if crate::agent::service_policy::mode_from_disk().is_open() {
+        None
+    } else {
+        match raw_asset_id.as_deref().filter(|k| !k.is_empty()) {
+            Some(key) if key.starts_with("http://") || key.starts_with("https://") => {
+                Some(key.to_owned())
+            }
+            Some(key) => Some(format!("grok-asset:///{key}")),
+            None => None,
         }
-        Some(key) => Some(format!("grok-asset:///{key}")),
-        None => None,
     };
     to_raw_response(&AuthInfoResponse {
         method_id,

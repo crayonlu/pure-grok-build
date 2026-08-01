@@ -38,6 +38,10 @@ pub struct ApiEmbeddingProvider {
     api_base: String,
     model: String,
     dimensions: usize,
+    /// Static per-model key used by custom OpenAI-compatible endpoints. The
+    /// credential-middleware path supplies its own bearer and leaves this
+    /// unset.
+    api_key: Option<String>,
     client: reqwest_middleware::ClientWithMiddleware,
     max_batch_size: usize,
 }
@@ -53,6 +57,7 @@ impl ApiEmbeddingProvider {
             api_base,
             model,
             dimensions,
+            api_key: None,
             client,
             max_batch_size: 32,
         }
@@ -72,8 +77,10 @@ impl ApiEmbeddingProvider {
         proxy_base_url: String,
         auth_key: String,
     ) -> Option<Self> {
-        let client = build_static_middleware_client(Some(auth_key));
-        Self::from_config(config, proxy_base_url, client)
+        let client = build_static_middleware_client(Some(auth_key.clone()));
+        let mut provider = Self::from_config(config, proxy_base_url, client)?;
+        provider.api_key = Some(auth_key);
+        Some(provider)
     }
 }
 
@@ -138,9 +145,22 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
 
                 let request = xai_grok_http::shared_client()
                     .post(format!("{}/embeddings", self.api_base))
-                    .json(&body_json)
-                    .header("X-XAI-Token-Auth", "xai-grok-cli")
-                    .header("x-grok-client-version", xai_grok_version::VERSION);
+                    .json(&body_json);
+                let request = if let Some(key) = self.api_key.as_deref() {
+                    request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
+                } else {
+                    request
+                };
+                // These headers are private xAI proxy metadata. A custom
+                // OpenAI-compatible provider (for example PPIO) must receive
+                // only the standard Authorization/body contract.
+                let request = if is_xai_owned_url(&self.api_base) {
+                    request
+                        .header("X-XAI-Token-Auth", "xai-grok-cli")
+                        .header("x-grok-client-version", xai_grok_version::VERSION)
+                } else {
+                    request
+                };
 
                 let req = match request.build() {
                     Ok(r) => r,
@@ -210,6 +230,16 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
     fn dimensions(&self) -> usize {
         self.dimensions
     }
+}
+
+fn is_xai_owned_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host == "x.ai" || host.ends_with(".x.ai") || host == "grok.com" || host.ends_with(".grok.com")
 }
 
 /// A mock embedding provider for testing that returns deterministic vectors.

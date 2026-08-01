@@ -1,15 +1,15 @@
-use super::types::WebSearchConfig;
+use super::types::{WebSearchBackend, WebSearchConfig};
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
 use async_openai::types::responses as rs;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-/// A minimal, purpose-built HTTP client for calling the Responses API
-/// with web search capability.
+/// A minimal, purpose-built HTTP client for provider web-search APIs.
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
     base_url: String,
     model: String,
+    backend: WebSearchBackend,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Callers can wire this so a 401
     /// from the Responses API emits an `auth_401_attribution` event
@@ -28,6 +28,7 @@ impl WebSearchClient {
             api_key,
             base_url,
             model,
+            backend,
             extra_headers,
             alpha_test_key,
         } = config
@@ -78,6 +79,7 @@ impl WebSearchClient {
             http,
             base_url: base_url.clone(),
             model: model.clone(),
+            backend: *backend,
             api_key_provider,
             attribution_callback: None,
         })
@@ -110,6 +112,9 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        if self.backend == WebSearchBackend::Ppio {
+            return self.search_ppio(query, allowed_domains).await;
+        }
         let web_search = rs::WebSearchToolArgs::default()
             .filters(rs::WebSearchToolFilters { allowed_domains })
             .build()
@@ -201,6 +206,10 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        if self.backend == WebSearchBackend::Ppio {
+            let (content, citations) = self.search_ppio_with_titles(query, allowed_domains).await?;
+            return Ok((content, citations));
+        }
         let web_search = rs::WebSearchToolArgs::default()
             .filters(rs::WebSearchToolFilters { allowed_domains })
             .build()
@@ -280,6 +289,117 @@ impl WebSearchClient {
         let pairs = extract_citation_pairs(&response_obj);
         Ok((content, pairs))
     }
+
+    async fn search_ppio(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        let (content, citations) = self.search_ppio_with_titles(query, allowed_domains).await?;
+        Ok((content, citations.into_iter().map(|(_, url)| url).collect()))
+    }
+
+    /// PPIO's web-search response is a Bing-shaped object rather than an LLM
+    /// response. Convert its page summaries into the text expected by the
+    /// existing tool and retain stable title/URL pairs for cursor clients.
+    async fn search_ppio_with_titles(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        let include = allowed_domains
+            .filter(|domains| !domains.is_empty())
+            .map(|domains| domains.join("|"));
+        let body = serde_json::json!({
+            "query": query,
+            "summary": true,
+            "count": 10,
+            "include": include,
+        });
+        let url = ppio_web_search_url(&self.base_url);
+        let sent_bearer = self.current_bearer().await;
+        let mut req = self.http.post(&url).json(&body);
+        if let Some(ref key) = sent_bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
+        }
+        let response = req.send().await.map_err(|e| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("PPIO web-search request failed: {e}"),
+            )
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            self.record_401_attribution(sent_bearer.as_deref());
+            let body = response.text().await.unwrap_or_default();
+            return Err(xai_tool_runtime::ToolError::unauthorized(format!(
+                "PPIO web-search returned 401 Unauthorized: {body}"
+            )));
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("PPIO web-search returned {status}: {body}"),
+            ));
+        }
+        let value: serde_json::Value = response.json().await.map_err(|e| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Failed to parse PPIO web-search response: {e}"),
+            )
+        })?;
+        let pages = value
+            .pointer("/SearchData/webPages/value")
+            .or_else(|| value.pointer("/WebSearchWebPages/value"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut text = String::new();
+        let mut pairs = Vec::new();
+        for page in pages {
+            let title = page
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let url = page
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            let summary = page
+                .get("summary")
+                .or_else(|| page.get("snippet"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str("- ");
+            text.push_str(title);
+            if !summary.is_empty() {
+                text.push_str(": ");
+                text.push_str(summary);
+            }
+            pairs.push((title.to_owned(), url.to_owned()));
+        }
+        if text.is_empty() {
+            text = "No search results found.".to_owned();
+        }
+        let mut seen = std::collections::HashSet::new();
+        pairs.retain(|(_, url)| seen.insert(url.clone()));
+        Ok((text, pairs))
+    }
+}
+fn ppio_web_search_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v3") {
+        format!("{base}/web-search")
+    } else {
+        format!("{base}/v3/web-search")
+    }
 }
 /// Extract citation URLs from the Response output items.
 /// The async-openai crate doesn't provide a helper for this, and the `url` field
@@ -355,11 +475,63 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "custom-enterprise-model".to_string(),
+            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
         let client = WebSearchClient::new(&config, None).expect("client should build");
         assert_eq!(client.model, "custom-enterprise-model");
+    }
+
+    #[test]
+    fn ppio_web_search_url_normalizes_versioned_base() {
+        assert_eq!(
+            ppio_web_search_url("https://api.ppio.com"),
+            "https://api.ppio.com/v3/web-search"
+        );
+        assert_eq!(
+            ppio_web_search_url("https://api.ppio.com/v3/"),
+            "https://api.ppio.com/v3/web-search"
+        );
+    }
+
+    #[tokio::test]
+    async fn ppio_backend_uses_v3_web_search_and_extracts_pages() {
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/web-search"))
+            .and(body_string_contains("rust"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "SearchData": {
+                    "webPages": {
+                        "value": [{
+                            "name": "Rust",
+                            "url": "https://www.rust-lang.org/",
+                            "summary": "A language empowering everyone."
+                        }]
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let config = WebSearchConfig::Enabled {
+            api_key: "ppio-key".to_owned(),
+            base_url: server.uri(),
+            model: "ignored-by-ppio".to_owned(),
+            backend: WebSearchBackend::Ppio,
+            extra_headers: IndexMap::new(),
+            alpha_test_key: None,
+        };
+        let client = WebSearchClient::new(&config, None).expect("client should build");
+        let (content, citations) = client
+            .search("rust", Some(vec!["rust-lang.org".to_owned()]))
+            .await
+            .expect("PPIO search should succeed");
+        assert!(content.contains("A language empowering everyone"));
+        assert_eq!(citations, vec!["https://www.rust-lang.org/"]);
     }
     /// Counts attribution callback invocations for the test below.
     #[derive(Default, Debug)]
@@ -385,6 +557,7 @@ mod tests {
             api_key: "ignored".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "test-model".to_string(),
+            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
@@ -409,6 +582,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "https://api.x.ai/v1".to_string(),
             model: "test-model".to_string(),
+            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
@@ -662,6 +836,7 @@ mod tests {
             api_key: "static-key-from-config".to_string(),
             base_url: server.uri(),
             model: "test-model".to_string(),
+            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
@@ -712,6 +887,7 @@ mod tests {
             api_key: "stale-static-key".to_string(),
             base_url: server.uri(),
             model: "test-model".to_string(),
+            backend: WebSearchBackend::XaiResponses,
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
         };
