@@ -179,6 +179,9 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: sync
     if: needs.sync.outputs.should_release == 'true'
+    permissions:
+      actions: write
+      contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -227,6 +230,22 @@ jobs:
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
+
+      # Persist Cargo's registry plus dependency artifacts in one archive per
+      # target. This avoids sccache's per-object GitHub cache writes, which are
+      # rate-limited on this large workspace and provide almost no warm hits.
+      # The action keeps workspace outputs out of the archive and disables
+      # incremental compilation, so release packaging remains deterministic.
+      - name: Cache Rust dependencies and target artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "release-${{ matrix.target }}"
+          add-job-id-key: "false"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release binary
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
