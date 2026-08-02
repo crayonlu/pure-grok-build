@@ -11,7 +11,7 @@ permissions:
 
 env:
   BINARY_PACKAGE: xai-grok-pager-bin
-  # Use a filesystem cache so sccache writes one archive through actions/cache
+  # Use a filesystem cache so sccache writes one archive through actions/cache.
   # instead of issuing one GitHub cache write per compiler object.
   SCCACHE_DIR: ${{ github.workspace }}/.sccache
   SCCACHE_CACHE_SIZE: 5G
