@@ -229,7 +229,15 @@ async fn start_capture_session(
     tokio::spawn(forward_pcm(mic_rx, audio_tx_rx));
 
     let connect = async {
-        let bearer = crate::auth::require_bearer(auth).await?;
+        // Provider profiles authenticate with their own static/env credential.
+        // Only the legacy xAI websocket path is allowed to consume the shell's
+        // session bearer; requiring it for Deepgram/ElevenLabs would make a
+        // fully configured BYOK voice profile unusable in Open mode.
+        let bearer = if config.protocol.eq_ignore_ascii_case("xai_ws") {
+            crate::auth::require_bearer(auth).await?
+        } else {
+            String::new()
+        };
         StreamingSttSession::connect(config, &bearer).await
     };
     let (connect_res, capture_res) = tokio::join!(connect, capture_task);

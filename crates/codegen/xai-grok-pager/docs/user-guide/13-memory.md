@@ -77,6 +77,35 @@ You can also toggle from inside the `/memory` modal by pressing `t`.
 4. `[memory]` section in config.toml
 5. Default: disabled
 
+### Embedding provider
+
+Memory always works in FTS-only mode. To enable semantic vector search, set an
+embedding `model` and configure its endpoint independently from the chat model.
+This example uses PPIO's OpenAI-compatible Qwen embedding service:
+
+```toml
+[memory]
+enabled = true
+
+[memory.embedding]
+provider = "api"
+protocol = "openai_compatible"
+base_url = "https://api.ppio.com/openai/v1"
+path = "/embeddings"
+model = "qwen/qwen3-embedding-8b"
+env_key = "PPIO_API_KEY"
+dimensions = 4096
+```
+
+The exact request is `POST https://api.ppio.com/openai/v1/embeddings` with a
+Bearer key, the model name, the input texts, and `dimensions = 4096`. Keep
+`PPIO_API_KEY` in the environment rather than writing the secret to
+`config.toml`. `api_key` overrides `env_key`; an `env_key` array is tried in
+order. If `model` is missing, Grok intentionally keeps FTS-only behavior and
+does not treat the chat model as an embedding model. Query, first-turn
+injection, compaction recovery, and background reindex all use this same
+resolved provider configuration.
+
 ---
 
 ## How Memory Is Stored

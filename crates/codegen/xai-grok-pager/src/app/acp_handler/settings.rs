@@ -146,32 +146,11 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
                 .unwrap_or(v),
         );
     }
-    // Tier before voice: same payload may set "API Key" and voice_mode_enabled=false.
-    // Always recompute is_api_key_auth from the tier so a later Free/SuperGrok
-    // stamp does not leave API-key bypass / a hidden billing surface stuck.
-    if let Some(v) = update.subscription_tier_display {
-        let was_api_key = app.is_api_key_auth;
-        let is_key = super::super::app_view::is_api_key_label(&v);
-        app.is_api_key_auth = is_key;
-        app.usage_visible = !is_key && app.team_name.is_none() && !app.has_external_auth_provider;
-        app.sync_billing_surface_to_agents();
-        app.subscription_tier = Some(v);
-        app.apply_tier_restrictions();
-        // Leaving API Key → free/X Basic without a voice field: drop force-on.
-        // Paid tiers keep voice; remote settings may send voice_mode_enabled later.
-        if was_api_key
-            && !is_key
-            && update.voice_mode_enabled.is_none()
-            && app
-                .subscription_tier
-                .as_deref()
-                .is_some_and(xai_grok_shell::tier::is_restricted_tier_name)
-        {
-            app.voice_reset();
-            app.voice_ui_active = false;
-            app.apply_voice_mode_enabled(false);
-        }
-    }
+    // Subscription-tier handling (`subscription_tier_display`, tier-gated
+    // commands, tier-based voice toggles) was removed in the fork: tiers only
+    // ever applied to x.ai OAuth sessions, and BYOK/API-key auth bypasses
+    // them. `is_api_key_auth` is fixed at startup from the advertised auth
+    // methods instead of being re-derived from a server tier stamp.
     if let Some(remote_v) = update.voice_mode_enabled {
         let v = crate::app::resolve_voice_mode_live(Some(remote_v), app.is_api_key_auth);
         if !v {
@@ -200,32 +179,10 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
             .unwrap_or(remote_val);
         app.session_picker_grouped = resolved;
     }
-    if let Some(v) = update.subscription_watch_interval_secs {
-        app.subscription_watch_interval_secs = Some(v);
-    }
-
-    // Gate update logic:
-    // - allow_access == Some(true): explicitly granted → lift the gate
-    // - gate_message.is_some(): server sent a new message → impose/update
-    // - Neither condition met: don't touch the gate. In particular,
-    //   allow_access=Some(false) without a gate_message must NOT clear the
-    //   gate (gate_from_settings returns None when gate_message is absent,
-    //   which would incorrectly lift an existing gate).
-    if update.allow_access == Some(true) {
-        let effs = app.lift_gate();
-        app.pending_effects.extend(effs);
-    } else if let Some(msg) = update.gate_message.as_ref()
-        && !msg.is_empty()
-    {
-        // (An empty gate_message would only clear the gate message text, NOT
-        // access, so it intentionally does not touch the gate here.)
-        let effs = app.impose_gate(xai_grok_shell::auth::GateInfo {
-            message: msg.clone(),
-            url: update.gate_url.clone(),
-            label: update.gate_label.clone(),
-        });
-        app.pending_effects.extend(effs);
-    }
+    // Fork: the subscription gate watch/impose/lift machinery was removed
+    // with the paywall system. `app.gate` is populated only from the shell's
+    // `AuthMeta` (`apply_auth_meta`); `allow_access` / `gate_message` updates
+    // no longer re-impose a gate here. BYOK/API-key sessions are never gated.
 
     // Load config layers once for tips + group_tool_verbs +
     // collapsed_edit_blocks resolution. Loaded unconditionally: the UI flags
@@ -520,6 +477,12 @@ pub(super) fn pick_random_announcement(
 /// `xai-grok-shell/src/agent/mvp_agent.rs` when adding fields that both sides
 /// need.
 #[derive(serde::Deserialize)]
+/// Fork: `gate_message`/`gate_url`/`gate_label`/`allow_access`/
+/// `subscription_tier_display`/`subscription_watch_interval_secs` are still
+/// deserialized from the wire for protocol tolerance but are no longer
+/// consumed (subscription/paywall system removed). Kept as fields so
+/// `#[serde(default)]` tolerance matches upstream wire shapes.
+#[allow(dead_code)]
 pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
     show_resolved_model: Option<bool>,

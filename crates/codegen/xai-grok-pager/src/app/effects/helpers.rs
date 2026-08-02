@@ -875,45 +875,8 @@ pub(super) async fn send_auth_cancel(tx: &AcpAgentTx, request_seq: u64) -> TaskR
     }
     TaskResult::AuthCancelComplete
 }
-pub(super) async fn send_check_subscription(
-    tx: &AcpAgentTx,
-    verify: Option<u64>,
-) -> TaskResult {
-    let req = acp::ExtRequest::new(
-        "x.ai/auth/check_subscription",
-        serde_json::value::to_raw_value(&serde_json::json!({}))
-            .expect("serialize check_subscription params")
-            .into(),
-    );
-    match acp_send(req, tx).await {
-        Ok(resp) => {
-            let meta = serde_json::from_str::<serde_json::Value>(resp.0.get())
-                .ok()
-                .and_then(|v| v.get("meta").cloned());
-            TaskResult::CheckSubscriptionComplete {
-                verify,
-                meta,
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "check_subscription failed");
-            crate::unified_log::warn(
-                "subscription.check.rpc_failed",
-                None,
-                Some(serde_json::json!({
-                    "verify": verify,
-                    "error": e.to_string(),
-                })),
-            );
-            TaskResult::CheckSubscriptionComplete {
-                verify,
-                meta: None,
-            }
-        }
-    }
-}
 /// One-shot subscription re-check for the credit-limit retry flow.
-/// Same ACP call as `send_check_subscription` but returns a
+/// Same ACP call as the removed `send_check_subscription` but returns a
 /// `CreditLimitRecheckComplete` so the dispatch layer can decide
 /// whether to retry the stashed prompt or show the upsell.
 pub(super) async fn send_credit_limit_recheck(

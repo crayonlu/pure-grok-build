@@ -284,9 +284,63 @@ enabled = true                        # auto-inject memory on first turn
 min_score = 0.0                       # score threshold for first-turn injection
 
 [memory.embedding]
-model = "embedding-model"             # embedding model name
-dimensions = 1024                     # vector dimensions
+provider = "api"                      # the only implemented provider
+protocol = "openai_compatible"        # request/response wire profile
+base_url = "https://api.ppio.com/openai/v1"
+path = "/embeddings"
+model = "qwen/qwen3-embedding-8b"
+env_key = "PPIO_API_KEY"
+dimensions = 4096                      # qwen/qwen3-embedding-8b output size
 ```
+
+The embedding endpoint is independent from the chat model. `model` is
+required for vector search; if it is omitted, memory remains FTS-only. The
+endpoint falls back to the active chat endpoint only when `base_url` is
+omitted. `api_key` takes precedence over `env_key` (which may also be an
+ordered array of environment variable names). Use `auth_scheme = "x_api_key"`
+or the nested `[memory.embedding.auth]` table for providers that do not use
+Bearer authentication. The embedding request always targets
+`{base_url}{path}` and does not reuse the chat model's `api_backend`.
+
+### Provider-neutral capability profiles
+
+Search, embeddings, image, video, voice, and other auxiliary services can be
+configured independently under `[capabilities.*]`. A profile owns its base URL,
+request mapping, response mapping, and credentials; it never inherits the
+chat model's session token or request shape.
+
+For example, Firecrawl Search uses the official v2 endpoint and the
+`FIRECRAWL_API_KEY` environment variable:
+
+```toml
+[capabilities.search]
+protocol = "firecrawl"
+base_url = "https://api.firecrawl.dev/v2"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+allowed_domains = "includeDomains"
+
+[capabilities.search.operations.search.response]
+items = "/data/web"
+title = "/title"
+url = "/url"
+content = "/description"
+```
+
+`FIRECRAWL_API_KEY` is required for hosted Firecrawl. For a self-hosted
+deployment, replace `base_url` and use the corresponding key or auth scheme.
+The existing `[mcp_servers.firecrawl]` block is a separate MCP integration;
+it does not configure the `web_search` tool.
 
 ### Subagents
 

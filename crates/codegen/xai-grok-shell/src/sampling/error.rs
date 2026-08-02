@@ -24,8 +24,8 @@ pub const RATE_LIMITED_USER_MESSAGE_OAUTH: &str =
 
 /// API key / team rate-limit copy. Personal grok.com upgrades do not raise API
 /// team limits; admins purchase credits or a higher spend-based tier.
-/// See https://docs.x.ai/developers/rate-limits#rate-limit-tiers
-pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your team\u{2019}s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers";
+/// Fork: neutralized (no x.ai doc link).
+pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your API rate limit. Check your provider\u{2019}s rate-limit tiers or try again later.";
 
 /// Well-known free-usage exhaustion code CCP returns on HTTP 429.
 /// Matches `prod_util_well_known_errors::SUBSCRIPTION_FREE_USAGE_EXHAUSTED`.
@@ -33,9 +33,10 @@ pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your team
 /// flattened message, so this reaches clients embedded in error detail.
 pub const FREE_USAGE_EXHAUSTED_ERROR_CODE: &str = "subscription:free-usage-exhausted";
 
-/// User-facing free-usage exhaustion copy (paywall). Deliberately promises no
+/// User-facing free-usage exhaustion copy. Deliberately promises no
 /// reset duration — the quota window is backend-config-driven.
-pub const FREE_USAGE_USER_MESSAGE: &str = "You\u{2019}ve reached your free Grok Build usage limit for now. Get SuperGrok for much higher limits, or try again later: https://grok.com/supergrok?referrer=grok-build";
+/// Fork: neutralized (no SuperGrok upsell / grok.com link).
+pub const FREE_USAGE_USER_MESSAGE: &str = "You\u{2019}ve reached your current usage limit for now. Try again later, or review your plan\u{2019}s rate limits.";
 
 /// Whether flattened server detail is free-usage-quota exhaustion (paywall),
 /// not transient throttling. Sniffs the well-known code embedded by

@@ -1093,6 +1093,36 @@ async fn test_request_includes_headers() {
     assert_eq!(request.header("x-grok-req-id"), Some("req-67890"));
 }
 
+/// Native Anthropic Messages interoperability: the sampler must emit the
+/// required version header, use `x-api-key` when configured for Anthropic
+/// auth, and preserve the `/v1/messages` body shape.
+#[tokio::test]
+async fn test_messages_native_anthropic_wire_contract() {
+    let server = MockInferenceServer::start().await.unwrap();
+    server.set_response("Anthropic-compatible response");
+
+    let mut config = test_sampler_config(&server.url(), ApiBackend::Messages, &[]);
+    config.auth_scheme = xai_grok_sampler::AuthScheme::XApiKey;
+    let client = Client::new(config).expect("Messages client should build");
+    let request = ConversationRequest::from_items(vec![ConversationItem::user("Hello")]);
+
+    let (mut stream, _metadata) = client.conversation_stream_messages(request).await.unwrap();
+    while stream.next().await.is_some() {}
+
+    let wire = server.requests().pop().expect("one Messages request");
+    assert_eq!(wire.path, "/v1/messages");
+    assert_eq!(wire.header("x-api-key"), Some("test-api-key"));
+    assert_eq!(wire.header("authorization"), None);
+    assert_eq!(wire.header("anthropic-version"), Some("2023-06-01"));
+
+    let body = server.request_bodies().pop().expect("Messages JSON body");
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+    assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");
+    assert_eq!(body["stream"], true);
+}
+
 /// The session writes the resolved `x-compaction-at` value into
 /// `SamplerConfig::extra_headers`; this proves the client forwards it on the wire.
 #[tokio::test]
@@ -1164,6 +1194,10 @@ async fn test_responses_api_request_format() {
 
     let (mut stream, _metadata, _) = client.conversation_stream_responses(request).await.unwrap();
     while stream.next().await.is_some() {}
+
+    let wire = server.requests().pop().expect("one Responses request");
+    assert_eq!(wire.path, "/v1/responses");
+    assert_eq!(wire.header("authorization"), Some("Bearer test-api-key"));
 
     let body = server.request_bodies().pop().unwrap();
 

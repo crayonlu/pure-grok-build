@@ -31,6 +31,8 @@ use std::sync::OnceLock;
 
 use xai_grok_workspace::permission::ClientType;
 
+pub mod provider;
+
 /// Per-attempt ceiling for a startup `/settings` or `/v1/models` fetch; raising
 /// it delays how soon the background refresh gives up and retries.
 pub const STARTUP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);

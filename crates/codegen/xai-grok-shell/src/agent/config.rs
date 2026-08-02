@@ -1343,6 +1343,11 @@ pub struct ShellEnvironmentPolicyKnownKeys {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub features: Features,
+    /// Fork-owned service routing policy.  `open` is the safe default and
+    /// keeps upstream xAI-only auxiliary services disabled unless explicitly
+    /// opted into with `mode = "xai_compat"`.
+    #[serde(default)]
+    pub fork: crate::agent::service_policy::ForkConfig,
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
@@ -1392,6 +1397,11 @@ pub struct Config {
     #[serde(default, skip_serializing)]
     pub image_gen:
         Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
+    /// `[capabilities.<name>]` — shared provider-neutral profiles for
+    /// auxiliary services. Legacy capability-specific sections remain
+    /// supported and are resolved into these profiles by each subsystem.
+    #[serde(default)]
+    pub capabilities: xai_grok_config_types::CapabilityProvidersConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1804,6 +1814,7 @@ impl Default for Config {
         let endpoints = EndpointsConfig::default();
         let mut cfg = Self {
             features: Features::default(),
+            fork: crate::agent::service_policy::ForkConfig::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -1821,6 +1832,7 @@ impl Default for Config {
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
             image_gen: None,
+            capabilities: xai_grok_config_types::CapabilityProvidersConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
@@ -1885,7 +1897,10 @@ impl Default for Config {
             cli_no_memory: false,
             cli_subagents: None,
             memory_config: None,
-            managed_mcps_enabled: true,
+            // Open fork mode must fail closed even before the startup path has
+            // a chance to call `resolve_runtime_fields`; compatibility mode
+            // re-enables this from the resolved config.
+            managed_mcps_enabled: false,
             managed_mcp_gateway_tools_enabled: false,
             auto_wake_enabled: true,
             compat_resolved: CompatConfig::default(),
@@ -2235,8 +2250,8 @@ impl Config {
             ctx.remote_settings,
             ctx.is_headless,
         );
-        self.managed_mcps_enabled = mcps.enabled;
-        self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
+        self.managed_mcps_enabled = !self.fork.is_open() && mcps.enabled;
+        self.managed_mcp_gateway_tools_enabled = !self.fork.is_open() && mcps.gateway_tools_enabled;
         let models = crate::config::ModelOverrideConfig::resolve(
             ctx.cli_web_search_model,
             ctx.cli_session_summary_model,
@@ -2329,19 +2344,19 @@ impl Config {
         }
     }
     pub fn is_telemetry_enabled(&self) -> bool {
-        self.resolve_telemetry_mode().value.is_enabled()
+        !self.fork.is_open() && self.resolve_telemetry_mode().value.is_enabled()
     }
     pub fn is_trace_upload_enabled(&self) -> bool {
-        self.resolve_trace_upload().value
+        !self.fork.is_open() && self.resolve_trace_upload().value
     }
     pub fn is_feedback_enabled(&self) -> bool {
-        self.resolve_feedback().value
+        !self.fork.is_open() && self.resolve_feedback().value
     }
     pub fn is_session_recap_enabled(&self) -> bool {
         self.resolve_session_recap().value
     }
     pub fn is_voice_mode_enabled(&self) -> bool {
-        self.resolve_voice_mode().value
+        !self.fork.is_open() && self.resolve_voice_mode().value
     }
     /// Two-pass (prefire) compaction gate. Default OFF (opt-in) — enable via
     /// remote settings `two_pass_compaction_enabled`, the `[features] two_pass_compaction`
@@ -2398,7 +2413,7 @@ impl Config {
             rs.and_then(|s| s.jemalloc_heap_profile_thresholds_bytes.as_deref()),
             rs.and_then(|s| s.jemalloc_heap_profile_poll_interval_secs),
             data_collection_disabled,
-            self.resolve_trace_upload().value,
+            self.is_trace_upload_enabled(),
             crate::heap_profile::prof_available(),
         )
     }
@@ -2415,7 +2430,7 @@ impl Config {
             jemalloc_thresholds,
             jemalloc_poll_interval_secs,
             data_collection_disabled,
-            self.resolve_trace_upload().value,
+            self.is_trace_upload_enabled(),
             crate::heap_profile::prof_available(),
         )
     }
@@ -11573,7 +11588,10 @@ hooks = true
         });
         assert!(cfg.subagents_enabled);
         assert!(!cfg.respect_gitignore);
-        assert!(cfg.managed_mcps_enabled);
+        assert!(
+            !cfg.managed_mcps_enabled,
+            "open fork mode must not enable upstream managed MCP fetching"
+        );
         assert!(!cfg.managed_mcp_gateway_tools_enabled);
         assert_eq!(
             cfg.web_search_model,
@@ -11637,7 +11655,44 @@ hooks = true
             laziness_debug_log: None,
             storage_mode: None,
         });
-        assert!(cfg.managed_mcp_gateway_tools_enabled);
+        assert!(
+            !cfg.managed_mcp_gateway_tools_enabled,
+            "open fork mode must not enable upstream managed MCP gateway tools"
+        );
+    }
+    #[test]
+    #[serial]
+    fn resolve_runtime_fields_xai_compat_restores_managed_mcp_surfaces() {
+        clear_runtime_env_vars();
+        clear_managed_mcp_env_vars();
+        let raw: toml::Value = toml::from_str(
+            r#"
+[fork]
+mode = "xai_compat"
+"#,
+        )
+        .unwrap();
+        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
+            raw_config: &raw,
+            remote_settings: None,
+            is_headless: false,
+            cli_subagents: None,
+            cli_web_search_model: None,
+            cli_session_summary_model: None,
+            cli_experimental_memory: false,
+            cli_no_memory: false,
+            disable_web_search: false,
+            todo_gate: false,
+            laziness_debug_log: None,
+            storage_mode: None,
+        });
+        assert_eq!(
+            cfg.fork.mode,
+            crate::agent::service_policy::ForkMode::XaiCompat
+        );
+        assert!(cfg.managed_mcps_enabled);
+        assert!(!cfg.managed_mcp_gateway_tools_enabled);
     }
     #[test]
     #[serial]

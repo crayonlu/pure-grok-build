@@ -122,6 +122,11 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 async fn sync_bundle(agent: &MvpAgent, req: BundleSyncRequest) -> anyhow::Result<BundleSyncResult> {
+    if agent.cfg.borrow().fork.is_open() {
+        anyhow::bail!(
+            "bundle sync is disabled in open fork mode; set GROK_FORK_MODE=xai_compat to enable it"
+        );
+    }
     let deployment_key = agent.deployment_key();
     if !has_bundle_credentials(Some(&agent.auth_manager), deployment_key.as_deref()) {
         anyhow::bail!(NO_BUNDLE_CREDENTIALS_ERROR);

@@ -363,6 +363,40 @@ model = "my-custom-model"
 supports_backend_search = true
 ```
 
+To use a standalone search provider such as Firecrawl, configure a capability
+profile instead of pointing `web_search` at a chat model. The profile owns its
+own endpoint and credential:
+
+```toml
+[capabilities.search]
+protocol = "firecrawl"
+base_url = "https://api.firecrawl.dev/v2"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+allowed_domains = "includeDomains"
+
+[capabilities.search.operations.search.response]
+items = "/data/web"
+title = "/title"
+url = "/url"
+content = "/description"
+```
+
+This calls `POST https://api.firecrawl.dev/v2/search` with
+`Authorization: Bearer $FIRECRAWL_API_KEY`; it does not forward a signed-in
+session token to Firecrawl. The MCP example in the configuration guide is a
+different integration and can be enabled independently.
+
 ---
 
 ## Using Custom Models

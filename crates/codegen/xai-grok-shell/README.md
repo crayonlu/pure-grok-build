@@ -1813,6 +1813,10 @@ temperature = 0.7                     # Sampling temperature (0.0-2.0)
 top_p = 0.95                          # Nucleus sampling parameter
 max_completion_tokens = 8192          # Max tokens per response
 context_window = 256000               # Total context window in tokens (for auto-compact)
+api_backend = "chat_completions"      # chat_completions | responses | messages
+query_params = { api-version = "2026-07-22" } # Optional URL query parameters
+env_http_headers = { "X-Tenant" = "TENANT_TOKEN" } # Header -> env var
+supports_vision = true                 # Set false for text-only models
 ```
 
 **Credential resolution order:** `api_key` → `env_key` → cached `auth_provider` token (terminal: a cache miss resolves to no credential, never the session token) → session token → `XAI_API_KEY`. See [Per-Model Auth Providers](#per-model-auth-providers).
@@ -1857,6 +1861,39 @@ api_key = "sk-custom"
 > api_backend = "responses"            # required — web search uses the Responses API
 > # base_url, api_key, env_key optional — defaults to cli-chat-proxy
 > ```
+
+For a standalone search service such as Firecrawl, use a provider-neutral
+capability profile. It has its own endpoint and key and does not forward the
+signed-in chat session token:
+
+```toml
+[capabilities.search]
+protocol = "firecrawl"
+base_url = "https://api.firecrawl.dev/v2"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+allowed_domains = "includeDomains"
+
+[capabilities.search.operations.search.response]
+items = "/data/web"
+title = "/title"
+url = "/url"
+content = "/description"
+```
+
+This calls `POST https://api.firecrawl.dev/v2/search` with
+`Authorization: Bearer $FIRECRAWL_API_KEY`. The existing Firecrawl MCP server,
+if configured under `[mcp_servers.firecrawl]`, is a separate integration.
 
 ### Examples
 
@@ -2181,8 +2218,36 @@ Key options under `[memory]` in `~/.grok/config.toml`:
 | `search.min_score` | `0.35` | Minimum relevance score threshold for explicit memory search and recovery paths |
 | `initial_injection.enabled` | `true` | Enable automatic first-turn memory injection |
 | `initial_injection.min_score` | `0.0` | Override score threshold for first-turn injection (`0.0` preserves historical no-filter behavior) |
-| `embedding.model` | *(unset)* | Embedding model for vector search; unset disables embeddings |
+| `embedding.provider` | `"api"` | Embedding provider (`api` is currently implemented) |
+| `embedding.protocol` | `"openai_compatible"` | Embedding wire profile |
+| `embedding.base_url` | *(chat endpoint fallback)* | Independent embedding API base URL |
+| `embedding.path` | `"/embeddings"` | Endpoint path appended to `base_url` |
+| `embedding.model` | *(unset)* | Embedding model; unset keeps FTS-only mode |
+| `embedding.env_key` | *(unset)* | Environment variable name(s) for the embedding key |
+| `embedding.auth_scheme` | `"bearer"` | `"bearer"` or `"x_api_key"` |
 | `embedding.dimensions` | `1024` | Embedding vector dimensions |
+
+Example for PPIO's Qwen embedding service:
+
+```toml
+[memory]
+enabled = true
+
+[memory.embedding]
+provider = "api"
+protocol = "openai_compatible"
+base_url = "https://api.ppio.com/openai/v1"
+path = "/embeddings"
+model = "qwen/qwen3-embedding-8b"
+env_key = "PPIO_API_KEY"
+dimensions = 4096
+```
+
+This sends `POST https://api.ppio.com/openai/v1/embeddings` with the embedding
+key, model, input texts, and dimensions. Query, initial injection, compaction
+recovery, and background reindex share this resolved configuration. Keep keys
+in the environment; `api_key` overrides `env_key`, and an `env_key` array is
+tried in order.
 
 ### Observability
 

@@ -184,7 +184,7 @@ async fn run_setup_command(json: bool) {
                 println!("{out}");
                 if !report.configured {
                     eprintln!(
-                        "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                        "Your team doesn't have a managed configuration yet. A team admin can set one up."
                     );
                 }
             }
@@ -199,7 +199,7 @@ async fn run_setup_command(json: bool) {
         SetupOutcome::Installed => eprintln!("Applied managed configuration."),
         SetupOutcome::NothingConfigured => {
             eprintln!(
-                "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                "Your team doesn't have a managed configuration yet. A team admin can set one up."
             );
         }
         SetupOutcome::Skipped => {
@@ -2080,19 +2080,14 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 )
                 .await;
             }
-            Command::Login {
-                legacy: _,
-                oauth,
-                device_auth,
-                devbox,
-            } => {
+            Command::Login { api_key } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
+                xai_grok_shell::auth::run_cli_login(&config, api_key.as_deref()).await?;
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
@@ -2302,8 +2297,28 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if no_auto_update_flag {
         return false;
     }
+    // Open mode must not silently contact the upstream xAI CDN. A self-hosted
+    // CLI base or release repository is an explicit provider-owned update
+    // source and remains eligible; explicit `grok update` is handled by the
+    // command path separately and is never gated here.
+    if xai_grok_shell::agent::service_policy::mode_from_disk().is_open()
+        && !has_custom_update_source()
+    {
+        tracing::debug!("automatic updates disabled in open fork mode");
+        return false;
+    }
     !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
         .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
+}
+
+fn has_custom_update_source() -> bool {
+    ["GROK_CLI_BASE_URL", "GROK_UPDATE_REPO", "GROK_NPM_REGISTRY"]
+        .into_iter()
+        .any(|key| {
+            std::env::var(key)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio
 /// agent, from the managed install. Other modes update in `run_agent_command`.

@@ -891,6 +891,10 @@ pub(crate) fn clear_product_skills_cache_for_test() {
 pub(crate) async fn product_skill_infos(
     auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
 ) -> Option<Vec<SkillInfo>> {
+    if crate::agent::service_policy::mode_from_disk().is_open() {
+        tracing::debug!("product skills disabled in open mode");
+        return None;
+    }
     let Some(auth) = auth else {
         tracing::warn!("product skills: no auth — catalog unavailable");
         return None;

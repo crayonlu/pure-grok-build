@@ -31,6 +31,12 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: ShareSessionRequest = parse_params(args)?;
 
+    if agent.cfg.borrow().fork.is_open() {
+        return Err(
+            acp::Error::invalid_request().data("Session sharing is disabled in open fork mode")
+        );
+    }
+
     // Get auth - required for sharing.
     let auth = require_xai_auth_for_share(&agent.auth_manager)?;
 

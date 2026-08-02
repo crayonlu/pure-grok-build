@@ -777,6 +777,10 @@ async fn try_ensure_fresh_auth_with(auth_manager: &Arc<AuthManager>) -> Option<G
 pub(crate) async fn try_noninteractive_auth_no_mint(
     grok_com_config: &GrokComConfig,
 ) -> Option<GrokAuth> {
+    if crate::agent::service_policy::mode_from_disk().is_open() {
+        tracing::debug!("startup xAI auth resolution skipped in open fork mode");
+        return None;
+    }
     try_noninteractive_auth_no_mint_with(&build_startup_auth_manager(grok_com_config)).await
 }
 
@@ -954,132 +958,44 @@ pub async fn ensure_authenticated_or_noninteractive(
 
 /// Unified `grok login` handler for CLI entry points (tui, pager).
 ///
-/// Precedence: `--oauth` forces loopback, `--device-auth` forces device,
-/// otherwise `GROK_LOGIN_DEVICE_FLOW` env / `[auth] login_device_flow` config /
-/// loopback default. Both transports run through `run_auth_flow_inner` so the
-/// external auth provider and devbox auto-migration are tried first.
+/// Fork: interactive OAuth / device / devbox login was removed with the x.ai
+/// session login. `grok login` now only persists a BYOK API key under the
+/// `xai::api_key` scope (`--api-key <KEY>`), or prints guidance to set
+/// `XAI_API_KEY` / per-model `env_key` when no key is passed.
 pub async fn run_cli_login(
     config: &crate::agent::config::Config,
-    oauth: bool,
-    device_auth: bool,
-    devbox: bool,
+    api_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    // Devbox never reaches the login funnel, so it reports nothing and needs
-    // no telemetry client — and `AuthManager::new` is not free (it logs, and
-    // may rewrite auth.json to drop a stale scope).
-    if devbox {
-        let auth = super::devbox_login::run_devbox_login(config).await?;
-        return apply_post_login_config(auth).await;
+    let grok_home = grok_home::grok_home();
+    match api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(key) => {
+            crate::auth::storage::store_api_key(&grok_home, key)
+                .map_err(|e| anyhow::anyhow!("Failed to store API key: {e}"))?;
+            println!(
+                "Stored API key in {}.",
+                grok_home.join("auth.json").display()
+            );
+            println!(
+                "You can now use the CLI with your key. To switch keys, run `grok login --api-key <KEY>` again."
+            );
+        }
+        None => {
+            println!(
+                "No API key provided. Set the XAI_API_KEY environment variable, add a per-model `env_key` in ~/.grok/config.toml, or run `grok login --api-key <KEY>`."
+            );
+        }
     }
-
     // Agent bootstrap is what normally initializes the product telemetry
-    // client, and `grok login` never boots an agent, so without this every
-    // event this process emits is dropped before reaching a sink. One manager
-    // serves both the identity it reads and the login flow below.
-    let auth_manager = Arc::new(AuthManager::new(
-        &grok_home::grok_home(),
-        config.grok_com_config.clone(),
-    ));
+    // client; keep the identity read harmless (no login event to drain).
+    let auth_manager = Arc::new(AuthManager::new(&grok_home, config.grok_com_config.clone()));
     crate::agent::init::update_telemetry_config(config, &auth_manager);
-
-    let result = run_cli_login_steps(config, &auth_manager, oauth, device_auth).await;
-
-    // Posts run on a spawned task and this process exits as soon as we return.
     xai_grok_telemetry::session_ctx::drain_pending(CLI_TELEMETRY_DRAIN).await;
-    result
+    Ok(())
 }
 
 /// Returns as soon as the post lands (~1.7s cold), so the bound only bites on a
 /// black-holed network — where waiting out the HTTP client timeout would be worse.
 const CLI_TELEMETRY_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
-
-async fn run_cli_login_steps(
-    config: &crate::agent::config::Config,
-    auth_manager: &Arc<AuthManager>,
-    oauth: bool,
-    device_auth: bool,
-) -> anyhow::Result<()> {
-    let login_override = LoginTransportOverride::from_flags(oauth, device_auth);
-
-    // Mirror `run_auth_flow_inner`'s precedence: enterprise OIDC (oidc=Some,
-    // oauth2=None) always uses the loopback flow; only the xAI OAuth2 provider
-    // supports the device flow. Without this guard, `grok login` on an
-    // enterprise-OIDC deployment would wrongly enter the device branch (which
-    // requires `oauth2`) and error.
-    let authenticated = if cli_should_use_device(&config.grok_com_config, login_override).await {
-        if config.grok_com_config.oauth2.is_none() {
-            // No OIDC and no oauth2 here, so `--oauth` can't help.
-            anyhow::bail!("Sign-in is not available for this deployment. Set XAI_API_KEY instead.");
-        }
-        // Route through the shared inner flow (not `run_device_code_login`
-        // directly) so the external auth provider and devbox auto-migration run
-        // before the interactive device login. `force_interactive` skips the
-        // up-front clear, so abandoning the device prompt doesn't log the user
-        // out; on `NotEnabled` it falls back to loopback.
-        // Already resolved/logged above; pass `Preresolved(true)` so the inner flow
-        // honors device without a second fetch or a duplicate `cli`-attributed log.
-        let (auth, did_auth) = run_auth_flow_interactive(
-            auth_manager,
-            &config.grok_com_config,
-            None,
-            None,
-            None,
-            LoginTransportOverride::Preresolved(true),
-        )
-        .await?;
-        if did_auth {
-            report_signed_in(&auth);
-        }
-        auth
-    } else {
-        // OIDC has no device endpoint, so `--device-auth` falls back here.
-        if device_auth && crate::auth::oidc::is_configured(&config.grok_com_config) {
-            eprintln!(
-                "Device-code login isn't available for your SSO provider; using browser sign-in."
-            );
-        }
-        // Loopback. `reauth=true` clears creds up front (legacy-scope hygiene),
-        // so abandoning logs you out — unlike the device branch above. Calls
-        // `run_auth_flow` rather than `ensure_authenticated_with_override`,
-        // which would build a second `AuthManager`; with `reauth` set and no
-        // message prefix, the rest of that wrapper is a no-op.
-        // Already resolved/logged above; pass `Preresolved(false)` so the inner
-        // flow honors loopback without a duplicate `cli`-attributed log.
-        let (auth, did_auth) = run_auth_flow(
-            auth_manager,
-            &config.grok_com_config,
-            true,
-            None,
-            None,
-            None,
-            LoginTransportOverride::Preresolved(false),
-        )
-        .await?;
-        if did_auth {
-            report_signed_in(&auth);
-        }
-        auth
-    };
-
-    apply_post_login_config(authenticated).await
-}
-
-/// Sync this principal's config now rather than waiting for the background
-/// tick. Stay quiet about absence/failure during login — confirm only when
-/// config was actually applied; `grok setup` reports the no-config case.
-async fn apply_post_login_config(authenticated: GrokAuth) -> anyhow::Result<()> {
-    let outcome = crate::managed_config::post_login_sync(Some(authenticated)).await;
-    match outcome {
-        crate::managed_config::ManagedConfigSync::Updated { is_team: true } => {
-            eprintln!("Applied your team's managed configuration.");
-        }
-        crate::managed_config::ManagedConfigSync::Updated { is_team: false } => {
-            eprintln!("Applied your deployment's managed configuration.");
-        }
-        _ => {}
-    }
-    Ok(())
-}
 
 /// Result of a logout operation. Used by both the CLI subcommand and
 /// the ACP `/logout` slash command so the presentation layer can format

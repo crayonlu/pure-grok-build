@@ -401,6 +401,7 @@ async fn test_response_header_context_window_downgrade_rejected() {
 fn initial_injection_backend_params_use_override_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
         session_id: "test-session".to_owned(),
+        embedding_runtime: None,
         embed_config: None,
         embed_base_url: "http://localhost".to_owned(),
         embed_api_key: None,
@@ -429,6 +430,7 @@ fn initial_injection_backend_params_use_override_min_score() {
 fn initial_injection_backend_params_preserve_default_zero_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
         session_id: "test-session".to_owned(),
+        embedding_runtime: None,
         embed_config: None,
         embed_base_url: "http://localhost".to_owned(),
         embed_api_key: None,

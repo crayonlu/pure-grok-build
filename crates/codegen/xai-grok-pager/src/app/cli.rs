@@ -23,26 +23,9 @@ pub enum Command {
     Logout,
     /// Sign in to Grok
     Login {
-        /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
-        #[arg(long, hide = true)]
-        legacy: bool,
-        /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
-        oauth: bool,
-        /// Use device-code authentication for headless/remote environments.
-        #[arg(
-            long = "device-auth",
-            visible_alias = "device-code",
-            conflicts_with_all = ["oauth"]
-        )]
-        device_auth: bool,
-        /// Authenticate for remote development environments (hidden).
-        ///
-        /// Field is always present so match arms stay feature-unification-safe
-        /// across Bazel/cargo graphs; clap only registers `--devbox` when
-        /// `devbox-login` is enabled (`arg(skip)` otherwise → always false).
-        #[arg(skip)]
-        devbox: bool,
+        /// Persist a BYOK API key under the `xai::api_key` scope.
+        #[arg(long = "api-key", value_name = "KEY")]
+        api_key: Option<String>,
     },
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),

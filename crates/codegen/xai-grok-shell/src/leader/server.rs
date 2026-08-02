@@ -1151,6 +1151,7 @@ async fn handle_workspace_start(
         None,
         false,
         false,
+        !crate::agent::service_policy::mode_from_disk().is_open(),
     )
     .await
     .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;

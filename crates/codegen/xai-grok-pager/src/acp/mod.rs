@@ -583,20 +583,23 @@ pub fn startup_auth_metadata(
     Option<acp::AuthMethodId>,
     AuthStartMode,
 ) {
-    let first_method = auth_methods.first();
-    let needs_login = first_method
-        .map(|m| AuthMethodKind::from_id(m.id()).needs_interactive_login())
-        .unwrap_or(false);
+    let Some(first_method) = auth_methods.first() else {
+        // Fork: no advertised auth methods (BYOK-only build with neither an
+        // API key nor a cached session) still needs the welcome screen so it
+        // can prompt for API-key setup instead of silently entering an
+        // unusable `Done` state.
+        return (true, None, None, AuthStartMode::Pending);
+    };
+    let needs_login = AuthMethodKind::from_id(first_method.id()).needs_interactive_login();
 
     if !needs_login {
         return (false, None, None, AuthStartMode::Pending);
     }
 
-    let method = first_method.unwrap(); // safe: needs_login == true implies first_method.is_some()
-    let login_label = Some(method.name().to_string());
-    let login_method_id = Some(method.id().clone());
+    let login_label = Some(first_method.name().to_string());
+    let login_method_id = Some(first_method.id().clone());
 
-    let is_provider = method
+    let is_provider = first_method
         .meta()
         .as_ref()
         .and_then(|v| v.get("external_provider"))
@@ -892,9 +895,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_auth_empty_methods_no_login() {
+    fn startup_auth_empty_methods_shows_setup_screen() {
         let (needs, label, method_id, mode) = startup_auth_metadata(&[]);
-        assert!(!needs);
+        assert!(needs);
         assert!(label.is_none());
         assert!(method_id.is_none());
         assert_eq!(mode, AuthStartMode::Pending);

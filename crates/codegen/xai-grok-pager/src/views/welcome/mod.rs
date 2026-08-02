@@ -111,8 +111,12 @@ pub struct WelcomeRenderResult {
     /// Hit-test rect for the "show full URL" fallback link.
     pub auth_fallback_rect: Option<Rect>,
     /// Hit-test rect for the "[Refresh]" button on the paywall tier line.
+    /// Fork: kept for shape tolerance; the paywall click handler was removed.
+    #[allow(dead_code)]
     pub refresh_rect: Option<Rect>,
     /// Hit-test rect for the gate URL link (click to open in browser).
+    /// Fork: kept for shape tolerance; the paywall click handler was removed.
+    #[allow(dead_code)]
     pub gate_url_rect: Option<Rect>,
     /// Whether a "Changelog" menu action was rendered (above Quit), so the
     /// input handler can map the extra menu row to the release-notes action
@@ -715,9 +719,9 @@ pub fn render_welcome(
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
-            let label = params.login_label.unwrap_or("grok.com");
-            let login_text = format!("Login with {}", label);
-            let menu = [("l", login_text.as_str()), ("q", "Quit")];
+            // Fork: interactive login removed — the pending welcome shows
+            // API-key setup guidance instead of a "Login with …" menu.
+            let menu = [("q", "Quit")];
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,

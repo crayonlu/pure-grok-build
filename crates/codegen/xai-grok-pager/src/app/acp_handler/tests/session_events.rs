@@ -387,6 +387,31 @@
     }
 
     #[test]
+    fn apply_retry_state_api_key_credit_error_stays_generic() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        apply_retry_state(
+            &RetryState::Failed {
+                error_type: "proxy_error".into(),
+                message: "API error (status 402 Payment Required): balance exhausted".into(),
+            },
+            &mut session,
+            &mut scrollback,
+            true,
+        );
+
+        assert!(
+            !session.credit_limit_blocked,
+            "API-key/provider errors must not activate subscription recheck"
+        );
+        assert_eq!(
+            scrollback.len(),
+            1,
+            "provider credit errors should render a generic failure block"
+        );
+    }
+
+    #[test]
     fn apply_retry_state_non_credit_limit_failed_clears_in_flight_prompt() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -890,4 +915,3 @@
             "non-encrypted_content error types must not set model_incompatible"
         );
     }
-
