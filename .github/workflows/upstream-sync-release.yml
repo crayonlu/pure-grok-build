@@ -241,13 +241,56 @@ jobs:
         with:
           workspaces: ". -> target"
           shared-key: "release-${{ matrix.target }}"
-          add-job-id-key: "false"
           cache-targets: "true"
           cache-all-crates: "true"
           cache-bin: "false"
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build release binary
+      # Windows compilation is dominated by MSVC rustc/linker work. Keep a
+      # filesystem-backed sccache archive for the Windows job so one Actions
+      # cache entry can be restored/saved without per-object GitHub cache
+      # writes. The run id makes each saved archive immutable while the
+      # restore prefix reuses the newest cache for the same dependency lock.
+      - name: Set up sccache (Windows)
+        if: runner.os == 'Windows'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Windows sccache archive
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-
+            sccache-windows-msvc-v2-
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
+        env:
+          SCCACHE_DIR: ${{ github.workspace }}/.sccache
+          SCCACHE_CACHE_SIZE: 5G
+          SCCACHE_GHA_ENABLED: false
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
+
+      - name: Show Windows sccache statistics
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: sccache --show-stats
+
+      - name: Stop Windows sccache before archive
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          sccache --stop-server
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+
+      - name: Build release binary (Unix)
+        if: runner.os != 'Windows'
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
 
       - name: Strip release binary (Linux)
