@@ -255,6 +255,9 @@ jobs:
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          # Keep concurrent matrix jobs in separate GHA cache namespaces so
+          # their per-object uploads do not race each other.
+          echo "SCCACHE_GHA_VERSION=${{ matrix.target }}-v1" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           # sccache cannot reuse incremental Rust artifacts; avoid producing
           # them in CI while keeping the local Cargo profile unchanged.

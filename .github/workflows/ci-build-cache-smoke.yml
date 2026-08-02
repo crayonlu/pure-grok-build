@@ -80,6 +80,8 @@ jobs:
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          # Match the release workflow: isolate concurrent target uploads.
+          echo "SCCACHE_GHA_VERSION=${{ matrix.target }}-v1" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
 
