@@ -352,6 +352,35 @@ jobs:
             *.sha256
           retention-days: 7
 
+  cleanup-windows-sccache:
+    name: Prune Windows sccache archives
+    needs: [sync, build]
+    if: needs.sync.outputs.should_release == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Keep newest two Windows sccache archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          stale_ids="$(gh cache list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --key "sccache-windows-msvc-v2-" \
+            --sort created_at \
+            --order desc \
+            --limit 100 \
+            --json id \
+            --jq '.[2:] | .[].id')"
+
+          while IFS= read -r id; do
+            [[ -z "${id}" ]] && continue
+            echo "Deleting stale Windows sccache cache ${id}"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}"
+          done <<< "${stale_ids}"
+
   release:
     name: Publish nightly release
     needs: [sync, build]
