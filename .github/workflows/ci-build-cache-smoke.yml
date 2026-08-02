@@ -1,5 +1,5 @@
 name: Temporary Rust cache smoke test
-# Temporary cold/warm validation for the release cache strategy.
+# Warm pass: the preceding cold run seeded one archive per target.
 
 on:
   push:
