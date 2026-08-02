@@ -571,6 +571,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             memory_storage.ensure_initialized().unwrap();
             let memory_backend_params = crate::session::memory::MemoryBackendParams {
                 session_id: session_info.id.to_string(),
+                embedding_runtime: None,
                 embed_config: None,
                 embed_base_url: "http://localhost".to_string(),
                 embed_api_key: None,

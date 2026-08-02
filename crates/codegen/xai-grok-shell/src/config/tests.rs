@@ -144,6 +144,52 @@ fn memory_config_from_toml() {
         assert!(mem.enabled);
     });
 }
+
+#[test]
+fn capability_profiles_parse_from_layered_config() {
+    let raw: toml::Value = toml::from_str(
+        r#"
+        [capabilities.search]
+        protocol = "tavily"
+        base_url = "https://api.tavily.com"
+        env_key = ["TAVILY_API_KEY", "BACKUP_TAVILY_KEY"]
+        [capabilities.search.operations.default]
+        method = "POST"
+        path = "/search"
+        [capabilities.search.operations.default.request]
+        body = "json"
+        [capabilities.search.operations.default.request.fields]
+        query = "query"
+        [capabilities.voice]
+        protocol = "deepgram"
+        base_url = "https://api.deepgram.com"
+        env_key = "DEEPGRAM_API_KEY"
+        "#,
+    )
+    .unwrap();
+    let config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+    let search = config
+        .capabilities
+        .search
+        .as_ref()
+        .expect("search capability profile");
+    assert_eq!(search.protocol, "tavily");
+    assert_eq!(search.base_url.as_deref(), Some("https://api.tavily.com"));
+    match search.env_key.as_ref() {
+        Some(xai_grok_provider::ProviderEnvKeys::Many(keys)) => {
+            assert_eq!(keys, &["TAVILY_API_KEY", "BACKUP_TAVILY_KEY"]);
+        }
+        other => panic!("expected ordered environment keys, got {other:?}"),
+    }
+    assert_eq!(
+        search.operations["default"].request.fields["query"],
+        "query"
+    );
+    assert_eq!(
+        config.capabilities.voice.as_ref().unwrap().protocol,
+        "deepgram"
+    );
+}
 #[test]
 fn memory_config_toml_disabled() {
     without_grok_memory(|| {
@@ -316,7 +362,12 @@ fn memory_config_defaults_are_correct() {
         assert_eq!(mem.index.max_chunk_chars, 1600);
         assert_eq!(mem.index.chunk_overlap_chars, 320);
         assert_eq!(mem.embedding.provider, "api");
+        assert_eq!(mem.embedding.base_url, None);
         assert_eq!(mem.embedding.model, None);
+        assert_eq!(mem.embedding.api_key, None);
+        assert_eq!(mem.embedding.env_key, None);
+        assert_eq!(mem.embedding.auth_scheme, None);
+        assert!(mem.embedding.extra_headers.is_empty());
         assert_eq!(mem.embedding.dimensions, 1024);
         assert_eq!(mem.search.max_results, 6);
         assert!((mem.search.min_score - 0.35).abs() < f32::EPSILON);
@@ -380,8 +431,14 @@ chunk_overlap_chars = 400
 
 [memory.embedding]
 provider = "local"
+base_url = "https://embedding.example/v1"
 model = "all-MiniLM-L6-v2"
+env_key = ["EMBEDDING_KEY", "LC_EMBEDDING_KEY"]
+auth_scheme = "x_api_key"
 dimensions = 384
+
+[memory.embedding.extra_headers]
+X-Provider = "test"
 
 [memory.search]
 max_results = 10
@@ -429,9 +486,23 @@ hard_clear_age_turns = 20
         assert_eq!(mem.index.chunk_overlap_chars, 400);
         assert_eq!(mem.embedding.provider, "local");
         assert_eq!(
+            mem.embedding.base_url.as_deref(),
+            Some("https://embedding.example/v1")
+        );
+        assert_eq!(
                 mem.embedding.model.as_deref(),
                 Some("all-MiniLM-L6-v2")
             );
+        assert!(matches!(
+            &mem.embedding.env_key,
+            Some(xai_grok_config_types::MemoryEnvKeys::Many(names))
+                if names == &["EMBEDDING_KEY".to_owned(), "LC_EMBEDDING_KEY".to_owned()]
+        ));
+        assert_eq!(mem.embedding.auth_scheme.as_deref(), Some("x_api_key"));
+        assert_eq!(
+            mem.embedding.extra_headers.get("X-Provider").map(String::as_str),
+            Some("test")
+        );
         assert_eq!(mem.embedding.dimensions, 384);
         assert_eq!(mem.search.max_results, 10);
         assert!((mem.search.min_score - 0.5).abs() < f32::EPSILON);

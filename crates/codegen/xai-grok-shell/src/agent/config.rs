@@ -1397,6 +1397,11 @@ pub struct Config {
     #[serde(default, skip_serializing)]
     pub image_gen:
         Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
+    /// `[capabilities.<name>]` — shared provider-neutral profiles for
+    /// auxiliary services. Legacy capability-specific sections remain
+    /// supported and are resolved into these profiles by each subsystem.
+    #[serde(default)]
+    pub capabilities: xai_grok_config_types::CapabilityProvidersConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1827,6 +1832,7 @@ impl Default for Config {
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
             image_gen: None,
+            capabilities: xai_grok_config_types::CapabilityProvidersConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),

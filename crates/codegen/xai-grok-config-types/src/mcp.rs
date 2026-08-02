@@ -6,7 +6,18 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use xai_grok_mcp::oauth_config::McpOAuthConfig;
+
+/// OAuth configuration extracted from an MCP server entry.
+///
+/// Kept as a value type here so config parsing does not depend on the MCP
+/// runtime crate (which depends on the sampler/tool graph).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub callback_port: Option<u16>,
+}
 
 /// serde default helper. Kept module-local rather than shared — the `pool`
 /// module keeps its own copy for `PoolConfig`.

@@ -6,10 +6,14 @@ edition.workspace = true
 description = "Shared reqwest HTTP clients and User-Agent construction for the grok CLI."
 
 [dependencies]
+bytes = { workspace = true }
+indexmap = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 reqwest-middleware = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
+xai-grok-provider = { workspace = true }
 xai-grok-auth = { workspace = true, features = ["middleware"] }
 xai-grok-extra-ca = { workspace = true }
 xai-grok-sampler = { path = "../xai-grok-sampler" }

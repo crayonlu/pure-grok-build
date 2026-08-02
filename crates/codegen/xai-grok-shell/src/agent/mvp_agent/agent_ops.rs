@@ -2282,6 +2282,41 @@ impl MvpAgent {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
         let cfg = self.cfg.borrow();
 
+        // Generic capability profile takes precedence over legacy image_gen
+        // fields. Its key remains scoped to the configured endpoint.
+        if let Some(profile) = cfg.capabilities.image.clone() {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty()) else {
+                tracing::warn!("image capability profile disabled: base_url is required");
+                return ImageGenConfig::Disabled;
+            };
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&base_url)
+                    || crate::util::is_cli_chat_proxy_url(&base_url))
+            {
+                tracing::warn!(base_url, "image capability profile rejected in open mode");
+                return ImageGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "image capability profile rejected by validation");
+                return ImageGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: profile.model.clone(),
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: None,
+                capability_profile: Some(profile),
+            };
+        }
+
         // Provider-agnostic path: [image_gen] config section present.
         if let Some(ref provider) = cfg.image_gen {
             if cfg.fork.is_open()
@@ -2330,6 +2365,7 @@ impl MvpAgent {
                 edit_model_override: None,
                 tier_restricted: false,
                 provider: Some(provider.clone()),
+                capability_profile: None,
             };
         }
 
@@ -2367,6 +2403,7 @@ impl MvpAgent {
             edit_model_override: cfg.resolve_image_edit_model_override(),
             tier_restricted,
             provider: None,
+            capability_profile: None,
         }
     }
     /// Build deploy-service config. The tool talks directly to the deployer service.
@@ -2382,6 +2419,34 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
+        if let Some(profile) = cfg.capabilities.video.clone() {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty()) else {
+                tracing::warn!("video capability profile disabled: base_url is required");
+                return VideoGenConfig::Disabled;
+            };
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&base_url)
+                    || crate::util::is_cli_chat_proxy_url(&base_url))
+            {
+                tracing::warn!(base_url, "video capability profile rejected in open mode");
+                return VideoGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "video capability profile rejected by validation");
+                return VideoGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return VideoGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                zdr_video_output_s3: None,
+                tier_restricted: false,
+                capability_profile: Some(profile),
+            };
+        }
         if cfg.fork.is_open() {
             tracing::debug!("video_gen disabled in open mode: no provider-neutral adapter configured");
             return VideoGenConfig::Disabled;
@@ -2422,6 +2487,7 @@ impl MvpAgent {
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
             tier_restricted,
+            capability_profile: None,
         }
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
@@ -2456,6 +2522,31 @@ impl MvpAgent {
             &cfg.base_url,
         );
         Some(cfg)
+    }
+
+    /// Resolve an explicitly configured provider-neutral search profile.
+    /// Profiles are self-authenticating; no chat/session credential is copied
+    /// into this path. Open mode accepts only an explicit non-xAI endpoint.
+    pub(super) fn prepare_web_search_profile(
+        &self,
+    ) -> Option<xai_grok_provider::CapabilityProviderConfig> {
+        let profile = self.cfg.borrow().capabilities.search.clone()?;
+        let base_url = profile.base_url.as_deref()?.trim();
+        if base_url.is_empty() {
+            return None;
+        }
+        if crate::agent::service_policy::mode_from_disk().is_open()
+            && (crate::util::is_xai_api_url(base_url)
+                || crate::util::is_cli_chat_proxy_url(base_url))
+        {
+            tracing::warn!(base_url, "search profile rejected in open mode: xAI endpoint");
+            return None;
+        }
+        if let Err(error) = profile.validate() {
+            tracing::warn!(error = %error, "search profile rejected by validation");
+            return None;
+        }
+        Some(profile)
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
@@ -4494,6 +4585,7 @@ impl MvpAgent {
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let web_search_sampling_config = self.prepare_web_search_sampling_config();
+        let web_search_profile = self.prepare_web_search_profile();
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -4732,6 +4824,7 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     web_search_sampling_config,
+                    web_search_profile,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

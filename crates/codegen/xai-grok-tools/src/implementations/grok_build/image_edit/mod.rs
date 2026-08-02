@@ -349,6 +349,22 @@ impl xai_tool_runtime::Tool for ImageEditTool {
         }
         tracing::info!(count = data_urls.len(), "resolved image references");
 
+        if client.capability_profile().is_some() {
+            let image_bytes = client
+                .edit_profiled(&input.prompt, data_urls, &input.aspect_ratio)
+                .await?;
+            let session_folder = {
+                let res = resources.lock().await;
+                res.require::<SessionFolder>()?.0.clone()
+            };
+            let absolute_path = client
+                .writer()
+                .save(&session_folder, &image_bytes, None)
+                .await
+                .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+            return Ok(ToolOutput::ImageEdit(MediaGenOutput::new(absolute_path)));
+        }
+
         let url = client.edit_url();
 
         // Build the request payload. When a provider config is present,

@@ -447,6 +447,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                     edit_model_override: None,
                                     tier_restricted: false,
                                     provider: None,
+                                    capability_profile: None,
                                 }
                             } else {
                                 ImageGenConfig::default()
@@ -458,6 +459,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                     extra_headers: headers.clone(),
                                     zdr_video_output_s3: None,
                                     tier_restricted: false,
+                                    capability_profile: None,
                                 }
                             } else {
                                 VideoGenConfig::default()

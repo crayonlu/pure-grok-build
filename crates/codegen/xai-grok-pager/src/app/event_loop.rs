@@ -1089,6 +1089,64 @@ pub(crate) async fn run(
                     .xai_api_base_url;
             app.voice_config =
                 xai_grok_voice::VoiceConfig::from_config_table(table, Some(&endpoints_base));
+
+            // A capability profile is the provider-neutral voice path. It is
+            // intentionally resolved here, before the pipeline is spawned, so
+            // profile credentials never fall through to the chat/session token.
+            if let Some(profile_value) = table
+                .get("capabilities")
+                .and_then(|value| value.get("voice"))
+            {
+                match profile_value
+                    .clone()
+                    .try_into::<xai_grok_provider::CapabilityProviderConfig>()
+                {
+                    Ok(profile) => {
+                        let base_url = profile.base_url.as_deref().unwrap_or_default();
+                        let open_mode =
+                            xai_grok_shell::agent::service_policy::mode_from_disk().is_open();
+                        if open_mode
+                            && (xai_grok_shell::util::is_xai_api_url(base_url)
+                                || xai_grok_shell::util::is_cli_chat_proxy_url(base_url))
+                        {
+                            tracing::warn!(
+                                base_url,
+                                "voice capability profile rejected in open mode: xAI endpoint"
+                            );
+                            app.voice_reset();
+                            app.apply_voice_mode_enabled(false);
+                        } else {
+                            match xai_grok_voice::VoiceConfig::from_provider_profile(&profile) {
+                                Ok(config) => app.voice_config = config,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "voice capability profile rejected"
+                                    );
+                                    app.voice_reset();
+                                    app.apply_voice_mode_enabled(false);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "failed to parse [capabilities.voice] profile"
+                        );
+                        app.voice_reset();
+                        app.apply_voice_mode_enabled(false);
+                    }
+                }
+            } else if xai_grok_shell::agent::service_policy::mode_from_disk().is_open()
+                && (xai_grok_shell::util::is_xai_api_url(&app.voice_config.api_base)
+                    || xai_grok_shell::util::is_cli_chat_proxy_url(&app.voice_config.api_base))
+            {
+                // The legacy [voice] section is an xAI compatibility surface;
+                // Open mode must not silently send a session bearer there.
+                app.voice_reset();
+                app.apply_voice_mode_enabled(false);
+            }
         }
     }
     // Stamp request-identity headers so the STT handshake attributes voice usage
