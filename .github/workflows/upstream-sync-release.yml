@@ -231,45 +231,24 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      # Keep Cargo's downloaded registry and git dependencies between runs.
-      # The target is intentionally not cached here: sccache below provides a
-      # compiler-result cache without retaining stale workspace artifacts.
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      # Persist Cargo's registry plus dependency artifacts in one archive per
+      # target. This avoids sccache's per-object GitHub cache writes, which are
+      # rate-limited on this large workspace and provide almost no warm hits.
+      # The action keeps workspace outputs out of the archive and disables
+      # incremental compilation, so release packaging remains deterministic.
+      - name: Cache Rust dependencies and target artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ matrix.target }}-
-
-      # sccache caches rustc results across clean hosted runners, including
-      # the Windows/MSVC matrix entry that currently dominates build time.
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Enable sccache for Rust
-        shell: bash
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          # Keep concurrent matrix jobs in separate GHA cache namespaces so
-          # their per-object uploads do not race each other.
-          echo "SCCACHE_GHA_VERSION=${{ matrix.target }}-v1" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          # sccache cannot reuse incremental Rust artifacts; avoid producing
-          # them in CI while keeping the local Cargo profile unchanged.
-          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          workspaces: ". -> target"
+          shared-key: "release-${{ matrix.target }}"
+          add-job-id-key: "false"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release binary
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
-
-      - name: Show sccache statistics
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
 
       - name: Strip release binary (Linux)
         if: runner.os == 'Linux'

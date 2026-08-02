@@ -1,5 +1,5 @@
 name: Temporary Rust cache smoke test
-# Second push validates that the first run's cache entries are reusable.
+# Temporary cold/warm validation for the release cache strategy.
 
 on:
   push:
@@ -61,34 +61,18 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies and target artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-${{ matrix.target }}-
-
-      - name: Set up sccache
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Enable sccache for Rust
-        shell: bash
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          # Match the release workflow: isolate concurrent target uploads.
-          echo "SCCACHE_GHA_VERSION=${{ matrix.target }}-v1" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+          workspaces: ". -> target"
+          shared-key: "smoke-${{ matrix.target }}"
+          add-job-id-key: "false"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          cache-bin: "false"
+          # The smoke workflow runs on this branch so its first pass can seed
+          # the exact cache consumed by the warm validation push.
+          save-if: ${{ startsWith(github.ref, 'refs/heads/codex/') }}
 
       - name: Build release binary
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
-
-      - name: Show sccache statistics
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
