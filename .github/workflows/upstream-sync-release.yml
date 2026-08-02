@@ -179,6 +179,9 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: sync
     if: needs.sync.outputs.should_release == 'true'
+    permissions:
+      actions: write
+      contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -228,8 +231,42 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
+      # Keep Cargo's downloaded registry and git dependencies between runs.
+      # The target is intentionally not cached here: sccache below provides a
+      # compiler-result cache without retaining stale workspace artifacts.
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-
+
+      # sccache caches rustc results across clean hosted runners, including
+      # the Windows/MSVC matrix entry that currently dominates build time.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Enable sccache for Rust
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          # sccache cannot reuse incremental Rust artifacts; avoid producing
+          # them in CI while keeping the local Cargo profile unchanged.
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
+
+      - name: Show sccache statistics
+        if: always()
+        shell: bash
+        run: sccache --show-stats || true
 
       - name: Strip release binary (Linux)
         if: runner.os == 'Linux'
