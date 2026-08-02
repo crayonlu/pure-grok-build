@@ -1,4 +1,5 @@
 name: Temporary Rust cache smoke test
+# Second push validates that the first run's cache entries are reusable.
 
 on:
   push:
