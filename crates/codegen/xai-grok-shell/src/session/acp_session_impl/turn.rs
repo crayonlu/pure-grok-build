@@ -2321,9 +2321,7 @@ impl SessionActor {
                                     "suspended_secs": suspended.as_secs(),
                                 })),
                             );
-                            return Err(acp::Error::internal_error().data(
-                                crate::sampling::error::error_data_with_status(msg, Some(401)),
-                            ));
+                            return Err(self.fail_turn_auth_budget_exhausted(msg).await);
                         }
                     }
                 }

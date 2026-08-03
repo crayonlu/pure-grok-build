@@ -40,6 +40,5 @@ pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod tools;
-pub mod trace_classifier;
 pub mod upload;
 pub mod util;
