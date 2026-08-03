@@ -58,11 +58,28 @@ rustflags = [
     "-C", "link-arg=-Wl,-z,relro,-z,now,-z,noexecstack",
 ]
 
+# /DEBUG:LongSymbolTruncate — the xai-grok-pager binary links 250+ object
+# files and hundreds of crates, producing Rust-mangled symbol names that
+# exceed the MSVC PDB public-symbol name limit.  Without this flag the
+# linker emits LNK4318 (very long symbol name) followed by the fatal
+# LNK4319 (PDB limit hit while adding public symbols).  The flag is
+# supported by MSVC 14.4x+ (VS 2022 17.10+) and is the linker's own
+# recommended fix (see the LNK4318 warning text).  When both /DEBUG
+# (emitted by rustc) and /DEBUG:LongSymbolTruncate are present, link.exe
+# honours the last occurrence, so the truncation behaviour takes effect.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "force-unwind-tables=yes",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
+]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
+rustflags = [
+    "-C", "force-unwind-tables=yes",
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DEBUG:LongSymbolTruncate",
+]
 
 
 # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).

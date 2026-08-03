@@ -91,6 +91,7 @@ agent-client-protocol = { workspace = true }
 xai-acp-lib = { workspace = true }
 xai-file-utils = { path = "../xai-file-utils" }
 xai-grok-config = { workspace = true }
+xai-grok-provider = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
 # backend instead, so cpal -> alsa-sys never reaches the static musl binary

@@ -101,7 +101,7 @@ impl ChangelogManager {
     pub fn fetch(&self) -> Changelog {
         // Always re-resolve from env so a caller holding an older manager
         // (or OnceLock lag) still reads the live harness home.
-        Self::from_env_home().fetch_with(changelog_offline(), CHANGELOG_BASE)
+        Self::from_env_home().fetch_with(changelog_offline(), &changelog_base())
     }
 
     /// Fetch using this manager's already-resolved cache paths, an explicit
@@ -202,6 +202,18 @@ impl ChangelogManager {
 /// Used by PTY harness tests that seed `CHANGELOG.{md,json}` under a temp home.
 fn changelog_offline() -> bool {
     std::env::var_os("GROK_CHANGELOG_OFFLINE").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Resolve the CDN base for changelogs. `GROK_CHANGELOG_BASE_URL` overrides
+/// the upstream default (e.g. a self-hosted mirror of the fork's own
+/// releases); unset/blank/whitespace falls back to `https://x.ai/cli/changelogs`
+/// so the default behavior matches upstream exactly.
+fn changelog_base() -> String {
+    std::env::var("GROK_CHANGELOG_BASE_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| CHANGELOG_BASE.to_owned())
 }
 
 fn read_cache(path: &std::path::Path) -> Option<String> {
@@ -355,5 +367,25 @@ mod tests {
         assert_eq!(entries[0].description, "");
         assert_eq!(entries[1].category, "");
         assert_eq!(entries[1].description, "ok");
+    }
+
+    #[test]
+    fn changelog_base_defaults_to_upstream_cdn() {
+        let _g = crate::env::EnvVarGuard::remove("GROK_CHANGELOG_BASE_URL");
+        assert_eq!(changelog_base(), CHANGELOG_BASE);
+    }
+
+    #[test]
+    fn changelog_base_override_uses_self_hosted_mirror() {
+        let _g =
+            crate::env::EnvVarGuard::set("GROK_CHANGELOG_BASE_URL", "https://mirror.example/cli/");
+        // Trailing slash is trimmed so URL construction never double-slashes.
+        assert_eq!(changelog_base(), "https://mirror.example/cli");
+    }
+
+    #[test]
+    fn changelog_base_blank_override_falls_back_to_upstream() {
+        let _g = crate::env::EnvVarGuard::set("GROK_CHANGELOG_BASE_URL", "   ");
+        assert_eq!(changelog_base(), CHANGELOG_BASE);
     }
 }

@@ -177,6 +177,8 @@ pub(crate) struct SubagentSpawnContext {
     pub memory_config: Option<crate::config::MemoryConfig>,
     /// Resolved sampling config for web_search.
     pub web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    /// Explicit provider-neutral search profile inherited by child sessions.
+    pub web_search_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     /// Resolved config for web fetch.
     pub web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     /// Image generation config (parent-inherited).
@@ -805,6 +807,9 @@ async fn read_parent_sampling_config(
                 supports_backend_search: ctx
                     .models_manager
                     .model_supports_backend_search(ctx.model_id.0.as_ref()),
+                supports_vision: ctx
+                    .models_manager
+                    .model_supports_vision(ctx.model_id.0.as_ref()),
                 compactions_remaining: ctx
                     .models_manager
                     .model_compactions_remaining(ctx.model_id.0.as_ref()),
@@ -855,6 +860,9 @@ async fn read_parent_sampling_config(
     fallback.supports_backend_search = ctx
         .models_manager
         .model_supports_backend_search(ctx.model_id.0.as_ref());
+    fallback.supports_vision = ctx
+        .models_manager
+        .model_supports_vision(ctx.model_id.0.as_ref());
     fallback.compactions_remaining = ctx
         .models_manager
         .model_compactions_remaining(ctx.model_id.0.as_ref());

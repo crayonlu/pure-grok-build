@@ -112,7 +112,69 @@ fn is_xai_api_url_impl(url: &str, require_https: bool) -> bool {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_owned))
-        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+        .is_some_and(|host| is_xai_host(&host) || is_trusted_api_host(&host))
+}
+/// The compiled-in first-party xAI host allowlist (`x.ai` and its subdomains).
+fn is_xai_host(host: &str) -> bool {
+    host == "x.ai" || host.ends_with(".x.ai")
+}
+/// Parse `GROK_TRUSTED_API_HOSTS` (comma-separated hostnames) into a list of
+/// lowercase hostnames. Lets a deployment attach its session credential to its
+/// own gateway without source changes; empty/unset = upstream behavior.
+///
+/// Read once per call so a runtime env change takes effect without a restart
+/// (same pattern as `xai-grok-update`'s `cli_base_urls`). Malformed entries
+/// are rejected, never partially applied.
+fn trusted_api_hosts() -> Vec<String> {
+    std::env::var("GROK_TRUSTED_API_HOSTS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .map(str::to_ascii_lowercase)
+                .filter(|h| is_valid_trusted_host(h))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+/// A trusted host entry is a plain dotted hostname and nothing else: no
+/// scheme, no wildcard, no port, no userinfo, no path, no IP literal, no
+/// loopback. Rejecting those shapes keeps an attacker-controlled env value
+/// from laundering a bearer token to a co-located process or attacker origin.
+fn is_valid_trusted_host(host: &str) -> bool {
+    if host.contains("://")
+        || host.contains('/')
+        || host.contains(':')
+        || host.contains('@')
+        || host.contains('*')
+    {
+        return false;
+    }
+    if host == "localhost" {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return false;
+    }
+    // Pure-numeric labels → IP literal, which could be a co-located process.
+    if labels.iter().all(|l| l.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    labels.iter().all(|l| {
+        l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    })
+}
+/// Whether `host` matches the `GROK_TRUSTED_API_HOSTS` allowlist: exact match
+/// or a subdomain of an entry. Suffix-safe (`evil-gateway.example` and
+/// `gateway.example.evil.com` both fail against `gateway.example`).
+fn is_trusted_api_host(host: &str) -> bool {
+    trusted_api_hosts()
+        .iter()
+        .any(|t| host == t || host.ends_with(&format!(".{t}")))
 }
 fn is_loopback_host(parsed: &reqwest::Url) -> bool {
     match parsed.host() {
@@ -360,6 +422,56 @@ mod tests {
             "https://api.x.ai@attacker.example/v1"
         ));
         assert!(!is_xai_api_bearer_url("https://х.ai/v1"));
+    }
+    /// `GROK_TRUSTED_API_HOSTS` lets a deployment attach its session credential
+    /// to its own gateway: exact host and subdomains trusted, suffix attacks
+    /// rejected, bearer still requires https, and malformed entries are
+    /// dropped without weakening the allowlist.
+    #[test]
+    fn test_trusted_api_hosts_extend_trust_gate() {
+        let _g = crate::env::EnvVarGuard::set(
+            "GROK_TRUSTED_API_HOSTS",
+            "gateway.example, api.gateway.example",
+        );
+        // Exact host + subdomain trusted for both the URL gate and the bearer gate.
+        assert!(is_xai_api_url("https://gateway.example/v1"));
+        assert!(is_xai_api_url(
+            "https://api.gateway.example/v1/chat/completions"
+        ));
+        assert!(is_xai_api_bearer_url("https://gateway.example/v1"));
+        assert!(is_xai_api_bearer_url("https://deep.api.gateway.example/v1"));
+        // Bearer gate still refuses plaintext even for trusted hosts.
+        assert!(!is_xai_api_bearer_url("http://gateway.example/v1"));
+        // Suffix / prefix attacks must not match.
+        assert!(!is_xai_api_url("https://evil-gateway.example/v1"));
+        assert!(!is_xai_api_url("https://gateway.example.evil.com/v1"));
+        assert!(!is_xai_api_url("https://notgateway.example.org/v1"));
+    }
+    #[test]
+    fn test_trusted_api_hosts_rejects_malformed_entries() {
+        let _g = crate::env::EnvVarGuard::set(
+            "GROK_TRUSTED_API_HOSTS",
+            "good.example, https://evil.example, evil.example:8443, *.wild.example, user@host.example, 127.0.0.1, localhost, /path.example",
+        );
+        assert!(is_xai_api_url("https://good.example/v1"));
+        // Malformed entries are dropped, not applied.
+        assert!(!is_xai_api_url("https://evil.example/v1"));
+        assert!(!is_xai_api_url("https://wild.example/v1"));
+        assert!(!is_xai_api_url("https://host.example/v1"));
+        assert!(!is_xai_api_url("https://path.example/v1"));
+        // Loopback is trusted by the scheme-agnostic URL gate independent of
+        // the env allowlist (upstream semantics), but the bearer gate never
+        // attaches a token to it -- a trusted-host entry for an IP/loopback
+        // must not change that.
+        assert!(!is_xai_api_bearer_url("https://127.0.0.1/v1"));
+        assert!(!is_xai_api_bearer_url("https://localhost/v1"));
+    }
+    #[test]
+    fn test_trusted_api_hosts_unset_keeps_upstream_behavior() {
+        let _g = crate::env::EnvVarGuard::remove("GROK_TRUSTED_API_HOSTS");
+        assert!(!is_xai_api_url("https://gateway.example/v1"));
+        assert!(is_xai_api_url("https://api.x.ai/v1"));
+        assert!(!is_xai_api_bearer_url("https://gateway.example/v1"));
     }
     #[test]
     fn test_truncate() {

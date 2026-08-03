@@ -591,6 +591,9 @@ impl MvpAgent {
     fn feedback_credentials(
         &self,
     ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         if !self.has_proxy_credentials() {
             return None;
         }
@@ -608,6 +611,10 @@ impl MvpAgent {
     pub(super) fn ensure_telemetry_client(&self) {
         crate::auth::credential_provider::sync_external_otel_identity();
         let cfg = self.cfg.borrow();
+        if cfg.fork.is_open() {
+            tracing::debug!("telemetry client disabled in open mode");
+            return;
+        }
         let mode = cfg.resolve_telemetry_mode().value;
         if !mode.is_disabled() {
             let Some(auth) = self
@@ -658,6 +665,9 @@ impl MvpAgent {
     pub(super) fn build_registry_config(
         &self,
     ) -> Option<crate::session::RegistryConfig> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         let remote = self
             .cfg
             .borrow()
@@ -699,6 +709,9 @@ impl MvpAgent {
     pub(crate) fn conversations_client(
         &self,
     ) -> Option<crate::remote::ConversationsClient> {
+        if self.cfg.borrow().fork.is_open() {
+            return None;
+        }
         if !crate::session::unified_list::conversations_lane_active() {
             return None;
         }
@@ -1484,9 +1497,9 @@ impl MvpAgent {
         )?;
         Some(acp::AuthMethodId::new(id))
     }
-    /// Shared exit for missing/expired/legacy `cached_token`: fall through with
-    /// `use_oauth` only when the target is interactive `grok.com`. When
-    /// `preferred_method` is pinned, fail instead of falling through.
+    /// Shared exit for missing/expired/legacy `cached_token`: fall through to
+    /// the non-interactive API-key method when it is available. The fork has
+    /// no implicit `grok.com` fallback; OIDC must be explicitly pinned.
     pub(super) async fn authenticate_after_cached_token_unavailable(
         &self,
         arguments: acp::AuthenticateRequest,
@@ -1494,10 +1507,12 @@ impl MvpAgent {
         let Some(method_id) = self.cached_token_fallthrough_method_id() else {
             let preferred = self.cfg.borrow().grok_com_config.preferred_method;
             let msg = match preferred {
-                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
+                Some(crate::auth::PreferredAuthMethod::ApiKey) | None => {
                     auth_method::PREFERRED_API_KEY_UNAVAILABLE
                 }
-                _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
+                Some(crate::auth::PreferredAuthMethod::Oidc) => {
+                    auth_method::PREFERRED_OIDC_UNAVAILABLE
+                }
             };
             tracing::info!(%msg, "cached_token unavailable; preferred_method forbids fallthrough");
             xai_grok_telemetry::unified_log::warn(
@@ -1571,7 +1586,9 @@ impl MvpAgent {
     /// them, so a settings-targeted (not env-set) team would otherwise never
     /// register. Idempotent: a no-op once installed.
     fn reapply_official_marketplace(&self) {
-        if self.cfg.borrow().resolve_official_marketplace_auto_register().value {
+        if !self.cfg.borrow().fork.is_open()
+            && self.cfg.borrow().resolve_official_marketplace_auto_register().value
+        {
             crate::extensions::marketplace::ensure_official_marketplace_source(
                 &crate::util::grok_home::grok_home(),
             );
@@ -1585,7 +1602,7 @@ impl MvpAgent {
         }
         let resolved_mode = {
             let cfg = self.cfg.borrow();
-            if cfg.mode == crate::agent::config::AgentMode::Generic {
+            if cfg.mode == crate::agent::config::AgentMode::Generic || cfg.fork.is_open() {
                 return;
             }
             let has_xai_auth = self
@@ -1736,8 +1753,19 @@ impl MvpAgent {
             crate::util::config::cache_remote_mcp_startup_timeout_secs(
                 cfg.remote_settings.as_ref().and_then(|s| s.mcp_startup_timeout_secs),
             );
-            let telemetry_mode = cfg.resolve_telemetry_mode();
-            let trace_upload = cfg.resolve_trace_upload();
+            let telemetry_mode = if cfg.fork.is_open() {
+                crate::agent::config::Resolved::new(
+                    crate::agent::config::TelemetryMode::Disabled,
+                    crate::agent::config::ConfigSource::Default,
+                )
+            } else {
+                cfg.resolve_telemetry_mode()
+            };
+            let trace_upload = if cfg.fork.is_open() {
+                crate::agent::config::Resolved::new(false, crate::agent::config::ConfigSource::Default)
+            } else {
+                cfg.resolve_trace_upload()
+            };
             tracing::info!(
                 telemetry = %telemetry_mode,
                 trace_upload = %trace_upload,
@@ -1837,6 +1865,10 @@ impl MvpAgent {
     /// Fire-and-forget remote settings refresh for new sessions (at most one
     /// in flight).
     pub(super) fn spawn_settings_reapply(&self) {
+        if self.cfg.borrow().fork.is_open() {
+            tracing::debug!("settings reapply skipped in open fork mode");
+            return;
+        }
         let agent_ref = LocalRef::new(self);
         let auth_manager = self.auth_manager.clone();
         let _spawned = self
@@ -1891,7 +1923,14 @@ impl MvpAgent {
     /// process exit ends it. Skipped under `cfg!(test)` like the
     /// managed-config sync (PTY e2e runs the real binary and is unaffected).
     pub(super) fn spawn_announcements_refresh(&self) {
-        if cfg!(test) || self.announcements_refresh_started.replace(true) {
+        if cfg!(test) {
+            return;
+        }
+        if crate::agent::service_policy::mode_from_disk().is_open() {
+            tracing::debug!("announcements refresh disabled in open mode");
+            return;
+        }
+        if self.announcements_refresh_started.replace(true) {
             return;
         }
         let agent_ref = LocalRef::new(self);
@@ -2245,49 +2284,123 @@ impl MvpAgent {
     /// SuperGrok upsell prose (see `ImageGenConfig`/`VideoGenConfig`'s
     /// `tier_restricted`).
     ///
-    /// Fails **open** (returns `false`) whenever we can't positively confirm a
-    /// restricted personal tier — no auth yet, BYOK / API-key sessions, team
-    /// accounts, and an unknown/absent tier all pass. The server
-    /// authoritatively zero-limits Imagine for free & X Basic (429), so this
-    /// client gate is a UX optimization (a clean in-chat upsell instead of a
-    /// doomed request), never the security boundary — under-restricting is safe,
-    /// over-restricting would wrongly disable a paid feature.
-    ///
-    /// Mirrors the pager's cosmetic slash-command gate
-    /// ([`crate::tier::is_restricted_tier_name`]); the only difference is the
-    /// absent-tier policy (the pager hides on `None`, we fail open on `None`).
+    /// Fork: the subscription-tier system was removed, so this is always
+    /// `false` — no x.ai OAuth session can be tier-gated, and BYOK/API-key
+    /// sessions were already fail-open. The server remains the authoritative
+    /// zero-limiter for free & X Basic tiers; this client gate was only a UX
+    /// optimization.
     fn is_tier_restricted_capability(&self) -> bool {
-        let Some(auth) = self.auth_manager.current() else {
-            return false;
-        };
-        if !auth.is_xai_auth() || auth.team_id.is_some() {
-            return false;
-        }
-        let tier = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|rs| rs.subscription_tier_display.clone())
-            .or_else(|| jwt_tier_claim(&auth.key));
-        tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
+        false
     }
     /// Build image generation config.
     ///
-    /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
-    /// `sampling_config.api_key` carries the OAuth bearer for session users (the
-    /// `api_key_provider` refreshes it per request), so IC authenticates and
-    /// meters Imagine usage per-user.
+    /// When `[image_gen]` is present in config.toml, uses the provider-agnostic
+    /// configuration (own base_url, env_key-resolved credentials, and API
+    /// format) instead of piggybacking on the primary model's key + x.ai
+    /// endpoint. Falls back to the original x.ai Imagine behavior otherwise.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        let cfg = self.cfg.borrow();
+
+        // Generic capability profile takes precedence over legacy image_gen
+        // fields. Its key remains scoped to the configured endpoint.
+        if let Some(profile) = cfg.capabilities.image.clone() {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty()) else {
+                tracing::warn!("image capability profile disabled: base_url is required");
+                return ImageGenConfig::Disabled;
+            };
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&base_url)
+                    || crate::util::is_cli_chat_proxy_url(&base_url))
+            {
+                tracing::warn!(base_url, "image capability profile rejected in open mode");
+                return ImageGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "image capability profile rejected by validation");
+                return ImageGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: profile.model.clone(),
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: None,
+                capability_profile: Some(profile),
+            };
+        }
+
+        // Provider-agnostic path: [image_gen] config section present.
+        if let Some(ref provider) = cfg.image_gen {
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&provider.base_url)
+                    || crate::util::is_cli_chat_proxy_url(&provider.base_url))
+            {
+                tracing::warn!(
+                    base_url = %provider.base_url,
+                    "image_gen disabled in open mode: refusing an xAI-owned endpoint; set [fork].mode = \"xai_compat\" or use a provider-neutral endpoint"
+                );
+                return ImageGenConfig::Disabled;
+            }
+            // Resolve credentials: literal api_key first, then env_key.
+            let api_key = provider.api_key.clone().or_else(|| {
+                provider
+                    .env_key
+                    .as_deref()
+                    .and_then(|name| {
+                        std::env::var(name)
+                            .ok()
+                            .filter(|k| !k.trim().is_empty())
+                    })
+            });
+            let Some(api_key) = api_key else {
+                tracing::warn!(
+                    "image_gen disabled: no API key resolved from [image_gen] config \
+                     (checked api_key field and env_key)"
+                );
+                return ImageGenConfig::Disabled;
+            };
+
+            let version = cfg
+                .client_version
+                .clone()
+                .unwrap_or_else(|| xai_grok_version::VERSION.to_string());
+            let mut headers = indexmap::IndexMap::new();
+            headers.insert("user-agent".to_string(), format!("xai-grok-build/{version}"));
+
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url: provider.base_url.clone(),
+                extra_headers: headers,
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: None,
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: Some(provider.clone()),
+                capability_profile: None,
+            };
+        }
+
+        // Original x.ai Imagine path (fallback) is compatibility-only. An
+        // open-mode session must never send its primary BYOK key to xAI.
+        if cfg.fork.is_open() {
+            return ImageGenConfig::Disabled;
+        }
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
         };
         let tier_restricted = self.is_tier_restricted_capability();
-        let cfg = self.cfg.borrow();
         let base_url = cfg.endpoints.xai_api_base_url.clone();
         let version = cfg
             .client_version
@@ -2311,6 +2424,8 @@ impl MvpAgent {
             model_override: cfg.resolve_image_gen_model_override(),
             edit_model_override: cfg.resolve_image_edit_model_override(),
             tier_restricted,
+            provider: None,
+            capability_profile: None,
         }
     }
     /// Build deploy-service config. The tool talks directly to the deployer service.
@@ -2326,6 +2441,38 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
+        if let Some(profile) = cfg.capabilities.video.clone() {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty()) else {
+                tracing::warn!("video capability profile disabled: base_url is required");
+                return VideoGenConfig::Disabled;
+            };
+            if cfg.fork.is_open()
+                && (crate::util::is_xai_api_url(&base_url)
+                    || crate::util::is_cli_chat_proxy_url(&base_url))
+            {
+                tracing::warn!(base_url, "video capability profile rejected in open mode");
+                return VideoGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "video capability profile rejected by validation");
+                return VideoGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return VideoGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                zdr_video_output_s3: None,
+                tier_restricted: false,
+                capability_profile: Some(profile),
+            };
+        }
+        if cfg.fork.is_open() {
+            tracing::debug!("video_gen disabled in open mode: no provider-neutral adapter configured");
+            return VideoGenConfig::Disabled;
+        }
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
@@ -2362,6 +2509,7 @@ impl MvpAgent {
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
             tier_restricted,
+            capability_profile: None,
         }
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
@@ -2379,6 +2527,16 @@ impl MvpAgent {
             client_version,
             &self.cfg.borrow().endpoints,
         )?;
+        if self.cfg.borrow().fork.is_open()
+            && (crate::util::is_xai_api_url(&cfg.base_url)
+                || crate::util::is_cli_chat_proxy_url(&cfg.base_url))
+        {
+            tracing::debug!(
+                base_url = %cfg.base_url,
+                "web_search disabled in open mode: xAI Responses search is compatibility-only"
+            );
+            return None;
+        }
         inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
@@ -2386,6 +2544,31 @@ impl MvpAgent {
             &cfg.base_url,
         );
         Some(cfg)
+    }
+
+    /// Resolve an explicitly configured provider-neutral search profile.
+    /// Profiles are self-authenticating; no chat/session credential is copied
+    /// into this path. Open mode accepts only an explicit non-xAI endpoint.
+    pub(super) fn prepare_web_search_profile(
+        &self,
+    ) -> Option<xai_grok_provider::CapabilityProviderConfig> {
+        let profile = self.cfg.borrow().capabilities.search.clone()?;
+        let base_url = profile.base_url.as_deref()?.trim();
+        if base_url.is_empty() {
+            return None;
+        }
+        if crate::agent::service_policy::mode_from_disk().is_open()
+            && (crate::util::is_xai_api_url(base_url)
+                || crate::util::is_cli_chat_proxy_url(base_url))
+        {
+            tracing::warn!(base_url, "search profile rejected in open mode: xAI endpoint");
+            return None;
+        }
+        if let Err(error) = profile.validate() {
+            tracing::warn!(error = %error, "search profile rejected by validation");
+            return None;
+        }
+        Some(profile)
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
@@ -2467,7 +2650,8 @@ impl MvpAgent {
         let has_xai_auth = auth_manager
             .current_or_expired()
             .is_some_and(|a| a.is_xai_auth());
-        let relay_sync_enabled = tui_mode && relay_config_enabled && has_xai_auth;
+        let relay_sync_enabled =
+            tui_mode && relay_config_enabled && has_xai_auth && !cfg.fork.is_open();
         let config_root = crate::config::load_effective_config().ok();
         let empty_config = toml::Value::Table(toml::map::Map::new());
         let raw = config_root.as_ref().unwrap_or(&empty_config);
@@ -2575,9 +2759,6 @@ impl MvpAgent {
             ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            post_unblock_jwt_retry_in_flight: Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            ),
             workspace_ops: RefCell::new(None),
             #[cfg(all(feature = "local-workspace", unix))]
             local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),
@@ -3236,6 +3417,9 @@ impl MvpAgent {
         crate::upload::turn::TraceUploadReason,
     ) {
         use crate::upload::turn::TraceUploadReason;
+        if self.cfg.borrow().fork.is_open() {
+            return (None, TraceUploadReason::FeatureOff);
+        }
         if self.is_data_collection_disabled() {
             crate::upload::trace::spawn_startup_spill_reconcile(
                 crate::util::grok_home::grok_home(),
@@ -4426,6 +4610,7 @@ impl MvpAgent {
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let web_search_sampling_config = self.prepare_web_search_sampling_config();
+        let web_search_profile = self.prepare_web_search_profile();
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -4664,6 +4849,7 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     web_search_sampling_config,
+                    web_search_profile,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

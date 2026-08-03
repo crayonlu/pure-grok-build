@@ -24,6 +24,11 @@ impl SlashCommand for ReleaseNotesCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
+        if !crate::app::should_fetch_changelog() {
+            return CommandResult::Error(
+                "No release notes mirror configured (open fork mode is offline).".to_string(),
+            );
+        }
         let changelog = xai_grok_shell::util::changelog::ChangelogManager::new().fetch();
         match changelog.markdown {
             Some(content) => CommandResult::Action(Action::ShowReleaseNotes {

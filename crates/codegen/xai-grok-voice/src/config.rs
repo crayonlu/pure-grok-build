@@ -1,4 +1,6 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use xai_grok_provider::{ProviderAuthConfig, ProviderEnvKeys};
 
 use crate::error::VoiceError;
 
@@ -14,6 +16,10 @@ pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
+    /// Streaming protocol family: `xai_ws`, `deepgram`, or `elevenlabs`.
+    pub protocol: String,
+    /// Provider model/deployment slug. ElevenLabs sends this as `model_id`.
+    pub model: Option<String>,
     /// HTTPS API root (or bare host). Bases may end in `/v1` or `/xai/v1`; the
     /// default STT path de-duplicates a leading `v1/` so both become `…/v1/stt`.
     pub api_base: String,
@@ -24,6 +30,12 @@ pub struct VoiceConfig {
     pub sample_rate: u32,
     pub stt_endpointing_ms: u32,
     pub stt_interim_results: bool,
+    /// Optional provider-scoped credential and request headers.
+    pub api_key: Option<String>,
+    pub env_key: Option<ProviderEnvKeys>,
+    pub auth: ProviderAuthConfig,
+    pub extra_headers: IndexMap<String, String>,
+    pub query_params: IndexMap<String, String>,
 
     /// Pager-stamped request identity; not user config.
     #[serde(skip)]
@@ -35,12 +47,19 @@ pub struct VoiceConfig {
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
+            protocol: "xai_ws".into(),
+            model: None,
             api_base: "https://api.x.ai".into(),
             stt_ws_path: "/v1/stt".into(),
             language: "en".into(),
             sample_rate: DEFAULT_SAMPLE_RATE,
             stt_endpointing_ms: 400,
             stt_interim_results: true,
+            api_key: None,
+            env_key: None,
+            auth: ProviderAuthConfig::default(),
+            extra_headers: IndexMap::new(),
+            query_params: IndexMap::new(),
             client_identifier: String::new(),
             user_agent: String::new(),
         }
@@ -48,6 +67,58 @@ impl Default for VoiceConfig {
 }
 
 impl VoiceConfig {
+    /// Convert a capability profile into a streaming voice config. The
+    /// protocol-specific event decoder remains in the websocket driver.
+    pub fn from_provider_profile(
+        profile: &xai_grok_provider::CapabilityProviderConfig,
+    ) -> Result<Self, VoiceError> {
+        profile.validate().map_err(VoiceError::Config)?;
+        let base_url = profile
+            .base_url
+            .as_deref()
+            .ok_or_else(|| VoiceError::Config("voice profile requires base_url".into()))?;
+        let operation = profile
+            .operation("stream")
+            .or_else(|| profile.operation("default"));
+        let path = operation
+            .map(|operation| operation.path.clone())
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| {
+                if profile.protocol.eq_ignore_ascii_case("deepgram") {
+                    "/v1/listen".into()
+                } else if profile.protocol.eq_ignore_ascii_case("elevenlabs") {
+                    "/v1/speech-to-text/realtime".into()
+                } else {
+                    "/v1/stt".into()
+                }
+            });
+        let mut auth = profile.auth.clone();
+        if auth == ProviderAuthConfig::default() {
+            if profile.protocol.eq_ignore_ascii_case("deepgram") {
+                auth.prefix = "Token ".into();
+            } else if profile.protocol.eq_ignore_ascii_case("elevenlabs") {
+                auth.name = "xi-api-key".into();
+                auth.prefix.clear();
+            }
+        }
+        Ok(Self {
+            protocol: if profile.protocol.trim().is_empty() {
+                "xai_ws".into()
+            } else {
+                profile.protocol.clone()
+            },
+            model: profile.model.clone(),
+            api_base: base_url.trim_end_matches('/').to_owned(),
+            stt_ws_path: path,
+            api_key: profile.api_key.clone(),
+            env_key: profile.env_key.clone(),
+            auth,
+            extra_headers: profile.extra_headers.clone(),
+            query_params: profile.query_params.clone(),
+            ..Self::default()
+        })
+    }
+
     /// Streaming STT WebSocket URL. Rejects plaintext `http://` / `ws://`.
     pub fn stt_ws_url(&self) -> Result<String, VoiceError> {
         ws_url(&self.api_base, &self.stt_ws_path)
@@ -128,6 +199,21 @@ mod tests {
             VoiceConfig::default().stt_ws_url().unwrap(),
             "wss://api.x.ai/v1/stt"
         );
+    }
+
+    #[test]
+    fn deepgram_profile_maps_to_streaming_config() {
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "deepgram".into(),
+            base_url: Some("https://api.deepgram.com".into()),
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        let config = VoiceConfig::from_provider_profile(&profile).unwrap();
+        assert_eq!(config.protocol, "deepgram");
+        assert_eq!(config.api_base, "https://api.deepgram.com");
+        assert_eq!(config.api_key.as_deref(), Some("secret"));
+        assert!(config.stt_ws_url().unwrap().contains("v1/listen"));
     }
 
     #[test]

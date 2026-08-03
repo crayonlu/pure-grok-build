@@ -1224,11 +1224,11 @@ pub(super) fn handle_prompt_response(
         // notification lost the race with (or never reached) this
         // PromptResponse, detect the free-usage code from the prompt error
         // itself — the flattened 429 body embeds it.
-        let free_usage_blocked = agent.session.free_usage_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e));
+        let free_usage_blocked = !app.is_api_key_auth
+            && (agent.session.free_usage_blocked
+                || result.as_ref().err().is_some_and(|e| {
+                    xai_grok_shell::sampling::error::is_free_usage_exhausted_error(e)
+                }));
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable
         // block, so the generic TurnFailed + error toast are redundant. Derived
@@ -1238,11 +1238,12 @@ pub(super) fn handle_prompt_response(
         // detect credit-limit denials (legacy 403 or pool 402) from
         // the PromptResponse error + HTTP status. Covers races where
         // the retry notification arrives after the PromptResponse.
-        let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result
-                .as_ref()
-                .err()
-                .is_some_and(|e| is_credit_limit_error(http_status, e));
+        let credit_limit_blocked = !app.is_api_key_auth
+            && (agent.session.credit_limit_blocked
+                || result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| is_credit_limit_error(http_status, e)));
         // A 401/auth failure already surfaced an actionable
         // `ReAuthRequired` prompt via the RetryState handler (which
         // runs before this PromptResponse). Suppress the redundant

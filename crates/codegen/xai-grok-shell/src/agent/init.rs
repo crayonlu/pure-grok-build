@@ -61,7 +61,7 @@ fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig, sync_managed: bool
     // now so remote-settings-gated features work regardless of which client
     // spawned us. Clients that already call `start_early_prefetch()` and
     // thread the result into `cfg.remote_settings` skip this entirely.
-    if cfg.remote_settings.is_none() {
+    if cfg.remote_settings.is_none() && crate::util::config::resolve_remote_fetch_enabled() {
         let handle = if sync_managed {
             crate::agent::models::start_early_prefetch(Some(cfg.grok_com_config.clone()))
         } else {
@@ -83,6 +83,8 @@ fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig, sync_managed: bool
                 }
             }
         }
+    } else if cfg.remote_settings.is_none() {
+        tracing::debug!("remote settings fetch skipped by open-mode policy");
     }
     crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
 }
@@ -131,6 +133,10 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
         tracing::info!("Writeback is disabled: requires auth with grok.com");
         cfg.storage_mode = StorageMode::Local;
     }
+    if cfg.fork.is_open() && cfg.storage_mode == StorageMode::Writeback {
+        tracing::info!("Writeback is disabled in open fork mode; keeping session history local");
+        cfg.storage_mode = StorageMode::Local;
+    }
 
     if let Some(rs) = cfg.remote_settings.as_ref()
         && let Some(v) = rs.path_not_found_hints
@@ -155,7 +161,7 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         let limits = crate::util::limits::ProcessLimits::read();
         limits.log();
 
-        if !cfg!(test) {
+        if !cfg!(test) && !cfg.fork.is_open() {
             // Clear a logged-out team's files before the background sync runs.
             crate::managed_config::clear_orphan();
             crate::managed_config::spawn_sync(tokio_util::sync::CancellationToken::new());
@@ -169,7 +175,7 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         // At boot remote_settings may still be None (fetches are backgrounded),
         // so only an env opt-in fires here; the gate is re-evaluated once
         // settings arrive (see `MvpAgent::reapply_official_marketplace`).
-        if cfg.resolve_official_marketplace_auto_register().value {
+        if !cfg.fork.is_open() && cfg.resolve_official_marketplace_auto_register().value {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);
         }
 
@@ -190,7 +196,7 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
             trace_upload_region = cfg.endpoints.trace_upload_region.as_deref().unwrap_or("none"),
             "data capture config resolved",
         );
-        if telemetry_mode.value.is_disabled() && trace_upload.value {
+        if telemetry_mode.value.is_disabled() && (!cfg.fork.is_open() && trace_upload.value) {
             tracing::info!(
                 "Telemetry disabled but trace uploads enabled: \
                  session artifacts will be uploaded, analytics events will not"
@@ -217,7 +223,11 @@ pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager)
     );
     xai_grok_telemetry::client::init(
         config.telemetry.clone(),
-        config.resolve_telemetry_mode().value,
+        if config.fork.is_open() {
+            crate::agent::config::TelemetryMode::Disabled
+        } else {
+            config.resolve_telemetry_mode().value
+        },
         user_id,
         team_id,
         config.endpoints.deployment_key.clone(),

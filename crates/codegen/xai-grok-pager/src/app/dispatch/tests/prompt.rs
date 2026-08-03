@@ -1749,6 +1749,48 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
     assert!(!toast, "context overflow must suppress the error toast");
 }
 
+/// A provider's 402 must not enter the x.ai subscription recheck path even
+/// when a retry notification raced and set the legacy session flag first.
+#[test]
+fn api_key_prompt_response_credit_error_stays_provider_local() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.is_api_key_auth = true;
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.credit_limit_blocked = true;
+        agent.turn_started_at = Some(std::time::Instant::now());
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("API error (status 402 Payment Required): balance exhausted".into()),
+            http_status: Some(402),
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CreditLimitRecheck { .. })),
+        "BYOK/provider 402 must not trigger x.ai subscription recheck"
+    );
+    assert!(
+        app.agents[&id].scrollback.iter_entries().any(|(_, entry)| {
+            matches!(
+                &entry.block,
+                RenderBlock::SessionEvent(event)
+                    if matches!(event.event, SessionEvent::TurnFailed { .. })
+            )
+        }),
+        "provider credit errors should remain visible as generic turn failures"
+    );
+}
+
 #[test]
 fn prompt_response_routes_idle_title_through_frame_pipeline() {
     let mut app = test_app_with_agent();

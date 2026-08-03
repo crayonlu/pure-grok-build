@@ -39,7 +39,10 @@ fn manual_install_cmd() -> &'static str {
 fn reinstall_hint(installer: &str) -> String {
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        "gh-release" => format!(
+            "Please reinstall via GitHub Releases:\n  gh release download --repo {} --pattern 'grok-*' --output grok && chmod +x grok",
+            crate::version::gh_release_repo()
+        ),
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
@@ -1165,7 +1168,9 @@ async fn download_cli_artifact_from_gcs(
 }
 
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<()> {
-    install_internal_from_bases(target, update_config, crate::version::CLI_BASE_URLS).await
+    let bases = crate::version::cli_base_urls();
+    let bases_refs: Vec<&str> = bases.iter().copied().collect();
+    install_internal_from_bases(target, update_config, &bases_refs).await
 }
 
 /// Try the base-dependent install phase ([`download_verified_from_base`]:
@@ -2057,6 +2062,7 @@ async fn agent_exe_differs(
 
 /// Download a single asset from a GitHub release via `gh release download`.
 async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -> Result<()> {
+    let repo = crate::version::gh_release_repo();
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -2071,7 +2077,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         "download",
         tag,
         "--repo",
-        crate::version::GH_RELEASE_REPO,
+        repo,
         "--pattern",
         pattern,
         "--output",
@@ -2093,14 +2099,14 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
             "gh release download failed for {} tag {} from {}: {}",
             pattern,
             tag,
-            crate::version::GH_RELEASE_REPO,
+            repo,
             stderr.trim()
         );
     }
     Ok(())
 }
 
-/// Download and install grok from GitHub Releases (xai-org-shared/grok-build).
+/// Download and install grok from the configured GitHub Releases repository.
 ///
 /// Uses `gh release download` to fetch the binary matching the current platform.
 /// This works anywhere the `gh` CLI is authenticated, without needing npm or
@@ -2355,6 +2361,52 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
 /// binary (see the pager's post-update leader relaunch) — that signal must
 /// fire even when the download itself was skipped, so a stale leader still
 /// picks up a binary someone else installed.
+/// Fetch release notes for a given version from the fork's GitHub Releases.
+///
+/// Uses the `GROK_UPDATE_REPO` env var to determine the repo
+/// (e.g. `crayonlu/pure-grok-build`). If not set, returns `None` and the
+/// changelog display is silently skipped.
+///
+/// Calls the GitHub REST API:
+///   `GET https://api.github.com/repos/{owner}/{repo}/releases/tags/v{version}`
+///
+/// Unauthenticated requests are fine for personal forks (60 req/hour per IP).
+/// On any error (network, rate limit, non-200, parse failure) returns `None`.
+async fn fetch_release_notes(version: &str) -> Option<String> {
+    let repo = std::env::var("GROK_UPDATE_REPO").ok()?;
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/tags/v{}",
+        repo, version
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "grok-build-updater")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("body")
+        .and_then(|b| b.as_str())
+        .map(|s| s.to_string())
+}
+
 pub async fn run_update(
     force: bool,
     pinned_version: Option<&str>,
@@ -2521,9 +2573,24 @@ pub async fn run_update(
         );
         &effective_current
     } else {
-        eprintln!("Updating Grok {} → {}", effective_current, install_target);
+        eprintln!("Updating Grok {} -> {}", effective_current, install_target);
         &install_target
     };
+
+    // Best-effort: fetch and display release notes from GitHub Releases.
+    // Requires GROK_UPDATE_REPO to be set (e.g. "crayonlu/pure-grok-build").
+    // Silently skipped if not set or if the API call fails.
+    if let Some(notes) = fetch_release_notes(&install_target).await {
+        eprintln!();
+        eprintln!("  ── Changes ──");
+        for line in notes.lines().take(20) {
+            let line = line.trim();
+            if !line.is_empty() {
+                eprintln!("  {}", line);
+            }
+        }
+        eprintln!();
+    }
 
     eprintln!();
     run_install_script(installer, Some(target_version), update_config).await?;

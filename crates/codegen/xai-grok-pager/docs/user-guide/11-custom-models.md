@@ -91,6 +91,34 @@ query_params = { api-version = "2026-07-22" } # Query params appended to every r
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # Headers from env vars, resolved at client build (optional)
 ```
 
+### Vision / Multimodal Support
+
+By default Grok assumes every model accepts image inputs and will embed image
+pixels (from `read_file`, PDFs, and pasted attachments) into the conversation.
+For a text-only model this wastes tokens and can cause provider errors. Set
+`supports_vision = false` on the model entry so Grok degrades gracefully
+instead of sending image pixels:
+
+```toml
+[model.my-text-only-model]
+model = "my-text-only-model"
+supports_vision = false
+```
+
+When `supports_vision = false`:
+
+- `read_file` on an image returns only metadata (path, MIME type, byte size)
+  plus a note that the active model has no vision — it never embeds pixels.
+- PDF reads rendered as image pages emit a text note (re-read with output
+  format `text` to get the textual content) instead of image parts.
+- Pasted / inline user images are still saved to the session `assets/`
+  directory (so a vision-capable model or OCR tool can inspect them later),
+  but the vision-describe round-trip is skipped and the model sees a text
+  notice listing the saved paths.
+
+`supports_vision` defaults to `true`, so existing model entries keep reading
+images unchanged. This field is independent of `supports_backend_search`.
+
 ### Credential Resolution
 
 Grok resolves the API key in this order:
@@ -334,6 +362,40 @@ web_search = "my-custom-model"
 model = "my-custom-model"
 supports_backend_search = true
 ```
+
+To use a standalone search provider such as Firecrawl, configure a capability
+profile instead of pointing `web_search` at a chat model. The profile owns its
+own endpoint and credential:
+
+```toml
+[capabilities.search]
+protocol = "firecrawl"
+base_url = "https://api.firecrawl.dev/v2"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+allowed_domains = "includeDomains"
+
+[capabilities.search.operations.search.response]
+items = "/data/web"
+title = "/title"
+url = "/url"
+content = "/description"
+```
+
+This calls `POST https://api.firecrawl.dev/v2/search` with
+`Authorization: Bearer $FIRECRAWL_API_KEY`; it does not forward a signed-in
+session token to Firecrawl. The MCP example in the configuration guide is a
+different integration and can be enabled independently.
 
 ---
 

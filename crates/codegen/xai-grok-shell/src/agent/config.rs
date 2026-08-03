@@ -1328,6 +1328,11 @@ pub struct ShellEnvironmentPolicyKnownKeys {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub features: Features,
+    /// Fork-owned service routing policy.  `open` is the safe default and
+    /// keeps upstream xAI-only auxiliary services disabled unless explicitly
+    /// opted into with `mode = "xai_compat"`.
+    #[serde(default)]
+    pub fork: crate::agent::service_policy::ForkConfig,
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
@@ -1369,6 +1374,17 @@ pub struct Config {
     pub shell_environment_policy: ShellEnvironmentPolicyKnownKeys,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// `[image_gen]` — provider-agnostic image generation API config.
+    /// When present, overrides the default x.ai Imagine behavior with a
+    /// configurable endpoint, request body, and response format.
+    #[serde(default, skip_serializing)]
+    pub image_gen:
+        Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
+    /// `[capabilities.<name>]` — shared provider-neutral profiles for
+    /// auxiliary services. Legacy capability-specific sections remain
+    /// supported and are resolved into these profiles by each subsystem.
+    #[serde(default)]
+    pub capabilities: xai_grok_config_types::CapabilityProvidersConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1782,6 +1798,7 @@ impl Default for Config {
         let endpoints = EndpointsConfig::default();
         let mut cfg = Self {
             features: Features::default(),
+            fork: crate::agent::service_policy::ForkConfig::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -1797,6 +1814,8 @@ impl Default for Config {
             toolset: ShellToolsetConfig::default(),
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
+            image_gen: None,
+            capabilities: xai_grok_config_types::CapabilityProvidersConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
@@ -1860,7 +1879,10 @@ impl Default for Config {
             cli_no_memory: false,
             cli_subagents: None,
             memory_config: None,
-            managed_mcps_enabled: true,
+            // Open fork mode must fail closed even before the startup path has
+            // a chance to call `resolve_runtime_fields`; compatibility mode
+            // re-enables this from the resolved config.
+            managed_mcps_enabled: false,
             managed_mcp_gateway_tools_enabled: false,
             auto_wake_enabled: true,
             compat_resolved: CompatConfig::default(),
@@ -2210,8 +2232,8 @@ impl Config {
             ctx.remote_settings,
             ctx.is_headless,
         );
-        self.managed_mcps_enabled = mcps.enabled;
-        self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
+        self.managed_mcps_enabled = !self.fork.is_open() && mcps.enabled;
+        self.managed_mcp_gateway_tools_enabled = !self.fork.is_open() && mcps.gateway_tools_enabled;
         let models = crate::config::ModelOverrideConfig::resolve(
             ctx.cli_web_search_model,
             ctx.cli_session_summary_model,
@@ -2303,20 +2325,20 @@ impl Config {
             self.features.telemetry = Some(mode);
         }
     }
-    pub(crate) fn is_telemetry_enabled(&self) -> bool {
-        self.resolve_telemetry_mode().value.is_enabled()
+    pub fn is_telemetry_enabled(&self) -> bool {
+        !self.fork.is_open() && self.resolve_telemetry_mode().value.is_enabled()
     }
     pub fn is_trace_upload_enabled(&self) -> bool {
-        self.resolve_trace_upload().value
+        !self.fork.is_open() && self.resolve_trace_upload().value
     }
-    pub(crate) fn is_feedback_enabled(&self) -> bool {
-        self.resolve_feedback().value
+    pub fn is_feedback_enabled(&self) -> bool {
+        !self.fork.is_open() && self.resolve_feedback().value
     }
     pub(crate) fn is_session_recap_enabled(&self) -> bool {
         self.resolve_session_recap().value
     }
-    pub(crate) fn is_voice_mode_enabled(&self) -> bool {
-        self.resolve_voice_mode().value
+    pub fn is_voice_mode_enabled(&self) -> bool {
+        !self.fork.is_open() && self.resolve_voice_mode().value
     }
     /// Two-pass (prefire) compaction gate. Default OFF (opt-in) — enable via
     /// remote settings `two_pass_compaction_enabled`, the `[features] two_pass_compaction`
@@ -2373,7 +2395,7 @@ impl Config {
             rs.and_then(|s| s.jemalloc_heap_profile_thresholds_bytes.as_deref()),
             rs.and_then(|s| s.jemalloc_heap_profile_poll_interval_secs),
             data_collection_disabled,
-            self.resolve_trace_upload().value,
+            self.is_trace_upload_enabled(),
             crate::heap_profile::prof_available(),
         )
     }
@@ -2390,7 +2412,7 @@ impl Config {
             jemalloc_thresholds,
             jemalloc_poll_interval_secs,
             data_collection_disabled,
-            self.resolve_trace_upload().value,
+            self.is_trace_upload_enabled(),
             crate::heap_profile::prof_available(),
         )
     }
@@ -3731,6 +3753,12 @@ struct DefaultModelJson {
     supported_in_api: bool,
     #[serde(default)]
     supports_backend_search: bool,
+    /// Whether this model accepts image inputs (multimodal/vision). Defaults
+    /// to `true` so existing default-model entries keep reading images; set
+    /// to `false` for text-only models so `read_file` and inline-image paths
+    /// skip embedding pixels.
+    #[serde(default = "default_true")]
+    supports_vision: bool,
     #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
@@ -3795,6 +3823,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
                 supports_backend_search: m.supports_backend_search,
+                supports_vision: m.supports_vision,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -3902,6 +3931,11 @@ pub struct ModelEntryConfig {
     pub supported_in_api: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_backend_search: bool,
+    /// Whether this model accepts image inputs (multimodal/vision). Defaults
+    /// to `true` for backward compatibility; set `false` for text-only models
+    /// so image-reading paths skip embedding pixels and return metadata only.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_vision: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -3983,6 +4017,10 @@ pub struct ConfigModelOverride {
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
+    /// Whether this model accepts image inputs (multimodal/vision). `None`
+    /// inherits from the base/default; `Some(false)` marks a text-only model
+    /// so image-reading paths skip embedding pixels and return metadata only.
+    pub supports_vision: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
@@ -4071,6 +4109,9 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
+        }
+        if let Some(v) = self.supports_vision {
+            entry.info.supports_vision = v;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -4164,6 +4205,11 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: bool,
+    /// Whether this model accepts image inputs (multimodal/vision). Defaults
+    /// to `true` for backward compatibility; `false` for text-only models so
+    /// image-reading paths skip embedding pixels and return metadata only.
+    #[serde(default = "default_true")]
+    pub supports_vision: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -4210,6 +4256,7 @@ impl ModelInfo {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4247,6 +4294,7 @@ impl ModelInfo {
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
             supports_backend_search: entry.supports_backend_search,
+            supports_vision: entry.supports_vision,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -4356,6 +4404,9 @@ impl std::ops::Deref for ModelEntry {
 }
 fn is_false(v: &bool) -> bool {
     !v
+}
+fn is_true(v: &bool) -> bool {
+    *v
 }
 fn default_true() -> bool {
     true
@@ -4999,6 +5050,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -5137,6 +5189,7 @@ pub(crate) fn sampling_config_for_model(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
+        supports_vision: info.supports_vision,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5212,6 +5265,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -6429,6 +6483,7 @@ reasoning_effort = "low"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -7454,6 +7509,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7613,6 +7669,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8064,6 +8121,7 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -11433,7 +11491,10 @@ hooks = true
         });
         assert!(cfg.subagents_enabled);
         assert!(!cfg.respect_gitignore);
-        assert!(cfg.managed_mcps_enabled);
+        assert!(
+            !cfg.managed_mcps_enabled,
+            "open fork mode must not enable upstream managed MCP fetching"
+        );
         assert!(!cfg.managed_mcp_gateway_tools_enabled);
         assert_eq!(
             cfg.web_search_model,
@@ -11497,7 +11558,44 @@ hooks = true
             laziness_debug_log: None,
             storage_mode: None,
         });
-        assert!(cfg.managed_mcp_gateway_tools_enabled);
+        assert!(
+            !cfg.managed_mcp_gateway_tools_enabled,
+            "open fork mode must not enable upstream managed MCP gateway tools"
+        );
+    }
+    #[test]
+    #[serial]
+    fn resolve_runtime_fields_xai_compat_restores_managed_mcp_surfaces() {
+        clear_runtime_env_vars();
+        clear_managed_mcp_env_vars();
+        let raw: toml::Value = toml::from_str(
+            r#"
+[fork]
+mode = "xai_compat"
+"#,
+        )
+        .unwrap();
+        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
+            raw_config: &raw,
+            remote_settings: None,
+            is_headless: false,
+            cli_subagents: None,
+            cli_web_search_model: None,
+            cli_session_summary_model: None,
+            cli_experimental_memory: false,
+            cli_no_memory: false,
+            disable_web_search: false,
+            todo_gate: false,
+            laziness_debug_log: None,
+            storage_mode: None,
+        });
+        assert_eq!(
+            cfg.fork.mode,
+            crate::agent::service_policy::ForkMode::XaiCompat
+        );
+        assert!(cfg.managed_mcps_enabled);
+        assert!(!cfg.managed_mcp_gateway_tools_enabled);
     }
     #[test]
     #[serial]
@@ -11878,6 +11976,7 @@ default = "grok-4.5"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,

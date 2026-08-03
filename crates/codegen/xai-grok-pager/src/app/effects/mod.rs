@@ -92,30 +92,9 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks.spawn(async move { send_auth_cancel(&tx, request_seq).await });
         }
-        Effect::CheckSubscription { verify } => {
-            let tx = acp_tx.clone();
-            tasks.spawn(async move { send_check_subscription(&tx, verify).await });
-        }
         Effect::CreditLimitRecheck { agent_id } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move { send_credit_limit_recheck(&tx, agent_id).await });
-        }
-        Effect::SchedulePaywallCheck => {
-            tasks
-                .spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    TaskResult::PaywallCheckTick
-                });
-        }
-        Effect::ScheduleGateVerifyTimeout { generation } => {
-            tasks
-                .spawn(async move {
-                    tokio::time::sleep(crate::app::subscription::GATE_VERIFY_TIMEOUT)
-                        .await;
-                    TaskResult::GateVerifyTimeout {
-                        generation,
-                    }
-                });
         }
         Effect::SwitchAccount { request_seq, method_id, use_oauth } => {
             let tx = acp_tx.clone();
@@ -1901,6 +1880,10 @@ pub(crate) fn execute(
                 });
         }
         Effect::FetchChangelog => {
+            if !crate::app::should_fetch_changelog() {
+                tracing::debug!("changelog fetch skipped by open-mode policy");
+                return (false, meta);
+            }
             tasks
                 .spawn(async move {
                     let changelog = tokio::task::spawn_blocking(|| {
@@ -4221,46 +4204,6 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RefreshGate => {
-            tasks
-                .spawn(async move {
-                    let settings = tokio::task::spawn_blocking(|| {
-                            if !xai_grok_shell::util::config::resolve_remote_fetch_enabled() {
-                                return None;
-                            }
-                            let grok_home = xai_grok_shell::util::grok_home::grok_home();
-                            let store = xai_grok_shell::auth::read_auth_json(
-                                    &grok_home.join("auth.json"),
-                                )
-                                .ok()?;
-                            let scope = xai_grok_shell::auth::GrokComConfig::default()
-                                .auth_scope();
-                            let auth = xai_grok_shell::auth::lookup_auth(
-                                &store,
-                                &scope,
-                            )?;
-                            let proxy_base = std::env::var(
-                                    "GROK_CLI_CHAT_PROXY_BASE_URL",
-                                )
-                                .unwrap_or_else(|_| {
-                                    xai_grok_shell::agent::config::CLI_CHAT_PROXY_BASE_URL_DEFAULT
-                                        .to_owned()
-                                });
-                            xai_grok_shell::remote::fetch_settings_blocking(
-                                    &proxy_base,
-                                    &auth,
-                                    None,
-                                )
-                                .into_option()
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                    TaskResult::GateRefreshed {
-                        settings,
-                    }
-                });
-        }
         Effect::FetchAppBilling => {
             let tx = acp_tx.clone();
             tasks
@@ -4573,6 +4516,9 @@ fn format_session_info(
 ///
 /// This reflects the process login / ACP auth method, not per-model sampling
 /// credentials (a model `api_key`/`env_key` can still own the turn).
+///
+/// Fork: the console.x.ai / grok.com billing links and the SuperGrok upsell
+/// line were removed with the subscription system.
 fn format_auth_lines(is_api_key_auth: bool, api_key_env_set: bool) -> String {
     if is_api_key_auth {
         let method = if api_key_env_set {
@@ -4580,11 +4526,10 @@ fn format_auth_lines(is_api_key_auth: bool, api_key_env_set: bool) -> String {
         } else {
             "  Auth method: API key\n"
         };
-        return format!(
-            "{method}  Run `grok login` to use your SuperGrok subscription instead.\n"
-        );
+        format!("{method}")
+    } else {
+        String::from("  Auth method: OAuth\n")
     }
-    String::from("  Auth method: OAuth\n")
 }
 /// Build the single text content block for a plain `Effect::SendPrompt`.
 ///

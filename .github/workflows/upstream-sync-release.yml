@@ -1,0 +1,552 @@
+name: Upstream sync and nightly release
+
+on:
+  schedule:
+    # 00:00 UTC every day
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force a release even when upstream has no new commits'
+        required: false
+        default: 'false'
+
+# Allow concurrent runs to be cancelled by a newer run; the sync job is
+# guarded by a concurrency group so two merges never race to push main.
+concurrency:
+  group: upstream-sync-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: xai-org/grok-build
+  UPSTREAM_BRANCH: main
+  BINARY_PACKAGE: xai-grok-pager-bin
+  BINARY_NAME: xai-grok-pager
+  # Cloudflare R2 mirror — CI uploads nightly binaries and the channel
+  # pointer here so forks can use GROK_CLI_BASE_URL for self-hosted updates.
+  # Requires the CLOUDFLARE_API_TOKEN repo secret (R2 read+write scope).
+  R2_BUCKET: grok-build
+  R2_PUBLIC_BASE_URL: https://grok.cyncyn.xyz/cli
+
+jobs:
+  sync:
+    name: Merge upstream into fork
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.result.outputs.should_release }}
+      version: ${{ steps.result.outputs.version }}
+      tag: ${{ steps.result.outputs.tag }}
+      upstream_sha: ${{ steps.result.outputs.upstream_sha }}
+      date: ${{ steps.result.outputs.date }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --tags --no-recurse-submodules
+
+      - name: Decide whether to release
+        id: decide
+        run: |
+          set -euo pipefail
+          # Date-derived semver (YYYY.M.D): valid semver, monotonically
+          # increasing by day, and greater than the upstream 0.x stable line
+          # so the in-app auto-updater treats each nightly as newer.
+          version="$(date -u +%Y).$(date -u +%-m).$(date -u +%-d)"
+          tag="v${version}"
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          fork_sha="$(git rev-parse HEAD)"
+          ahead="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}" || echo 0)"
+          echo "Upstream HEAD: ${upstream_sha}"
+          echo "Fork HEAD:     ${fork_sha}"
+          echo "Commits upstream is ahead by: ${ahead}"
+          echo "Nightly version: ${version} (tag ${tag})"
+
+          force="${{ github.event.inputs.force }}"
+          if [[ "${force}" == "true" ]]; then
+            echo "Force release requested."
+            should="true"
+          elif [[ "${ahead}" -gt 0 ]]; then
+            should="true"
+          else
+            should="false"
+          fi
+
+          # Same-day re-run guard: if today's semver tag already exists, do not
+          # publish again (a second tag would be a semver pre-release of the
+          # existing release and confuse the auto-updater's version compare).
+          if [[ "${should}" == "true" ]] \
+            && git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; skipping release."
+            should="false"
+          fi
+
+          echo "should_release=${should}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+          echo "date=$(date -u +%Y-%m-%d)" >> "${GITHUB_OUTPUT}"
+
+      - name: Merge upstream into fork main
+        if: steps.decide.outputs.should_release == 'true'
+        id: merge
+        run: |
+          set -euo pipefail
+          if ! git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}" -m \
+            "chore(sync): merge upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} into fork main"; then
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            echo "::group::Conflicting files"
+            git diff --name-only --diff-filter=U
+            echo "::endgroup::"
+            # Abandon the conflicted merge so the worktree stays clean.
+            git merge --abort || true
+            exit 0
+          fi
+          echo "conflict=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Open upstream sync pull request
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          target_repo="${GITHUB_REPOSITORY}"
+          upstream_sha="${{ steps.decide.outputs.upstream_sha }}"
+          sync_branch="automation/upstream-sync-${upstream_sha}"
+
+          # Push upstream/main as a branch in the fork. GitHub will calculate
+          # the conflict against fork main and expose the normal PR resolver.
+          git switch -C "${sync_branch}" "upstream/${UPSTREAM_BRANCH}"
+          git push --force origin "HEAD:${sync_branch}"
+
+          title="chore(sync): merge upstream ${UPSTREAM_REPO}@${upstream_sha:0:12}"
+          body="$(printf '%s\n' \
+            'The scheduled upstream sync could not be merged automatically.' \
+            '' \
+            "Upstream repository: ${UPSTREAM_REPO}" \
+            "Upstream commit: ${upstream_sha}" \
+            "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '' \
+            'This PR is based on upstream/main so GitHub can display and resolve the conflicts against fork main.' \
+            'Resolve the conflicts, merge this PR, and the next scheduled run will continue from the updated main branch.')"
+
+          existing="$(gh pr list \
+            --repo "${target_repo}" \
+            --head "${sync_branch}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh pr edit "${existing}" \
+              --repo "${target_repo}" \
+              --title "${title}" \
+              --body "${body}"
+            pr_url="$(gh pr view "${existing}" --repo "${target_repo}" --json url --jq '.url')"
+            echo "Updated existing upstream sync PR: ${pr_url}"
+          else
+            pr_url="$(gh pr create \
+              --repo "${target_repo}" \
+              --head "${sync_branch}" \
+              --base main \
+              --title "${title}" \
+              --body "${body}")"
+            echo "Created upstream sync PR: ${pr_url}"
+          fi
+
+          echo "::warning::Upstream merge conflict detected; PR opened for manual resolution."
+          {
+            echo "## Upstream sync conflict pull request"
+            echo
+            echo "Manual resolution is required before the next release: ${pr_url}"
+            echo
+            echo "- Upstream commit: ${upstream_sha}"
+            echo "- Sync branch: ${sync_branch}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Finalize sync result
+        id: result
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.merge.outputs.conflict }}" == "true" ]]; then
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            echo "Conflict PR is open; skipping build and release jobs."
+          else
+            echo "should_release=${{ steps.decide.outputs.should_release }}" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "version=${{ steps.decide.outputs.version }}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${{ steps.decide.outputs.tag }}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${{ steps.decide.outputs.upstream_sha }}" >> "${GITHUB_OUTPUT}"
+          echo "date=${{ steps.decide.outputs.date }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Push merged main
+        if: steps.decide.outputs.should_release == 'true' && steps.merge.outputs.conflict != 'true'
+        run: |
+          git push origin HEAD:main
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: sync
+    if: needs.sync.outputs.should_release == 'true'
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          echo "PROTOC=protoc" >> "$GITHUB_ENV"
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+          echo "PROTOC=protoc" >> "$GITHUB_ENV"
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip" -OutFile protoc.zip
+          Expand-Archive protoc.zip -DestinationPath $HOME\protoc
+          echo "$HOME\protoc\bin" >> $env:GITHUB_PATH
+          echo "PROTOC=$HOME\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # Persist Cargo's registry plus dependency artifacts in one archive per
+      # target. This avoids sccache's per-object GitHub cache writes, which are
+      # rate-limited on this large workspace and provide almost no warm hits.
+      # The action keeps workspace outputs out of the archive and disables
+      # incremental compilation, so release packaging remains deterministic.
+      - name: Cache Rust dependencies and target artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "release-${{ matrix.target }}"
+          cache-targets: "true"
+          cache-all-crates: "true"
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Windows compilation is dominated by MSVC rustc/linker work. Keep a
+      # filesystem-backed sccache archive for the Windows job so one Actions
+      # cache entry can be restored/saved without per-object GitHub cache
+      # writes. The run id makes each saved archive immutable while the
+      # restore prefix reuses the newest cache for the same dependency lock.
+      - name: Set up sccache (Windows)
+        if: runner.os == 'Windows'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Windows sccache archive
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-
+            sccache-windows-msvc-v2-
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
+        env:
+          SCCACHE_DIR: ${{ github.workspace }}/.sccache
+          SCCACHE_CACHE_SIZE: 5G
+          SCCACHE_GHA_ENABLED: false
+          RUSTC_WRAPPER: sccache
+          CARGO_INCREMENTAL: 0
+        run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
+
+      - name: Show Windows sccache statistics
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: sccache --show-stats
+
+      - name: Stop Windows sccache before archive
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          sccache --stop-server
+          if ($LASTEXITCODE -ne 0) { exit 0 }
+
+      - name: Build release binary (Unix)
+        if: runner.os != 'Windows'
+        run: cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
+
+      - name: Strip release binary (Linux)
+        if: runner.os == 'Linux'
+        run: strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      - name: Strip release binary (macOS)
+        if: runner.os == 'macOS'
+        run: strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.sync.outputs.version }}"
+          target="${{ matrix.target }}"
+          arch="${target%%-*}"
+          # Map the Rust target triple to the auto-updater's platform string
+          # (macos-aarch64, linux-x86_64, windows-x86_64). The updater
+          # downloads an asset named grok-<version>-<platform>, so the raw
+          # binary must use this name (not the triple).
+          case "${target}" in
+            *-apple-darwin)    platform="macos-${arch}" ;;
+            *-unknown-linux-*) platform="linux-${arch}" ;;
+            *-pc-windows-*)    platform="windows-${arch}" ;;
+            *)                 platform="${target}" ;;
+          esac
+          raw_name="grok-${version}-${platform}"
+          if [[ "${platform}" == windows-* ]]; then
+            raw_name="${raw_name}.exe"
+          fi
+          cp "target/${target}/release/${{ env.BINARY_NAME }}" "${raw_name}"
+
+          # Human-friendly archive with provenance files.
+          staging="grok-${version}-${platform}-bundle"
+          mkdir -p "${staging}"
+          cp "target/${target}/release/${{ env.BINARY_NAME }}" "${staging}/"
+          cp SOURCE_REV "${staging}/"
+          {
+            echo "grok nightly build"
+            echo "version:  ${version}"
+            echo "tag:      ${{ needs.sync.outputs.tag }}"
+            echo "target:   ${target}"
+            echo "upstream: ${{ needs.sync.outputs.upstream_sha }}"
+            echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${staging}/VERSION"
+          tar -czf "${staging}.tar.gz" "${staging}"
+          rm -rf "${staging}"
+          shasum -a 256 "${raw_name}" > "${raw_name}.sha256" || sha256sum "${raw_name}" > "${raw_name}.sha256"
+          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256" || sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          ls -lh "${raw_name}" "${staging}.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-${{ matrix.target }}
+          path: |
+            grok-*
+            *.sha256
+          retention-days: 7
+
+  cleanup-windows-sccache:
+    name: Prune Windows sccache archives
+    needs: [sync, build]
+    if: needs.sync.outputs.should_release == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Keep newest two Windows sccache archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          stale_ids="$(gh cache list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --key "sccache-windows-msvc-v2-" \
+            --sort created_at \
+            --order desc \
+            --limit 100 \
+            --json id \
+            --jq '.[2:] | .[].id')"
+
+          while IFS= read -r id; do
+            [[ -z "${id}" ]] && continue
+            echo "Deleting stale Windows sccache cache ${id}"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/${id}"
+          done <<< "${stale_ids}"
+
+  release:
+    name: Publish nightly release
+    needs: [sync, build]
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: List assets
+        run: find assets -type f -maxdepth 1 | sort
+
+      - name: Create tag
+        run: |
+          set -euo pipefail
+          tag="${{ needs.sync.outputs.tag }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; skipping tag creation."
+          else
+            git tag "${tag}"
+            git push origin "${tag}"
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.sync.outputs.version }}"
+          tag="${{ needs.sync.outputs.tag }}"
+          title="Grok nightly ${{ needs.sync.outputs.date }} (${version})"
+
+          # Generate changelog from git log since the previous tag.
+          prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")"
+          if [[ -n "${prev_tag}" ]]; then
+            changelog="$(git log --oneline --no-merges "${prev_tag}..HEAD" | head -30)"
+          else
+            changelog="(first release)"
+          fi
+
+          notes="$(cat <<EOF
+          ## Changes
+
+          ${changelog}
+
+          ---
+
+          Automated nightly build synced from [xai-org/grok-build@main](https://github.com/xai-org/grok-build/commit/${{ needs.sync.outputs.upstream_sha }}).
+
+          - Version: ${version}
+          - Upstream commit: ${{ needs.sync.outputs.upstream_sha }}
+
+          Update channels:
+
+          - \`GROK_CLI_BASE_URL\` - set to \`${R2_PUBLIC_BASE_URL}\` to download binaries from Cloudflare R2.
+          - \`GROK_UPDATE_REPO\` - set to this repo to enable changelog display during \`grok update\`.
+          EOF
+          )"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}"
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --notes "${notes}" --prerelease
+          fi
+          # Channel pointer file: plain-text semver consumed by the
+          # GROK_CLI_BASE_URL path (mirror it to <base>/stable on your host).
+          echo "${version}" > stable
+          # Upload raw binaries + bundles + checksums + channel pointer.
+          gh release upload "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            assets/grok-* stable --clobber
+
+      - name: Check Cloudflare R2 configuration
+        id: r2_check
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [[ -n "${CF_TOKEN}" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Cloudflare API token found; R2 upload enabled."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLOUDFLARE_API_TOKEN secret is not set; skipping R2 mirror upload."
+          fi
+
+      - name: Upload artifacts to Cloudflare R2
+        if: steps.r2_check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || '6eb9ddbde814b5def318c50efc93a54f' }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.sync.outputs.version }}"
+
+          # Install wrangler (pinned to v3 for stability).
+          npm install -g wrangler@3
+
+          # Upload raw binaries with long-term cache (immutable: versioned
+          # URLs that never change once published).
+          for platform in macos-aarch64 linux-x86_64 linux-aarch64 windows-x86_64; do
+            suffix=""
+            if [[ "${platform}" == windows-* ]]; then
+              suffix=".exe"
+            fi
+            file="assets/grok-${version}-${platform}${suffix}"
+            if [[ -f "${file}" ]]; then
+              echo "  Uploading ${file} -> ${R2_BUCKET}/cli/grok-${version}-${platform}${suffix}"
+              wrangler r2 object put "${R2_BUCKET}/cli/grok-${version}-${platform}${suffix}" \
+                --file="${file}" \
+                --content-type="application/octet-stream" \
+                --cache-control="public, max-age=31536000, immutable"
+            else
+              echo "::warning::Binary not found: ${file}"
+            fi
+          done
+
+          # Upload channel pointer with no-cache so version updates propagate
+          # immediately (the updater fetches this on every version check).
+          # Note: the `stable` file is created by `echo "${version}" > stable`
+          # in the release step above (current directory), not in assets/.
+          if [[ -f "stable" ]]; then
+            echo "  Uploading channel pointer -> ${R2_BUCKET}/cli/stable"
+            wrangler r2 object put "${R2_BUCKET}/cli/stable" \
+              --file="stable" \
+              --content-type="text/plain" \
+              --cache-control="no-cache"
+          fi
+
+          echo ""
+          echo "R2 mirror updated. Users can now set:"
+          echo "  export GROK_CLI_BASE_URL=${R2_PUBLIC_BASE_URL}"

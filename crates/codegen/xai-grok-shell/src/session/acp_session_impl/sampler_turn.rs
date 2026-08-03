@@ -513,6 +513,7 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            supports_vision: self.supports_vision.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,

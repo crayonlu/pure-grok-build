@@ -73,6 +73,12 @@ pub async fn handle(
         kind: req.kind,
     };
 
+    if agent.cfg.borrow().fork.is_open() {
+        return ExtMethodResult::success(degraded_response("open_mode"))
+            .to_ext_response()
+            .map_err(|e| acp::Error::internal_error().data(e.to_string()));
+    }
+
     let response = match agent.workspaces_client().list_workspaces(&q).await {
         Ok(page) => success_response(page),
         Err(WsError::NoOauth) => degraded_response("no_oauth"),

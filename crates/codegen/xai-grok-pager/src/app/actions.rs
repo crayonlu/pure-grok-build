@@ -61,10 +61,6 @@ pub enum Action {
     DeleteCurrentSessionAnswered {
         confirmed: bool,
     },
-    /// Open grok.com in the browser for SuperGrok subscription upsell.
-    OpenSupergrokUrl,
-    /// Re-check subscription status via the shell's `x.ai/auth/check_subscription`.
-    CheckSubscription,
     /// Open an arbitrary URL in the system browser (with scheme validation).
     OpenUrl(String),
     /// Open a semantic scrollback link.
@@ -1981,19 +1977,10 @@ pub enum Effect {
     /// poll stops instead of running until the code expires. `request_seq`
     /// scopes the cancel so a delayed RPC cannot tear down a successor login.
     CancelAuth { request_seq: u64 },
-    /// Re-check subscription status via `x.ai/auth/check_subscription`.
-    /// `verify` scopes the result to a deferred-gate verification (see
-    /// [`crate::app::subscription`]); `None` for generic checks.
-    CheckSubscription { verify: Option<u64> },
     /// One-shot subscription re-check triggered by a credit-limit 403.
     /// If the tier changed, the stashed prompt is retried instead of
     /// showing the upsell modal.
     CreditLimitRecheck { agent_id: AgentId },
-    /// Schedule a 5s timer that fires `TaskResult::PaywallCheckTick`.
-    SchedulePaywallCheck,
-    /// Schedule `TaskResult::GateVerifyTimeout { generation }` after
-    /// [`crate::app::subscription::GATE_VERIFY_TIMEOUT`].
-    ScheduleGateVerifyTimeout { generation: u64 },
     /// Log out then authenticate sequentially in one task.
     SwitchAccount {
         request_seq: u64,
@@ -2094,8 +2081,6 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
-    /// Re-fetch remote settings to check subscription gate.
-    RefreshGate,
     /// Spawn a debounce sleep task for shell suggestions. `agent_id` rides
     /// to the expiry so the fetch is built from the arming agent, not
     /// whatever view is active when the timer fires.
@@ -2733,24 +2718,11 @@ pub enum TaskResult {
     LogoutComplete,
     /// Best-effort `x.ai/auth/cancel` finished (no UI update; state already left Authenticating).
     AuthCancelComplete,
-    /// Shell responded to `x.ai/auth/check_subscription`. `verify` echoes
-    /// the generation from `Effect::CheckSubscription` for deferred-gate
-    /// verifications.
-    CheckSubscriptionComplete {
-        verify: Option<u64>,
-        meta: Option<serde_json::Value>,
-    },
     /// Result of the credit-limit subscription re-check. If the tier
     /// changed the stashed prompt is retried; otherwise the upsell is shown.
     CreditLimitRecheckComplete {
         agent_id: AgentId,
         meta: Option<serde_json::Value>,
-    },
-    /// 5s paywall check timer fired -- time to send another check.
-    PaywallCheckTick,
-    /// The deferred-gate verification window expired.
-    GateVerifyTimeout {
-        generation: u64,
     },
     /// The 2-second auth copy feedback timer expired.
     AuthCopyFeedbackTimeout {
@@ -2815,9 +2787,6 @@ pub enum TaskResult {
     AppBillingFetched {
         balance: Option<crate::views::credit_bar::CreditBalance>,
         autotopup: crate::views::credit_bar::AutoTopupFetch,
-    },
-    GateRefreshed {
-        settings: Option<xai_grok_shell::util::config::RemoteSettings>,
     },
     /// Billing fetch failed with an error message.
     BillingError {

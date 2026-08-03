@@ -1312,8 +1312,13 @@ pub(super) fn apply_retry_state(
                     },
                 );
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, reason);
-            let is_free_usage = *rate_limited
+            // BYOK/provider errors must stay provider-local. In particular,
+            // a third-party 402/403 or a reused free-usage error code must not
+            // activate the x.ai subscription/paywall UX.
+            is_credit_limit =
+                !is_api_key_auth && super::super::dispatch::is_credit_limit_error(None, reason);
+            let is_free_usage = !is_api_key_auth
+                && *rate_limited
                 && xai_grok_shell::sampling::error::is_free_usage_exhausted_error(reason);
             if is_credit_limit {
                 session.credit_limit_blocked = true;
@@ -1345,7 +1350,10 @@ pub(super) fn apply_retry_state(
             if error_type == "encrypted_content_mismatch" {
                 session.model_incompatible = true;
             }
-            is_credit_limit = super::super::dispatch::is_credit_limit_error(None, message);
+            // Keep API-key/provider failures on the generic error path; the
+            // credit-limit recheck is x.ai subscription-specific.
+            is_credit_limit =
+                !is_api_key_auth && super::super::dispatch::is_credit_limit_error(None, message);
             if is_credit_limit {
                 session.credit_limit_blocked = true;
             } else if is_reauthable_failure(Some(error_type.as_str()), message) {

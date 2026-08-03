@@ -270,6 +270,7 @@ pub(crate) async fn spawn_session_actor(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -484,6 +485,8 @@ pub(crate) async fn spawn_session_actor(
     let primary_model_id = sampling_config.model.clone();
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
+    } else if let Some(profile) = web_search_profile {
+        xai_grok_tools::implementations::WebSearchConfig::Profiled { profile }
     } else if let Some(cfg) = web_search_sampling_config {
         if let Some(api_key) = cfg.api_key {
             xai_grok_tools::implementations::WebSearchConfig::Enabled {
@@ -501,8 +504,57 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!("web_search disabled: configured model could not be resolved");
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     };
-    let embed_base_url = sampling_config.base_url.clone();
-    let embed_api_key = sampling_config.api_key.clone();
+    // Resolve embedding endpoint/model/credentials once. Every memory path
+    // receives this same effective config; in particular, reindex must not
+    // silently fall back to the chat model's endpoint or auth contract.
+    let embedding_runtime = memory_config.as_ref().and_then(|mc| {
+        crate::session::memory::resolve_embedding_runtime(
+            Some(&mc.embedding),
+            &sampling_config,
+            &credentials,
+        )
+    });
+    let embedding_allowed = embedding_runtime.as_ref().is_some_and(|runtime| {
+        if !crate::agent::service_policy::mode_from_disk().is_open() {
+            return true;
+        }
+        memory_config.as_ref().is_some_and(|memory| {
+            crate::session::memory::embedding_config_allowed_in_open(
+                &memory.embedding,
+                &runtime.base_url,
+            )
+        })
+    });
+    if !embedding_allowed && embedding_runtime.is_some() {
+        tracing::debug!(
+            base_url = %embedding_runtime.as_ref().expect("checked above").base_url,
+            "memory embeddings disabled in open mode: effective endpoint is xAI-owned"
+        );
+    }
+    let resolved_embedding_config = if embedding_allowed {
+        embedding_runtime.as_ref().map(|runtime| {
+            let mut config = memory_config
+                .as_ref()
+                .expect("embedding runtime requires memory config")
+                .embedding
+                .clone();
+            config.base_url = Some(runtime.base_url.clone());
+            config.api_key = runtime.api_key.clone();
+            config.auth_scheme = Some(match runtime.auth_scheme {
+                crate::session::memory::EmbeddingAuthScheme::Bearer => "bearer".to_owned(),
+                crate::session::memory::EmbeddingAuthScheme::XApiKey => "x_api_key".to_owned(),
+            });
+            config.extra_headers = runtime.extra_headers.clone();
+            config
+        })
+    } else {
+        None
+    };
+    let embed_base_url = embedding_runtime
+        .as_ref()
+        .filter(|_| embedding_allowed)
+        .map(|runtime| runtime.base_url.clone())
+        .unwrap_or_default();
     let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
         || crate::config::PruningConfig {
             enabled: false,
@@ -826,16 +878,24 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-        let embed_credentials = crate::auth::credential_provider::embedding_session_credentials(
-            &embed_base_url,
-            auth_manager.as_ref(),
-            api_key_provider.clone(),
-        );
+        let embed_credentials = if embedding_allowed {
+            crate::auth::credential_provider::embedding_session_credentials(
+                &embed_base_url,
+                auth_manager.as_ref(),
+                api_key_provider.clone(),
+            )
+        } else {
+            crate::session::memory::EndpointScopedCredentials::none()
+        };
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
-            embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
+            embedding_runtime: embedding_runtime.clone().filter(|_| embedding_allowed),
+            embed_config: resolved_embedding_config.clone(),
             embed_base_url: embed_base_url.clone(),
-            embed_api_key: embed_api_key.clone(),
+            // The resolved key lives in `embed_config.api_key`; keeping this
+            // legacy field empty prevents a session token from being treated
+            // as a static key by older backend construction paths.
+            embed_api_key: None,
             search_config: memory_config
                 .as_ref()
                 .map_or_else(Default::default, |mc| mc.search.clone()),
@@ -1549,6 +1609,7 @@ pub(crate) async fn spawn_session_actor(
     let resolved_tool_overrides: std::sync::Arc<
         arc_swap::ArcSwapOption<xai_grok_sampling_types::ToolOverrides>,
     > = std::sync::Arc::new(arc_swap::ArcSwapOption::empty());
+    let memory_backend_params_for_reindex = memory_backend_params_for_session.clone();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         auth_method_id,
@@ -1574,6 +1635,7 @@ pub(crate) async fn spawn_session_actor(
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
         supports_backend_search: std::cell::Cell::new(sampling_config.supports_backend_search),
+        supports_vision: std::cell::Cell::new(sampling_config.supports_vision),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
         compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
@@ -1880,8 +1942,7 @@ pub(crate) async fn spawn_session_actor(
             .map(|mc| mc.embedding.clone())
             .unwrap_or_default();
         let embed_dims = embed_config.dimensions;
-        let sampling_base_url = embed_base_url.clone();
-        let sampling_api_key = embed_api_key.clone();
+        let reindex_params = memory_backend_params_for_reindex;
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -1908,18 +1969,10 @@ pub(crate) async fn spawn_session_actor(
                     files = files.len(),
                     "MEMORY_REINDEX: background reindex complete"
                 );
-                let embedded_count = if let Some(api_key) = sampling_api_key {
-                    if let Some(provider) =
-                        crate::session::memory::embedding::ApiEmbeddingProvider::from_session(
-                            &embed_config,
-                            sampling_base_url,
-                            api_key,
-                        )
-                    {
-                        crate::session::memory::embed_missing_chunks(&index, &provider).await
-                    } else {
-                        0
-                    }
+                let embedded_count = if let Some(params) = reindex_params.as_ref()
+                    && let Some(provider) = params.make_embedding_provider().await
+                {
+                    crate::session::memory::embed_missing_chunks(&index, &provider).await
                 } else {
                     0
                 };
@@ -2127,6 +2180,7 @@ pub(crate) async fn spawn_session_actor(
         session_done_rx,
     ))
 }
+
 /// Handle for a session's dedicated thread. Stored separately from `SessionHandle`
 /// (which derives `Clone`) because `JoinHandle` is not `Clone`.
 pub struct SessionThread {
@@ -2225,6 +2279,7 @@ pub(crate) async fn spawn_session_on_thread(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -2399,6 +2454,7 @@ pub(crate) async fn spawn_session_on_thread(
                         inference_idle_timeout_secs,
                         max_retries,
                         web_search_sampling_config,
+                        web_search_profile,
                         web_fetch_config,
                         image_gen_config,
                         video_gen_config,

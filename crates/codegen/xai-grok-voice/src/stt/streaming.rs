@@ -7,7 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
 use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use url::Url;
 
 use crate::config::VoiceConfig;
@@ -34,17 +34,66 @@ pub struct StreamingSttSession {
 impl StreamingSttSession {
     /// Connect and wait for `transcript.created` before sending audio.
     pub async fn connect(config: &VoiceConfig, bearer: &str) -> Result<Self, VoiceError> {
-        let url = build_stt_ws_url(config)?;
+        let mut url = build_stt_ws_url(config)?;
+        let profile_key = config.api_key.clone().or_else(|| {
+            config
+                .env_key
+                .as_ref()
+                .and_then(|keys| keys.resolve_with(|name| std::env::var(name).ok()))
+        });
+        let credential = profile_key
+            .as_deref()
+            .or_else(|| (config.protocol.eq_ignore_ascii_case("xai_ws")).then_some(bearer))
+            .unwrap_or_default();
+        if config.protocol.eq_ignore_ascii_case("elevenlabs") {
+            url.query_pairs_mut().append_pair(
+                "model_id",
+                config
+                    .model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty())
+                    .unwrap_or("scribe_v2_realtime"),
+            );
+            url.query_pairs_mut()
+                .append_pair("audio_format", &format!("pcm_{}", config.sample_rate));
+            if !config.language.eq_ignore_ascii_case("auto") {
+                url.query_pairs_mut()
+                    .append_pair("language_code", &config.language);
+            }
+        }
+        if config.auth.location == "query" {
+            url.query_pairs_mut()
+                .append_pair(&config.auth.name, &config.auth.rendered_value(credential));
+        }
+        for (name, value) in &config.query_params {
+            url.query_pairs_mut().append_pair(name, value);
+        }
         let mut request = url
             .as_str()
             .into_client_request()
             .map_err(|e| VoiceError::WebSocket(format!("request: {e}")))?;
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Bearer {bearer}")
-                .parse()
-                .map_err(|e| VoiceError::WebSocket(format!("auth header: {e}")))?,
-        );
+        if config.auth.location != "query" && !credential.is_empty() {
+            let auth_name = config
+                .auth
+                .name
+                .parse::<HeaderName>()
+                .map_err(|e| VoiceError::WebSocket(format!("auth header name: {e}")))?;
+            request.headers_mut().insert(
+                auth_name,
+                config
+                    .auth
+                    .rendered_value(credential)
+                    .parse()
+                    .map_err(|e| VoiceError::WebSocket(format!("auth header: {e}")))?,
+            );
+        }
+        for (name, value) in &config.extra_headers {
+            if let (Ok(name), Ok(value)) =
+                (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
+            {
+                request.headers_mut().insert(name, value);
+            }
+        }
 
         // Request-identity headers so the backend can attribute and meter voice
         // usage by client, mirroring what the sampler / imagine request paths
@@ -71,40 +120,26 @@ impl StreamingSttSession {
         let (mut ws_write, mut ws_read) = ws.split();
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(64);
         let (event_tx, event_rx) = mpsc::channel::<StreamingSttEvent>(64);
+        let protocol = config.protocol.clone();
+        let writer_protocol = protocol.clone();
 
         let writer_task = tokio::spawn(async move {
             while let Some(chunk) = audio_rx.recv().await {
-                if ws_write.send(Message::Binary(chunk.into())).await.is_err() {
+                let message = encode_audio_message(&writer_protocol, &chunk);
+                if ws_write.send(message).await.is_err() {
                     break;
                 }
             }
-            let _ = ws_write
-                .send(Message::Text(r#"{"type":"audio.done"}"#.into()))
-                .await;
+            let done = encode_done_message(&writer_protocol);
+            let _ = ws_write.send(done).await;
         });
 
         let reader_task = tokio::spawn(async move {
             loop {
                 match ws_read.next().await {
                     Some(Ok(Message::Text(text))) => {
-                        let event = match serde_json::from_str::<SttServerEvent>(&text) {
-                            Ok(SttServerEvent::Created {}) => Some(StreamingSttEvent::Ready),
-                            Ok(SttServerEvent::Partial {
-                                text,
-                                is_final,
-                                speech_final,
-                            }) => Some(StreamingSttEvent::Partial(SttTranscriptPartial {
-                                text,
-                                is_final,
-                                speech_final,
-                            })),
-                            Ok(SttServerEvent::Done { text, .. }) => {
-                                Some(StreamingSttEvent::Done { text })
-                            }
-                            Ok(SttServerEvent::Error { message }) => {
-                                Some(StreamingSttEvent::Error { message })
-                            }
-                            Ok(SttServerEvent::Unknown) => None,
+                        let event = match decode_event(&protocol, &text) {
+                            Ok(event) => event,
                             Err(e) => Some(StreamingSttEvent::Error {
                                 message: format!("parse error: {e}"),
                             }),
@@ -212,6 +247,45 @@ fn is_benign_disconnect(err: &WsError) -> bool {
     )
 }
 
+/// Encode one PCM chunk according to the provider's websocket contract.
+/// Deepgram and xAI accept binary PCM frames; ElevenLabs requires a JSON
+/// envelope carrying base64 audio.
+fn encode_audio_message(protocol: &str, chunk: &[u8]) -> Message {
+    if protocol.eq_ignore_ascii_case("elevenlabs") {
+        use base64::Engine as _;
+        Message::Text(
+            serde_json::json!({
+                "message_type": "input_audio_chunk",
+                "audio_base_64": base64::engine::general_purpose::STANDARD.encode(chunk),
+            })
+            .to_string()
+            .into(),
+        )
+    } else {
+        Message::Binary(chunk.to_vec().into())
+    }
+}
+
+/// Encode the provider-specific end-of-input frame sent after the audio
+/// channel closes.
+fn encode_done_message(protocol: &str) -> Message {
+    if protocol.eq_ignore_ascii_case("deepgram") {
+        Message::Text(r#"{"type":"Finalize"}"#.into())
+    } else if protocol.eq_ignore_ascii_case("elevenlabs") {
+        Message::Text(
+            serde_json::json!({
+                "message_type": "input_audio_chunk",
+                "audio_base_64": "",
+                "commit": true,
+            })
+            .to_string()
+            .into(),
+        )
+    } else {
+        Message::Text(r#"{"type":"audio.done"}"#.into())
+    }
+}
+
 /// Insert `name: value` into the handshake request, unless `value` is empty
 /// (header omitted) or not a valid header value (skipped with a debug log). A
 /// missing identity header never fails the connection — the bearer alone fully
@@ -234,6 +308,10 @@ fn insert_optional_header(request: &mut WsRequest, name: &'static str, value: &s
 }
 
 fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
+    if config.protocol.eq_ignore_ascii_case("elevenlabs") {
+        return Url::parse(&config.stt_ws_url()?)
+            .map_err(|e| VoiceError::Stt(format!("bad STT URL: {e}")));
+    }
     // Resolve `auto` / aliases here so the wire value is always a concrete
     // catalog code (the STT API does not accept `auto`, unlike TTS).
     let language = crate::language_for_api(&config.language);
@@ -241,13 +319,120 @@ fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
         &config.stt_ws_url()?,
         &[
             ("sample_rate", config.sample_rate.to_string()),
-            ("encoding", "pcm".into()),
+            (
+                "encoding",
+                if config.protocol.eq_ignore_ascii_case("deepgram") {
+                    "linear16".into()
+                } else {
+                    "pcm".into()
+                },
+            ),
             ("interim_results", config.stt_interim_results.to_string()),
             ("language", language.to_string()),
             ("endpointing", config.stt_endpointing_ms.to_string()),
         ],
     )
     .map_err(|e| VoiceError::Stt(format!("bad STT URL: {e}")))
+}
+
+fn decode_event(
+    protocol: &str,
+    text: &str,
+) -> Result<Option<StreamingSttEvent>, serde_json::Error> {
+    if protocol.eq_ignore_ascii_case("deepgram") {
+        let value: serde_json::Value = serde_json::from_str(text)?;
+        return Ok(match value.get("type").and_then(|value| value.as_str()) {
+            Some("Results") => {
+                let alternative = value
+                    .pointer("/channel/alternatives/0")
+                    .cloned()
+                    .unwrap_or_default();
+                let transcript = alternative
+                    .get("transcript")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                Some(StreamingSttEvent::Partial(SttTranscriptPartial {
+                    text: transcript,
+                    is_final: value
+                        .get("is_final")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    speech_final: value
+                        .get("speech_final")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                }))
+            }
+            Some("Metadata") => Some(StreamingSttEvent::Ready),
+            Some("Error") => Some(StreamingSttEvent::Error {
+                message: value
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Deepgram error")
+                    .to_owned(),
+            }),
+            _ => None,
+        });
+    }
+    if protocol.eq_ignore_ascii_case("elevenlabs") {
+        let value: serde_json::Value = serde_json::from_str(text)?;
+        let event_type = value
+            .get("message_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        return Ok(match event_type {
+            "session_started" => Some(StreamingSttEvent::Ready),
+            "final_transcript"
+            | "partial_transcript"
+            | "committed_transcript"
+            | "committed_transcript_with_timestamps" => {
+                Some(StreamingSttEvent::Partial(SttTranscriptPartial {
+                    text: value
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    is_final: matches!(
+                        event_type,
+                        "final_transcript"
+                            | "committed_transcript"
+                            | "committed_transcript_with_timestamps"
+                    ),
+                    speech_final: matches!(
+                        event_type,
+                        "final_transcript"
+                            | "committed_transcript"
+                            | "committed_transcript_with_timestamps"
+                    ),
+                }))
+            }
+            "error" | "auth_error" | "quota_exceeded" | "rate_limited" | "input_error"
+            | "transcriber_error" => Some(StreamingSttEvent::Error {
+                message: value
+                    .get("error")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("ElevenLabs error")
+                    .to_owned(),
+            }),
+            _ => None,
+        });
+    }
+    Ok(match serde_json::from_str::<SttServerEvent>(text)? {
+        SttServerEvent::Created {} => Some(StreamingSttEvent::Ready),
+        SttServerEvent::Partial {
+            text,
+            is_final,
+            speech_final,
+        } => Some(StreamingSttEvent::Partial(SttTranscriptPartial {
+            text,
+            is_final,
+            speech_final,
+        })),
+        SttServerEvent::Done { text, .. } => Some(StreamingSttEvent::Done { text }),
+        SttServerEvent::Error { message } => Some(StreamingSttEvent::Error { message }),
+        SttServerEvent::Unknown => None,
+    })
 }
 
 #[cfg(test)]
@@ -325,6 +510,102 @@ mod tests {
         assert!(
             req.headers().get("user-agent").is_none(),
             "invalid value must omit the header, not panic"
+        );
+    }
+
+    #[test]
+    fn deepgram_and_xai_send_binary_pcm_frames() {
+        for protocol in ["deepgram", "xai_ws"] {
+            let Message::Binary(bytes) = encode_audio_message(protocol, b"pcm") else {
+                panic!("{protocol} must send binary PCM");
+            };
+            assert_eq!(bytes.as_ref(), b"pcm");
+        }
+    }
+
+    #[test]
+    fn elevenlabs_wraps_audio_as_base64_json() {
+        let Message::Text(text) = encode_audio_message("elevenlabs", b"pcm") else {
+            panic!("ElevenLabs must send a JSON text frame");
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["message_type"], "input_audio_chunk");
+        assert_eq!(value["audio_base_64"], "cGNt");
+        assert!(value.get("commit").is_none());
+    }
+
+    #[test]
+    fn provider_done_frames_match_streaming_contracts() {
+        let Message::Text(deepgram) = encode_done_message("deepgram") else {
+            panic!("Deepgram finalize must be text JSON");
+        };
+        assert_eq!(deepgram, r#"{"type":"Finalize"}"#);
+
+        let Message::Text(elevenlabs) = encode_done_message("elevenlabs") else {
+            panic!("ElevenLabs commit must be text JSON");
+        };
+        let value: serde_json::Value = serde_json::from_str(&elevenlabs).unwrap();
+        assert_eq!(value["message_type"], "input_audio_chunk");
+        assert_eq!(value["audio_base_64"], "");
+        assert_eq!(value["commit"], true);
+
+        let Message::Text(xai) = encode_done_message("xai_ws") else {
+            panic!("xAI done must be text JSON");
+        };
+        assert_eq!(xai, r#"{"type":"audio.done"}"#);
+    }
+
+    #[test]
+    fn deepgram_results_map_to_partial_transcript() {
+        let event = decode_event(
+            "deepgram",
+            r#"{"type":"Results","is_final":true,"speech_final":true,"channel":{"alternatives":[{"transcript":"hello world"}]}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            event,
+            StreamingSttEvent::Partial(SttTranscriptPartial {
+                text: "hello world".into(),
+                is_final: true,
+                speech_final: true,
+            })
+        );
+    }
+
+    #[test]
+    fn elevenlabs_committed_transcript_is_final() {
+        let event = decode_event(
+            "elevenlabs",
+            r#"{"message_type":"committed_transcript","text":"done"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            event,
+            StreamingSttEvent::Partial(SttTranscriptPartial {
+                text: "done".into(),
+                is_final: true,
+                speech_final: true,
+            })
+        );
+    }
+
+    #[test]
+    fn elevenlabs_timestamped_commit_is_final() {
+        let event = decode_event(
+            "elevenlabs",
+            r#"{"message_type":"committed_transcript_with_timestamps","text":"done"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            event,
+            StreamingSttEvent::Partial(SttTranscriptPartial {
+                text: "done".into(),
+                is_final: true,
+                speech_final: true,
+            })
         );
     }
 }

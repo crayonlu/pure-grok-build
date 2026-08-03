@@ -12,10 +12,10 @@ pub use xai_grok_mcp::oauth_config::{McpOAuthConfig, McpOAuthConfigMap};
 // MCP server config value types extracted to `xai-grok-config-types` (config
 // dependency inversion); re-exported so `crate::util::config::*` paths keep working.
 pub use xai_grok_config_types::{
-    KNOWN_MCP_SERVER_FIELDS, McpJsonOAuthBlock, McpPreferenceSource, McpPreferencesFile,
-    McpServerConfig, McpServerConfigProblem, McpServerPreferences, McpServerProblemSeverity,
-    McpServerTransportConfig, McpSetupConfig, McpSetupDerivedValue, McpSetupField,
-    McpSetupFieldType, McpSetupOption, McpSetupResolution,
+    KNOWN_MCP_SERVER_FIELDS, McpJsonOAuthBlock, McpOAuthConfig as ParsedMcpOAuthConfig,
+    McpPreferenceSource, McpPreferencesFile, McpServerConfig, McpServerConfigProblem,
+    McpServerPreferences, McpServerProblemSeverity, McpServerTransportConfig, McpSetupConfig,
+    McpSetupDerivedValue, McpSetupField, McpSetupFieldType, McpSetupOption, McpSetupResolution,
 };
 // Permission-policy value types likewise extracted; re-exported to keep paths stable.
 pub use xai_grok_config_types::{
@@ -25,6 +25,15 @@ pub use xai_grok_config_types::{
 pub use xai_grok_config_types::{McpConfig, RelaySyncConfig};
 // Worktree-pool config value type extracted; re-exported to keep paths stable.
 pub use xai_grok_config_types::PoolConfig;
+
+fn runtime_oauth_config(config: ParsedMcpOAuthConfig) -> McpOAuthConfig {
+    McpOAuthConfig {
+        client_id: config.client_id,
+        client_secret: config.client_secret,
+        scopes: config.scopes,
+        callback_port: config.callback_port,
+    }
+}
 
 /// TUI/CLI settings. Composed from typed section configs defined in `agent::config`.
 #[derive(Debug, Clone, Default)]
@@ -168,7 +177,7 @@ pub(crate) fn load_mcp_servers_with_oauth(
         };
         config.expand_strings(sub);
         if let Some(oauth) = config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
+            oauth_configs.insert(name.clone(), runtime_oauth_config(oauth));
         }
         if let Some(acp_server) = config.to_acp_mcp_server(name) {
             acp_servers.push(acp_server);
@@ -1199,7 +1208,7 @@ pub(crate) fn parse_mcp_config_with_oauth(
         };
         server_config.expand_strings(sub);
         if let Some(oauth) = server_config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
+            oauth_configs.insert(name.clone(), runtime_oauth_config(oauth));
         }
         if let Some(server) = server_config.to_acp_mcp_server(name.clone()) {
             servers.push(server);

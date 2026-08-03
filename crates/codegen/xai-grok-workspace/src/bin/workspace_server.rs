@@ -398,6 +398,12 @@ async fn run(args: Args, cwd: PathBuf) -> anyhow::Result<()> {
         Some(diag_handle.clone()),
         args.require_explicit_toolset,
         args.confine_fs_to_workspace_root,
+        std::env::var("GROK_FORK_MODE").ok().is_some_and(|mode| {
+            matches!(
+                mode.trim().to_ascii_lowercase().as_str(),
+                "xai_compat" | "xai-compat" | "compat"
+            )
+        }),
     )
     .await
     {

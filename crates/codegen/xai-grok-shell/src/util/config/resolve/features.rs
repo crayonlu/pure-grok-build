@@ -29,8 +29,8 @@ pub fn resolve_zdr_access_enabled(
 /// its own `[features] managed_config` gate).
 ///
 /// Precedence: requirements (MDM > system > user) > managed
-/// (`managed_config.toml` > system managed) > user `config.toml` > default
-/// (true). Callable before an `AgentConfig` exists (startup prefetch runs
+/// (`managed_config.toml` > system managed) > user `config.toml` > fork-mode
+/// default (open mode is false). Callable before an `AgentConfig` exists (startup prefetch runs
 /// pre-agent), so it re-reads the config layers like
 /// `managed_config::is_fetch_enabled`.
 ///
@@ -90,7 +90,7 @@ fn remote_fetch_enabled_from_layers(layers: &crate::config::ConfigLayers) -> boo
     .into_iter()
     .flatten()
     .find_map(remote_fetch_value)
-    .unwrap_or(true)
+    .unwrap_or_else(crate::agent::service_policy::default_remote_fetch_enabled)
 }
 
 /// Err-arm fallback for [`resolve_remote_fetch_enabled`]: the independently
@@ -109,7 +109,7 @@ fn remote_fetch_enabled_from_policy_layers(
         .into_iter()
         .flatten()
         .find_map(remote_fetch_value)
-        .unwrap_or(true)
+        .unwrap_or_else(crate::agent::service_policy::default_remote_fetch_enabled)
 }
 
 #[cfg(test)]
@@ -134,8 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_fetch_defaults_to_true_when_absent() {
-        assert!(remote_fetch_enabled_from_layers(&empty_layers()));
+    fn remote_fetch_defaults_to_open_mode_off_when_absent() {
+        assert!(!remote_fetch_enabled_from_layers(&empty_layers()));
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
     /// The all-or-nothing layer load failing (corrupt user config.toml, IO
     /// error) must not disarm a policy pin — the Err arm still consults the
     /// merged requirements and both managed tiers, in Ok-arm walk order, and
-    /// fails open only with no policy at all.
+    /// falls back to the fork's open-mode default with no policy at all.
     #[test]
     fn remote_fetch_layer_load_failure_still_honors_policy_pins() {
         let off = features_remote_fetch(false);
@@ -257,8 +257,8 @@ mod tests {
             Some(&on)
         ));
         assert!(
-            remote_fetch_enabled_from_policy_layers(None, None, None),
-            "genuinely absent policy fails open"
+            !remote_fetch_enabled_from_policy_layers(None, None, None),
+            "genuinely absent policy uses open-mode default"
         );
     }
 }

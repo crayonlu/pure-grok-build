@@ -511,7 +511,20 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
-    pub(crate) fn model_compactions_remaining(
+    /// Whether the model accepts image inputs (multimodal/vision). Falls back
+    /// to `true` for unknown models so a missing catalog entry never disables
+    /// image reading unexpectedly.
+    pub fn model_supports_vision(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_vision)
+            .unwrap_or(true)
+    }
+
+    pub fn model_compactions_remaining(
         &self,
         model_id: &str,
     ) -> Option<xai_grok_sampling_types::CompactionsRemaining> {

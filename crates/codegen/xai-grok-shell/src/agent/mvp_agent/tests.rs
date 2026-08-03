@@ -94,85 +94,6 @@ fn resolve_subscription_tier_prefers_display_then_api_key_then_jwt() {
         Some("free")
     );
 }
-/// JWT claim ↔ `/user` tier mapping used to gate post-unblock catalog refresh
-/// (a stale older paid claim must not skip retry).
-#[test]
-fn jwt_claim_matches_user_subscription_tier_known_pairs() {
-    let cases = [
-        ("supergrok", "GrokPro"),
-        ("x_basic", "XBasic"),
-        ("x_premium", "XPremium"),
-        ("x_premium_plus", "XPremiumPlus"),
-        ("supergrok_heavy", "SuperGrokPro"),
-        ("9", "EnterpriseMystery"),
-        ("supergrok_lite", "SuperGrokLite"),
-        ("supergrok_plus", "SuperGrokPlus"),
-    ];
-    for (claim, user_tier) in cases {
-        assert!(
-            jwt_claim_matches_user_subscription_tier(claim, user_tier),
-            "{claim} should match {user_tier}"
-        );
-    }
-}
-#[test]
-fn jwt_claim_matches_user_subscription_tier_rejects_stale_and_unknown() {
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "x_basic",
-        "SuperGrokPro"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "supergrok",
-        "SuperGrokPro"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "supergrok",
-        "SuperGrokPlus"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "supergrok_heavy",
-        "SuperGrokPlus"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier("free", "GrokPro"));
-    assert!(!jwt_claim_matches_user_subscription_tier("", "XPremium"));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "supergrok_heavy",
-        "EnterpriseMystery"
-    ));
-    assert!(!jwt_claim_matches_user_subscription_tier(
-        "0",
-        "EnterpriseMystery"
-    ));
-}
-/// Single-flight flag must clear on Drop even if the retry task panics /
-/// aborts mid-backoff (guards against the flag stuck true forever).
-#[test]
-fn post_unblock_jwt_retry_in_flight_guard_clears_on_drop() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let flag = Arc::new(AtomicBool::new(true));
-    {
-        let _guard = PostUnblockJwtRetryInFlightGuard { flag: flag.clone() };
-        assert!(flag.load(Ordering::Acquire));
-    }
-    assert!(
-        !flag.load(Ordering::Acquire),
-        "Drop must release post_unblock_jwt_retry_in_flight"
-    );
-    let flag = Arc::new(AtomicBool::new(true));
-    let flag_for_catch = flag.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = PostUnblockJwtRetryInFlightGuard {
-            flag: flag_for_catch,
-        };
-        panic!("simulate retry task panic");
-    }));
-    assert!(result.is_err());
-    assert!(
-        !flag.load(Ordering::Acquire),
-        "Drop must release flag on panic unwind"
-    );
-}
 mod hunk_tracking_mode {
     use super::super::{plan_hunk_tracking, resolve_hunk_tracking_mode};
     use xai_hunk_tracker::TrackingMode;
@@ -2251,6 +2172,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,

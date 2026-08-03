@@ -1,140 +1,122 @@
-<div align="center">
+# pure-grok-build
 
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.x.ai/v1/website/spacexai-symbol-white-transparent-0c31957f.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png">
-    <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
-  </picture>
-  <br>
-  Grok Build (<code>grok</code>)
-</h1>
+A self-hosted fork of [Grok Build](https://github.com/xai-org/grok-build) (`grok` CLI) with automated nightly releases and a Cloudflare R2 mirror for self-hosted auto-updates.
 
-**Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
-full-screen TUI that understands your codebase, edits files, executes shell
-commands, searches the web, and manages long-running tasks — interactively,
-headlessly for scripting/CI, or embedded in editors via the Agent Client
-Protocol (ACP).
+## What this fork does
 
-[Installing the released binary](#installing-the-released-binary) ·
-[Building from source](#building-from-source) ·
-[Documentation](#documentation) ·
-[Repository layout](#repository-layout) ·
-[Development](#development) ·
-[Contributing](#contributing) ·
-[License](#license)
+- **Nightly upstream sync** — A scheduled GitHub Actions workflow merges `xai-org/grok-build@main` into this fork every day, builds release binaries for 4 platforms, and publishes a GitHub Release with a date-based semver tag (e.g. `2026.7.28`).
+- **Self-hosted update source** — Two environment variables (`GROK_CLI_BASE_URL`, `GROK_UPDATE_REPO`) let the in-app auto-updater fetch new versions from this fork instead of the upstream CDN.
+- **Cloudflare R2 mirror** — All nightly binaries and the `stable` channel pointer are mirrored to a Cloudflare R2 bucket served via `https://grok.cyncyn.xyz/cli`, providing global CDN-accelerated downloads with zero egress fees.
 
-![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
+## Installation
 
-**Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
-
-This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
-
-A small `SOURCE_REV` file at the root records the full monorepo commit SHA
-for the version of the code present in this tree.
-
-</div>
-
----
-
-## Installing the released binary
-
-Prebuilt binaries are published for macOS, Linux, and Windows:
+### Option A: Install from the R2 mirror (recommended)
 
 ```sh
-curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
-irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
+# 1. Download the latest version pointer
+VERSION=$(curl -sS https://grok.cyncyn.xyz/cli/stable)
+
+# 2. Download the binary for your platform
+#    macOS Apple Silicon:
+curl -fSL -o grok "https://grok.cyncyn.xyz/cli/grok-${VERSION}-macos-aarch64"
+#    macOS Intel:
+# curl -fSL -o grok "https://grok.cyncyn.xyz/cli/grok-${VERSION}-macos-x86_64"
+#    Linux x86_64:
+# curl -fSL -o grok "https://grok.cyncyn.xyz/cli/grok-${VERSION}-linux-x86_64"
+#    Linux aarch64:
+# curl -fSL -o grok "https://grok.cyncyn.xyz/cli/grok-${VERSION}-linux-aarch64"
+
+# 3. Install
+chmod +x grok
+sudo mv grok /usr/local/bin/grok    # or anywhere on your PATH
+
+# 4. Enable auto-updates from the R2 mirror + changelog display
+echo 'export GROK_CLI_BASE_URL=https://grok.cyncyn.xyz/cli' >> ~/.zshrc
+echo 'export GROK_UPDATE_REPO=crayonlu/pure-grok-build' >> ~/.zshrc
+source ~/.zshrc
+
 grok --version
 ```
 
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
-
-## Building from source
-
-Requirements:
-
-- **Rust** — the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml);
-  `rustup` installs it automatically on first build.
-- **[DotSlash](https://dotslash-cli.com)** — required so hermetic tools under
-  [`bin/`](bin/) (notably [`bin/protoc`](bin/protoc)) can download and run.
-  Install it and ensure `dotslash` is on your `PATH` **before** building:
-
-  ```sh
-  cargo install dotslash
-  # or: prebuilt packages — https://dotslash-cli.com/docs/installation/
-  /usr/bin/env dotslash --help   # sanity check
-  ```
-
-- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
-  or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+### Option B: Install from GitHub Releases
 
 ```sh
-cargo run -p xai-grok-pager-bin              # build + launch the TUI
-cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xai-grok-pager
-cargo check -p xai-grok-pager-bin            # fast validation
+gh release download --repo crayonlu/pure-grok-build --pattern 'grok-*-macos-aarch64' --output grok
+chmod +x grok && sudo mv grok /usr/local/bin/grok
+grok --version
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
-
-## Documentation
-
-Full online documentation is available at
-[docs.x.ai/build/overview](https://docs.x.ai/build/overview).
-
-The user guide ships with the pager crate:
-[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
-— getting started, keyboard shortcuts, slash commands, configuration, theming,
-MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
-
-## Repository layout
-
-| Path | Contents |
-|------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
-| `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
-| `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |
-| `crates/codegen/xai-grok-tools` | Tool implementations (terminal, file edit, search, ...) |
-| `crates/codegen/xai-grok-workspace` | Host filesystem, VCS, execution, checkpoints |
-| `crates/codegen/...` | The rest of the CLI crate closure (config, MCP, markdown, sandbox, ...) |
-| `crates/common/`, `crates/build/`, `prod/mc/` | Small shared leaf crates pulled in by the closure |
-| `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
-
-> [!IMPORTANT]
-> The root `Cargo.toml` (workspace members, dependency versions, lints,
-> profiles) is **generated** — treat it as read-only. Prefer editing per-crate
-> `Cargo.toml` files.
-
-## Development
+For auto-updates via GitHub Releases:
 
 ```sh
-cargo check -p <crate>        # always target specific crates; full-workspace builds are slow
-cargo test -p xai-grok-config # per-crate tests
-cargo clippy -p <crate>       # lint config: clippy.toml at the repo root
-cargo fmt --all               # rustfmt.toml at the repo root
+echo 'export GROK_UPDATE_REPO=crayonlu/pure-grok-build' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-## Contributing
+### Option C: Build from source
 
-> [!NOTE]
-> External contributions are not accepted. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+```sh
+git clone https://github.com/crayonlu/pure-grok-build.git
+cd pure-grok-build
+cargo build -p xai-grok-pager-bin --release
+# Binary: target/release/xai-grok-pager
+cp target/release/xai-grok-pager /usr/local/bin/grok
+```
+
+## Switching from the official Grok Build
+
+If you already have the official `grok` installed and want to switch to this fork:
+
+### If installed via the official installer (internal)
+
+```sh
+# 1. Point the auto-updater at the R2 mirror
+echo 'export GROK_CLI_BASE_URL=https://grok.cyncyn.xyz/cli' >> ~/.zshrc
+source ~/.zshrc
+
+# 2. Manually install the fork's binary (one-time)
+VERSION=$(curl -sS https://grok.cyncyn.xyz/cli/stable)
+curl -fSL -o ~/.grok/downloads/grok-${VERSION}-macos-aarch64 \
+  "https://grok.cyncyn.xyz/cli/grok-${VERSION}-macos-aarch64"
+chmod +x ~/.grok/downloads/grok-${VERSION}-macos-aarch64
+ln -sf ../downloads/grok-${VERSION}-macos-aarch64 ~/.grok/bin/grok
+ln -sf ../downloads/grok-${VERSION}-macos-aarch64 ~/.grok/bin/agent
+
+# 3. Verify
+grok --version
+```
+
+Future updates will be fetched automatically from the R2 mirror — no manual steps needed.
+
+### If installed via npm
+
+```sh
+# 1. Uninstall the npm version
+npm uninstall -g @xai-official/grok
+
+# 2. Follow Option A above to install from the R2 mirror
+```
+
+## How auto-updates work
+
+Once `GROK_CLI_BASE_URL` is set, the grok auto-updater:
+
+1. Fetches the latest version number from `<base>/stable` (plain-text semver)
+2. Compares it against the running version using semver
+3. If newer, downloads `<base>/grok-<version>-<platform>` and smoke-tests it
+4. Atomically swaps the `~/.grok/bin/grok` symlink to the new binary
+
+The date-based versioning (`YYYY.M.D`) ensures nightly builds are always semver-greater than the upstream stable line, so the updater treats each nightly as an upgrade.
+
+## Available platforms
+
+| Platform | Binary suffix |
+|---|---|
+| macOS Apple Silicon | `macos-aarch64` |
+| Linux x86_64 | `linux-x86_64` |
+| Linux aarch64 | `linux-aarch64` |
+| Windows x86_64 | `windows-x86_64.exe` |
 
 ## License
 
-First-party code in this repository is licensed under the **Apache License,
-Version 2.0** — see [`LICENSE`](LICENSE).
-
-Third-party and vendored code remains under its original licenses. See:
-
-- [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES) — crates.io / git dependencies,
-  bundled UI themes, and **in-tree source ports** (including openai/codex and
-  sst/opencode tool implementations)
-- [`crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md`](crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md)
-  — crate-local notice for the codex and opencode ports (license texts +
-  Apache §4(b) change notice)
-- [`third_party/NOTICE`](third_party/NOTICE) — vendored Mermaid-stack index
+First-party code is licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE) and [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES) for details.

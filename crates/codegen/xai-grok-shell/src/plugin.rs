@@ -728,7 +728,18 @@ pub(crate) fn load_marketplace_sources() -> Vec<MarketplaceSource> {
 pub(crate) fn load_filtered_marketplace_sources() -> Vec<MarketplaceSource> {
     let allowlist =
         &xai_grok_workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    filter_sources_by_allowlist(load_marketplace_sources(), allowlist)
+    let mut sources = filter_sources_by_allowlist(load_marketplace_sources(), allowlist);
+    // The bundled official xAI marketplace is an auxiliary first-party
+    // service, not a provider-neutral plugin source.  Open mode keeps custom
+    // Git/local marketplaces available but does not clone or scan a stale
+    // official source left in an older config.  Compatibility mode preserves
+    // upstream behavior.
+    if crate::agent::service_policy::mode_from_disk().is_open() {
+        sources.retain(|source| {
+            !matches!(&source.kind, SourceKind::Git { url, .. } if is_official_source_url(url))
+        });
+    }
+    sources
 }
 
 fn filter_sources_by_allowlist(

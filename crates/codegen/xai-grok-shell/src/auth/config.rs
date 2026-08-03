@@ -186,8 +186,33 @@ pub fn xai_oauth2_issuer() -> &'static str {
 /// (production **or** local-dev). Use this instead of comparing against
 /// [`XAI_OAUTH2_ISSUER`] directly so that local-dev sessions are still
 /// treated as first-party xAI auth.
+///
+/// When `GROK_OAUTH2_ISSUER` is explicitly set (self-hosted IdP), that
+/// issuer is treated as first-party too, so refresh and auth classification
+/// work against a deployment's own accounts service. Unset/blank keeps the
+/// upstream allowlist (`auth.x.ai` + localhost) exactly.
 pub fn is_xai_oauth2_issuer(issuer: &str) -> bool {
-    issuer == XAI_OAUTH2_ISSUER || issuer == XAI_OAUTH2_LOCAL_ISSUER
+    issuer == XAI_OAUTH2_ISSUER
+        || issuer == XAI_OAUTH2_LOCAL_ISSUER
+        || is_env_overridden_oauth2_issuer(issuer)
+}
+
+/// The `GROK_OAUTH2_ISSUER` env value, trimmed and normalized for comparison.
+fn env_oauth2_issuer() -> Option<String> {
+    std::env::var("GROK_OAUTH2_ISSUER")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+/// Whether `issuer` equals the explicitly configured `GROK_OAUTH2_ISSUER`.
+/// Both sides are normalized (trim + trailing slash) so an env value and the
+/// stored `oidc_issuer` written from the same config always match.
+fn is_env_overridden_oauth2_issuer(issuer: &str) -> bool {
+    env_oauth2_issuer().is_some_and(|env| {
+        let normalized = issuer.trim().trim_end_matches('/');
+        env == normalized
+    })
 }
 /// auth.json scope key used by the pre-OIDC `grok login --legacy` flow.
 /// Matches the key format produced by the original `accounts.x.ai` relay auth.

@@ -111,9 +111,8 @@ pub struct CommandRegistry {
     /// see. Menu-only: hidden from completion but still executable via
     /// [`Self::get_for_dispatch`].
     menu_hidden: HashSet<String>,
-    /// Commands denied for this user (e.g. tier-restricted: `/usage` on the
-    /// free / X Basic tiers — see
-    /// [`crate::app::app_view::TIER_RESTRICTED_COMMANDS`]).
+    /// Commands denied by the active local policy. The BYOK fork does not
+    /// derive this set from x.ai subscription tiers.
     ///
     /// Names are stored normalized (lowercase, no leading `/`) and match a
     /// command's canonical name OR any of its aliases, for both builtin and

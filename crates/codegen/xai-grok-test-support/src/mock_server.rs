@@ -109,6 +109,10 @@ pub struct MockModelEntry {
     pub agent_type: Option<String>,
     pub api_backend: Option<String>,
     pub supports_backend_search: bool,
+    /// Emitted as `supportsVision` when false (defaults to true, mirroring
+    /// the production model catalog: vision-capable models omit the field).
+    pub supports_vision: bool,
+    /// Emitted as `supportsReasoningEffort` (top-level) when true.
     pub supports_reasoning_effort: bool,
     pub reasoning_effort: Option<String>,
     /// Each entry is a table carrying a `value` key, or a bare value string.
@@ -123,6 +127,7 @@ impl MockModelEntry {
             agent_type: None,
             api_backend: None,
             supports_backend_search: false,
+            supports_vision: true,
             supports_reasoning_effort: false,
             reasoning_effort: None,
             reasoning_efforts: Vec::new(),
@@ -143,6 +148,11 @@ impl MockModelEntry {
 
     pub fn with_supports_backend_search(mut self, supports: bool) -> Self {
         self.supports_backend_search = supports;
+        self
+    }
+
+    pub fn with_supports_vision(mut self, supports: bool) -> Self {
+        self.supports_vision = supports;
         self
     }
 
@@ -176,6 +186,9 @@ impl MockModelEntry {
         }
         if self.supports_backend_search {
             obj["supportsBackendSearch"] = json!(true);
+        }
+        if !self.supports_vision {
+            obj["supportsVision"] = json!(false);
         }
         if self.supports_reasoning_effort {
             obj["supportsReasoningEffort"] = json!(true);

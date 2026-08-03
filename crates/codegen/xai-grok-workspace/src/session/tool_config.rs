@@ -304,9 +304,10 @@ fn ensure_session_dir(root: &std::path::Path, session_id: &str) -> (PathBuf, std
 pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 /// [`SessionContextFactory`] for workspace server sessions.
 ///
-/// When constructed with an [`AuthProvider`] and API base URL, gen tools
-/// (image_gen, video_gen) are enabled using the provider's current
-/// OAuth token. Without auth, gen tools default to `Disabled`.
+/// When constructed with an [`AuthProvider`] and API base URL, the factory
+/// still keeps image/video/search adapters disabled by default. They require
+/// the explicit [`with_xai_compat_tools`](Self::with_xai_compat_tools) opt-in;
+/// a token alone never selects a provider-specific protocol.
 ///
 /// When [`with_tool_state_home`](Self::with_tool_state_home) is set, each
 /// session's [`SessionContext::state_path`] is rooted at
@@ -326,6 +327,10 @@ pub(crate) use crate::ENV_TEST_LOCK as TOOL_STATE_ENV_LOCK;
 pub struct WorkspaceSessionContextFactory {
     auth: Option<xai_computer_hub_sdk::SharedAuthProvider>,
     api_base_url: Option<String>,
+    /// First-party image/video/search adapters are opt-in compatibility
+    /// surfaces. Open mode leaves them disabled even when a session has an
+    /// unrelated provider token.
+    xai_compat_tools: bool,
     /// Resolved `$GROK_WORKSPACE_HOME` when tool-state persistence is enabled;
     /// `None` disables it. Resolved once by the caller so the factory performs
     /// no per-build env reads.
@@ -341,16 +346,25 @@ impl WorkspaceSessionContextFactory {
         Self {
             auth: None,
             api_base_url: None,
+            xai_compat_tools: false,
             tool_state_home: None,
         }
     }
-    /// Factory with auth — gen tools use the provider's live token.
+    /// Factory with auth. Auxiliary adapters remain disabled until
+    /// [`with_xai_compat_tools`](Self::with_xai_compat_tools) is called.
     pub fn with_auth(auth: xai_computer_hub_sdk::SharedAuthProvider, api_base_url: String) -> Self {
         Self {
             auth: Some(auth),
             api_base_url: Some(api_base_url),
+            xai_compat_tools: false,
             tool_state_home: None,
         }
+    }
+    /// Explicitly enable the upstream xAI auxiliary-tool adapters. This is
+    /// never implied by the configured API URL or by the presence of a key.
+    pub fn with_xai_compat_tools(mut self) -> Self {
+        self.xai_compat_tools = true;
+        self
     }
     /// Enable session-keyed tool-state persistence rooted at `home`
     /// (`$GROK_WORKSPACE_HOME`). Callers should only invoke this when
@@ -416,31 +430,50 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                 let cred = auth.current();
                 match cred {
                     xai_computer_hub_sdk::AuthCredential::Bearer { token, .. } => {
-                        let headers = build_proxy_headers(url);
+                        let xai_compatible =
+                            self.xai_compat_tools && is_xai_compatible_endpoint(url);
+                        let headers = xai_compatible
+                            .then(|| build_proxy_headers(url))
+                            .unwrap_or_default();
                         (
-                            ImageGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                image_gen_enabled: true,
-                                image_edit_enabled: true,
-                                model_override: None,
-                                edit_model_override: None,
-                                tier_restricted: false,
+                            if xai_compatible {
+                                ImageGenConfig::Enabled {
+                                    api_key: token.clone(),
+                                    base_url: url.clone(),
+                                    extra_headers: headers.clone(),
+                                    image_gen_enabled: true,
+                                    image_edit_enabled: true,
+                                    model_override: None,
+                                    edit_model_override: None,
+                                    tier_restricted: false,
+                                    provider: None,
+                                    capability_profile: None,
+                                }
+                            } else {
+                                ImageGenConfig::default()
                             },
-                            VideoGenConfig::Enabled {
-                                api_key: token.clone(),
-                                base_url: url.clone(),
-                                extra_headers: headers.clone(),
-                                zdr_video_output_s3: None,
-                                tier_restricted: false,
+                            if xai_compatible {
+                                VideoGenConfig::Enabled {
+                                    api_key: token.clone(),
+                                    base_url: url.clone(),
+                                    extra_headers: headers.clone(),
+                                    zdr_video_output_s3: None,
+                                    tier_restricted: false,
+                                    capability_profile: None,
+                                }
+                            } else {
+                                VideoGenConfig::default()
                             },
-                            WebSearchConfig::Enabled {
-                                api_key: token,
-                                base_url: url.clone(),
-                                model: default_web_search_model(),
-                                extra_headers: headers,
-                                alpha_test_key: None,
+                            if xai_compatible {
+                                WebSearchConfig::Enabled {
+                                    api_key: token,
+                                    base_url: url.clone(),
+                                    model: default_web_search_model(),
+                                    extra_headers: headers,
+                                    alpha_test_key: None,
+                                }
+                            } else {
+                                WebSearchConfig::default()
                             },
                             AppBuilderDeployerConfig::default(),
                         )
@@ -499,6 +532,28 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         IDS.clone()
     }
 }
+/// Whether this endpoint implements the upstream xAI auxiliary-tool contract.
+/// Image/video generation currently have no provider-neutral adapter, so these
+/// tools are exposed only for xAI's API/proxy URLs.
+fn is_xai_compatible_endpoint(base_url: &str) -> bool {
+    let host = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "grok.com"
+        || host.ends_with(".grok.com")
+        || host == "cli-chat-proxy.grok.com"
+}
+
 /// Build extra headers for API calls routed through the chat proxy.
 /// Mirrors the shell's `inject_proxy_headers` logic.
 fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
@@ -513,7 +568,7 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         "x-grok-client-identifier".to_string(),
         std::env::var("GROK_CLIENT_NAME").unwrap_or_else(|_| "grok-shell".to_string()),
     );
-    if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
+    if is_cli_chat_proxy_endpoint(base_url) {
         headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
         headers.insert(
             "x-authenticateresponse".to_string(),
@@ -521,6 +576,13 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
         );
     }
     headers
+}
+
+fn is_cli_chat_proxy_endpoint(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "cli-chat-proxy.grok.com")
 }
 /// Build web fetch config. Enabled with default params unless
 /// `GROK_DISABLE_WEB_FETCH=1` is set.
@@ -1041,6 +1103,45 @@ mod tests {
     fn factory_state_path_empty_when_home_unset() {
         let factory = WorkspaceSessionContextFactory::new();
         assert_eq!(factory.resolve_state_path("sess-1"), PathBuf::new());
+    }
+    #[tokio::test]
+    async fn auth_does_not_auto_enable_provider_specific_auxiliary_tools() {
+        let auth: xai_computer_hub_sdk::SharedAuthProvider = Arc::new(
+            xai_computer_hub_sdk::auth::AuthCredential::bearer("test-token"),
+        );
+        let factory = WorkspaceSessionContextFactory::with_auth(
+            auth,
+            "https://cli-chat-proxy.grok.com/v1".to_string(),
+        );
+        let context = factory.build_session_context(
+            "open-mode",
+            PathBuf::from("/tmp"),
+            empty_env(),
+            Arc::new(xai_grok_tools::computer::local::LocalTerminalBackend::new()),
+        );
+        assert!(!context.image_gen_config.has_credentials());
+        assert!(!context.video_gen_config.is_enabled());
+        assert!(!context.web_search_config.is_enabled());
+    }
+    #[tokio::test]
+    async fn xai_auxiliary_tools_require_explicit_compatibility_opt_in() {
+        let auth: xai_computer_hub_sdk::SharedAuthProvider = Arc::new(
+            xai_computer_hub_sdk::auth::AuthCredential::bearer("test-token"),
+        );
+        let factory = WorkspaceSessionContextFactory::with_auth(
+            auth,
+            "https://cli-chat-proxy.grok.com/v1".to_string(),
+        )
+        .with_xai_compat_tools();
+        let context = factory.build_session_context(
+            "compat-mode",
+            PathBuf::from("/tmp"),
+            empty_env(),
+            Arc::new(xai_grok_tools::computer::local::LocalTerminalBackend::new()),
+        );
+        assert!(context.image_gen_config.has_credentials());
+        assert!(context.video_gen_config.is_enabled());
+        assert!(context.web_search_config.is_enabled());
     }
     #[test]
     fn factory_session_folder_is_tmp_sessions_not_project_cwd() {
