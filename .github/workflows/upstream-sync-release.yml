@@ -37,11 +37,11 @@ jobs:
     name: Merge upstream into fork
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.decide.outputs.should_release }}
-      version: ${{ steps.decide.outputs.version }}
-      tag: ${{ steps.decide.outputs.tag }}
-      upstream_sha: ${{ steps.decide.outputs.upstream_sha }}
-      date: ${{ steps.decide.outputs.date }}
+      should_release: ${{ steps.result.outputs.should_release }}
+      version: ${{ steps.result.outputs.version }}
+      tag: ${{ steps.result.outputs.tag }}
+      upstream_sha: ${{ steps.result.outputs.upstream_sha }}
+      date: ${{ steps.result.outputs.date }}
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -178,11 +178,21 @@ jobs:
             echo "- Sync branch: ${sync_branch}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Stop when a conflict was reported
-        if: steps.merge.outputs.conflict == 'true'
+      - name: Finalize sync result
+        id: result
+        if: always()
         run: |
-          echo "Merge conflict detected; pull request opened. Stopping before push/release."
-          exit 1
+          set -euo pipefail
+          if [[ "${{ steps.merge.outputs.conflict }}" == "true" ]]; then
+            echo "should_release=false" >> "${GITHUB_OUTPUT}"
+            echo "Conflict PR is open; skipping build and release jobs."
+          else
+            echo "should_release=${{ steps.decide.outputs.should_release }}" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "version=${{ steps.decide.outputs.version }}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${{ steps.decide.outputs.tag }}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${{ steps.decide.outputs.upstream_sha }}" >> "${GITHUB_OUTPUT}"
+          echo "date=${{ steps.decide.outputs.date }}" >> "${GITHUB_OUTPUT}"
 
       - name: Push merged main
         if: steps.decide.outputs.should_release == 'true' && steps.merge.outputs.conflict != 'true'
