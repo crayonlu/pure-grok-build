@@ -125,7 +125,6 @@ jobs:
         run: |
           set -euo pipefail
           target_repo="${GITHUB_REPOSITORY}"
-          owner="${target_repo%%/*}"
           upstream_sha="${{ steps.decide.outputs.upstream_sha }}"
           sync_branch="automation/upstream-sync-${upstream_sha}"
 
@@ -147,7 +146,7 @@ jobs:
 
           existing="$(gh pr list \
             --repo "${target_repo}" \
-            --head "${owner}:${sync_branch}" \
+            --head "${sync_branch}" \
             --base main \
             --state open \
             --json number \
@@ -162,7 +161,7 @@ jobs:
           else
             pr_url="$(gh pr create \
               --repo "${target_repo}" \
-              --head "${owner}:${sync_branch}" \
+              --head "${sync_branch}" \
               --base main \
               --title "${title}" \
               --body "${body}")"
