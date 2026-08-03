@@ -61,6 +61,8 @@ jobs:
 
       - name: Decide whether to release
         id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Date-derived semver (YYYY.M.D): valid semver, monotonically
@@ -71,9 +73,30 @@ jobs:
           upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
           fork_sha="$(git rev-parse HEAD)"
           ahead="$(git rev-list --count "HEAD..upstream/${UPSTREAM_BRANCH}" || echo 0)"
+          upstream_short="${upstream_sha:0:12}"
+          # A conflict PR may be merged with GitHub's squash strategy. That
+          # preserves the resolved tree but drops the upstream commit from
+          # main's ancestry, making rev-list report the already-synced commit
+          # as "ahead" on every subsequent run. The sync PR title carries the
+          # upstream short SHA, so use merged PR history as an ancestry-safe
+          # synchronization record.
+          synced_pr="$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base main \
+            --state merged \
+            --search "${upstream_short} in:title" \
+            --json number,title \
+            --jq '.[0].number // empty' || true)"
+          already_synced="false"
+          if [[ -n "${synced_pr}" ]]; then
+            already_synced="true"
+            echo "Upstream ${upstream_short} is already represented by merged sync PR #${synced_pr}."
+            ahead=0
+          fi
           echo "Upstream HEAD: ${upstream_sha}"
           echo "Fork HEAD:     ${fork_sha}"
           echo "Commits upstream is ahead by: ${ahead}"
+          echo "Already synchronized by merged PR: ${already_synced}"
           echo "Nightly version: ${version} (tag ${tag})"
 
           force="${{ github.event.inputs.force }}"
@@ -99,10 +122,13 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
+          echo "already_synced=${already_synced}" >> "${GITHUB_OUTPUT}"
           echo "date=$(date -u +%Y-%m-%d)" >> "${GITHUB_OUTPUT}"
 
       - name: Merge upstream into fork main
-        if: steps.decide.outputs.should_release == 'true'
+        if: >-
+          steps.decide.outputs.should_release == 'true' &&
+          steps.decide.outputs.already_synced != 'true'
         id: merge
         run: |
           set -euo pipefail
@@ -195,7 +221,10 @@ jobs:
           echo "date=${{ steps.decide.outputs.date }}" >> "${GITHUB_OUTPUT}"
 
       - name: Push merged main
-        if: steps.decide.outputs.should_release == 'true' && steps.merge.outputs.conflict != 'true'
+        if: >-
+          steps.decide.outputs.should_release == 'true' &&
+          steps.decide.outputs.already_synced != 'true' &&
+          steps.merge.outputs.conflict != 'true'
         run: |
           git push origin HEAD:main
 
