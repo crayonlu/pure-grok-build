@@ -19,6 +19,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 env:
   UPSTREAM_REPO: xai-org/grok-build
@@ -117,30 +118,71 @@ jobs:
           fi
           echo "conflict=false" >> "${GITHUB_OUTPUT}"
 
-      - name: Record merge conflict
+      - name: Open upstream sync pull request
         if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "::warning::Upstream merge conflict detected; Issues are disabled, so the conflict is recorded in the job summary."
+          target_repo="${GITHUB_REPOSITORY}"
+          owner="${target_repo%%/*}"
+          upstream_sha="${{ steps.decide.outputs.upstream_sha }}"
+          sync_branch="automation/upstream-sync-${upstream_sha}"
+
+          # Push upstream/main as a branch in the fork. GitHub will calculate
+          # the conflict against fork main and expose the normal PR resolver.
+          git switch -C "${sync_branch}" "upstream/${UPSTREAM_BRANCH}"
+          git push --force origin "HEAD:${sync_branch}"
+
+          title="chore(sync): merge upstream ${UPSTREAM_REPO}@${upstream_sha:0:12}"
+          body="$(printf '%s\n' \
+            'The scheduled upstream sync could not be merged automatically.' \
+            '' \
+            "Upstream repository: ${UPSTREAM_REPO}" \
+            "Upstream commit: ${upstream_sha}" \
+            "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '' \
+            'This PR is based on upstream/main so GitHub can display and resolve the conflicts against fork main.' \
+            'Resolve the conflicts, merge this PR, and the next scheduled run will continue from the updated main branch.')"
+
+          existing="$(gh pr list \
+            --repo "${target_repo}" \
+            --head "${owner}:${sync_branch}" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh pr edit "${existing}" \
+              --repo "${target_repo}" \
+              --title "${title}" \
+              --body "${body}"
+            pr_url="$(gh pr view "${existing}" --repo "${target_repo}" --json url --jq '.url')"
+            echo "Updated existing upstream sync PR: ${pr_url}"
+          else
+            pr_url="$(gh pr create \
+              --repo "${target_repo}" \
+              --head "${owner}:${sync_branch}" \
+              --base main \
+              --title "${title}" \
+              --body "${body}")"
+            echo "Created upstream sync PR: ${pr_url}"
+          fi
+
+          echo "::warning::Upstream merge conflict detected; PR opened for manual resolution."
           {
-            echo "## Upstream sync conflict"
+            echo "## Upstream sync conflict pull request"
             echo
-            echo "Manual resolution is required before the next release."
+            echo "Manual resolution is required before the next release: ${pr_url}"
             echo
-            echo "- Upstream commit: ${{ steps.decide.outputs.upstream_sha }}"
-            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            echo
-            echo '```sh'
-            echo 'git remote add upstream https://github.com/xai-org/grok-build.git'
-            echo 'git fetch upstream main'
-            echo 'git merge upstream/main'
-            echo '```'
+            echo "- Upstream commit: ${upstream_sha}"
+            echo "- Sync branch: ${sync_branch}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Stop when a conflict was reported
         if: steps.merge.outputs.conflict == 'true'
         run: |
-          echo "Merge conflict detected; stopping before push/release."
+          echo "Merge conflict detected; pull request opened. Stopping before push/release."
           exit 1
 
       - name: Push merged main
