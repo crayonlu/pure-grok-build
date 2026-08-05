@@ -132,16 +132,50 @@ jobs:
         id: merge
         run: |
           set -euo pipefail
-          if ! git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}" -m \
+          if git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}" -m \
             "chore(sync): merge upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} into fork main"; then
+            echo "conflict=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # The merge conflicted. Cargo.lock is a generated file: git's
+          # line-based merge cannot reconcile two independently-regenerated
+          # lockfiles, so it conflicts even when every Cargo.toml merged
+          # cleanly. Regenerate it from the merged Cargo.toml so that only
+          # real source conflicts require a manual pull request.
+          conflicting_files="$(git diff --name-only --diff-filter=U)"
+
+          if echo "${conflicting_files}" | grep -qv "^Cargo.lock$"; then
+            # A source file conflicts, not only the generated lockfile.
             echo "conflict=true" >> "${GITHUB_OUTPUT}"
             echo "::group::Conflicting files"
-            git diff --name-only --diff-filter=U
+            echo "${conflicting_files}"
             echo "::endgroup::"
             # Abandon the conflicted merge so the worktree stays clean.
             git merge --abort || true
             exit 0
           fi
+
+          # Only Cargo.lock conflicted — resolve automatically by
+          # regenerating the lockfile from the merged Cargo.toml manifests.
+          echo "::group::Auto-resolving Cargo.lock (generated file)"
+          git checkout --ours Cargo.lock
+          if ! command -v cargo &>/dev/null; then
+            echo "::warning::cargo not found on runner; falling back to manual PR"
+            git merge --abort || true
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if ! cargo update --workspace; then
+            echo "::warning::cargo update failed; falling back to manual PR"
+            git merge --abort || true
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git add Cargo.lock
+          git commit --no-edit
+          echo "::endgroup::"
+          echo "✅ Cargo.lock conflict auto-resolved by \`cargo update\` — no manual PR needed." >> "${GITHUB_STEP_SUMMARY}"
           echo "conflict=false" >> "${GITHUB_OUTPUT}"
 
       - name: Open upstream sync pull request
