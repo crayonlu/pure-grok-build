@@ -46,9 +46,7 @@ pub use manager::{AuthManager, shared_api_key_provider};
 pub(crate) use manager::{AuthRemedy, SilentRefresh};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{AuthMode, GrokAuth, lookup_auth};
-pub(crate) use model::{
-    TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired, token_suffix,
-};
+pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{
     clear_api_key, read_api_key, read_auth_json, read_token_by_scope, store_api_key,
