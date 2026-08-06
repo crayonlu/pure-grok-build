@@ -13602,7 +13602,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "toml",
  "url",
 ]
 
@@ -13676,6 +13675,8 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-markdown",
  "xai-grok-mermaid",
+ "xai-grok-overlay",
+ "xai-grok-overlay-api",
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
@@ -13715,12 +13716,14 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "xai-acp-lib",
  "xai-crash-handler",
  "xai-grok-config",
  "xai-grok-overlay",
+ "xai-grok-overlay-api",
  "xai-grok-pager",
  "xai-grok-pager-minimal",
  "xai-grok-sandbox",

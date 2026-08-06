@@ -85,6 +85,8 @@ xai-ratatui-inline = { workspace = true }
 
 # Update
 xai-grok-update = { path = "../xai-grok-update" }
+xai-grok-overlay = { workspace = true }
+xai-grok-overlay-api = { workspace = true }
 
 # ACP
 agent-client-protocol = { workspace = true }

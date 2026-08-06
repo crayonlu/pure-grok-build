@@ -1,40 +1,13 @@
-use std::collections::BTreeMap;
-
-use serde::Deserialize;
-
 use crate::{
-    AuthPolicy, Capability, CapabilityAvailability, CapabilityProviderRef, CapabilitySet,
-    EntitlementPolicy, OverlayMode, OverlayPolicy, UpdateChannel, UpdateSourceRef,
+    AuthPolicy, Capability, CapabilityAvailability, CapabilitySet, EntitlementPolicy,
+    OverlayPolicy, UpdateSourceRef,
 };
-
-/// Errors raised while resolving the distribution overlay.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OverlayConfigError {
-    InvalidMode(String),
-    InvalidUpdateSource(String),
-    InvalidCapability(String),
-}
-
-impl std::fmt::Display for OverlayConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidMode(value) => write!(f, "invalid overlay mode `{value}`"),
-            Self::InvalidUpdateSource(value) => {
-                write!(f, "invalid overlay update source `{value}`")
-            }
-            Self::InvalidCapability(value) => write!(f, "invalid overlay capability `{value}`"),
-        }
-    }
-}
-
-impl std::error::Error for OverlayConfigError {}
 
 /// Fully resolved, immutable overlay state for one process.
 ///
-/// This value belongs to the provider-neutral API crate rather than the fork
-/// implementation crate. Host applications can carry the snapshot without
-/// depending on the code that loads it from disk, environment, or a specific
-/// distribution.
+/// The API crate owns this value and the policy decisions derived from it.
+/// Distribution-specific config discovery belongs to the loader crate, which
+/// keeps host applications independent from a particular overlay format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayRuntime {
     policy: OverlayPolicy,
@@ -51,78 +24,47 @@ impl Default for OverlayRuntime {
 
 impl OverlayRuntime {
     pub fn open() -> Self {
-        Self {
-            policy: OverlayPolicy::open(),
-            entitlement: EntitlementPolicy::provider_neutral(),
-            capabilities: CapabilitySet::disabled(),
-            update_source: None,
-        }
+        Self::from_parts(
+            OverlayPolicy::open(),
+            EntitlementPolicy::provider_neutral(),
+            CapabilitySet::disabled(),
+            None,
+        )
     }
 
     pub fn xai_compat() -> Self {
-        Self {
-            policy: OverlayPolicy::xai_compat(),
-            entitlement: EntitlementPolicy::first_party(),
-            capabilities: CapabilitySet::disabled(),
-            update_source: None,
-        }
+        Self::from_parts(
+            OverlayPolicy::xai_compat(),
+            EntitlementPolicy::first_party(),
+            CapabilitySet::disabled(),
+            None,
+        )
     }
 
     pub fn upstream() -> Self {
-        Self {
-            policy: OverlayPolicy::upstream(),
-            entitlement: EntitlementPolicy::first_party(),
-            capabilities: CapabilitySet::inherited(),
-            update_source: None,
-        }
+        Self::from_parts(
+            OverlayPolicy::upstream(),
+            EntitlementPolicy::first_party(),
+            CapabilitySet::inherited(),
+            None,
+        )
     }
 
-    /// Resolve `[overlay]` from a parsed config document.
-    ///
-    /// Environment overrides are intentionally supplied by the caller. This
-    /// keeps precedence deterministic and lets a host or test harness provide
-    /// its own environment source without coupling this API to process-global
-    /// state.
-    pub fn from_toml(
-        document: Option<&toml::Value>,
-        getenv: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, OverlayConfigError> {
-        let overlay_document = document.and_then(|document| document.get("overlay"));
-        let file = overlay_document
-            .cloned()
-            .map(toml::Value::try_into::<FileOverlayConfig>)
-            .transpose()
-            .map_err(|error| OverlayConfigError::InvalidMode(error.to_string()))?
-            .unwrap_or_default();
-
-        let explicit_mode = getenv("GROK_OVERLAY_MODE").or(file.mode.clone());
-        let mode = explicit_mode
-            .map(|value| parse_mode(&value))
-            .transpose()?
-            .unwrap_or(if overlay_document.is_some() {
-                OverlayMode::Open
-            } else {
-                OverlayMode::Upstream
-            });
-
-        let mut runtime = match mode {
-            OverlayMode::Upstream => Self::upstream(),
-            OverlayMode::Open => Self::open(),
-            OverlayMode::XaiCompat => Self::xai_compat(),
-        };
-
-        runtime.capabilities = if mode.is_upstream() && file.capabilities.is_empty() {
-            CapabilitySet::inherited()
-        } else {
-            capability_set(file.capabilities)?
-        };
-        runtime.update_source = resolve_update_source(
-            file.update_source,
-            getenv("GROK_UPDATE_REPO"),
-            getenv("GROK_CLI_BASE_URL"),
-        )?;
-
-        Ok(runtime)
+    /// Construct a runtime snapshot from already-resolved provider-neutral
+    /// values. Config parsing and environment precedence are intentionally not
+    /// part of this API.
+    pub fn from_parts(
+        policy: OverlayPolicy,
+        entitlement: EntitlementPolicy,
+        capabilities: CapabilitySet,
+        update_source: Option<UpdateSourceRef>,
+    ) -> Self {
+        Self {
+            policy,
+            entitlement,
+            capabilities,
+            update_source,
+        }
     }
 
     pub fn policy(&self) -> OverlayPolicy {
@@ -168,224 +110,5 @@ impl OverlayRuntime {
 
     pub fn update_source(&self) -> Option<&UpdateSourceRef> {
         self.update_source.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct FileOverlayConfig {
-    mode: Option<String>,
-    update_source: Option<FileUpdateSource>,
-    capabilities: BTreeMap<String, FileCapabilityProvider>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-struct FileUpdateSource {
-    kind: String,
-    location: String,
-    channel: UpdateChannel,
-}
-
-impl Default for FileUpdateSource {
-    fn default() -> Self {
-        Self {
-            kind: String::new(),
-            location: String::new(),
-            channel: UpdateChannel::Stable,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct FileCapabilityProvider {
-    name: String,
-    protocol: String,
-    base_url: Option<String>,
-}
-
-fn parse_mode(raw: &str) -> Result<OverlayMode, OverlayConfigError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "open" | "byok" | "provider_neutral" => Ok(OverlayMode::Open),
-        "xai_compat" | "xai-compat" | "compat" => Ok(OverlayMode::XaiCompat),
-        _ => Err(OverlayConfigError::InvalidMode(raw.to_owned())),
-    }
-}
-
-fn capability_set(
-    providers: BTreeMap<String, FileCapabilityProvider>,
-) -> Result<CapabilitySet, OverlayConfigError> {
-    providers
-        .into_iter()
-        .try_fold(CapabilitySet::disabled(), |set, (name, provider)| {
-            let capability = parse_capability(&name)?;
-            if provider.name.trim().is_empty() || provider.protocol.trim().is_empty() {
-                return Err(OverlayConfigError::InvalidCapability(name));
-            }
-            Ok(set.with_provider(
-                capability,
-                CapabilityProviderRef::new(provider.name, provider.protocol, provider.base_url),
-            ))
-        })
-}
-
-fn parse_capability(raw: &str) -> Result<Capability, OverlayConfigError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "chat" => Ok(Capability::Chat),
-        "embeddings" | "embedding" => Ok(Capability::Embeddings),
-        "web_search" | "web-search" => Ok(Capability::WebSearch),
-        "web_fetch" | "web-fetch" => Ok(Capability::WebFetch),
-        "image_generation" | "image-generation" | "image_gen" => Ok(Capability::ImageGeneration),
-        "image_editing" | "image-editing" | "image_edit" => Ok(Capability::ImageEditing),
-        "video_generation" | "video-generation" | "video_gen" => Ok(Capability::VideoGeneration),
-        "voice" => Ok(Capability::Voice),
-        _ => Err(OverlayConfigError::InvalidCapability(raw.to_owned())),
-    }
-}
-
-fn resolve_update_source(
-    file: Option<FileUpdateSource>,
-    repo: Option<String>,
-    base_url: Option<String>,
-) -> Result<Option<UpdateSourceRef>, OverlayConfigError> {
-    if let Some(repo) = repo.filter(|value| !value.trim().is_empty()) {
-        return Ok(Some(UpdateSourceRef::github_release(
-            repo,
-            UpdateChannel::Stable,
-        )));
-    }
-    if let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) {
-        return Ok(Some(UpdateSourceRef::base_url(
-            base_url,
-            UpdateChannel::Stable,
-        )));
-    }
-    let Some(file) = file else {
-        return Ok(None);
-    };
-    if file.kind.trim().is_empty() || file.location.trim().is_empty() {
-        return Err(OverlayConfigError::InvalidUpdateSource(
-            "kind and location are required".to_owned(),
-        ));
-    }
-    if !matches!(file.kind.as_str(), "github_release" | "base_url") {
-        return Err(OverlayConfigError::InvalidUpdateSource(file.kind));
-    }
-    Ok(Some(UpdateSourceRef {
-        kind: file.kind,
-        location: file.location,
-        channel: file.channel,
-    }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn env<'a>(entries: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
-        move |key| {
-            entries
-                .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| (*value).to_owned())
-        }
-    }
-
-    #[test]
-    fn no_overlay_preserves_upstream_defaults() {
-        let runtime = OverlayRuntime::from_toml(None, env(&[])).expect("resolve defaults");
-
-        assert_eq!(runtime.policy().mode, OverlayMode::Upstream);
-        assert_eq!(runtime.auth_policy(), AuthPolicy::Inherited);
-        assert_eq!(
-            runtime.capability(Capability::ImageGeneration),
-            CapabilityAvailability::Inherited
-        );
-        assert!(runtime.update_source().is_none());
-    }
-
-    #[test]
-    fn explicit_overlay_table_defaults_to_open_mode() {
-        let document: toml::Value = toml::toml! {
-            [overlay]
-        }
-        .into();
-        let runtime =
-            OverlayRuntime::from_toml(Some(&document), env(&[])).expect("resolve overlay");
-
-        assert_eq!(runtime.policy().mode, OverlayMode::Open);
-        assert_eq!(runtime.auth_policy(), AuthPolicy::ByokOnly);
-        assert_eq!(
-            runtime.capability(Capability::ImageGeneration),
-            CapabilityAvailability::Disabled
-        );
-    }
-
-    #[test]
-    fn environment_mode_overrides_file_mode() {
-        let document: toml::Value = toml::toml! {
-            [overlay]
-            mode = "xai_compat"
-        }
-        .into();
-        let runtime =
-            OverlayRuntime::from_toml(Some(&document), env(&[("GROK_OVERLAY_MODE", "open")]))
-                .expect("resolve mode");
-
-        assert_eq!(runtime.auth_policy(), AuthPolicy::ByokOnly);
-        assert!(!runtime.entitlement().show_billing);
-    }
-
-    #[test]
-    fn file_capabilities_and_update_source_are_resolved() {
-        let document: toml::Value = toml::toml! {
-            [overlay]
-            mode = "open"
-            [overlay.capabilities.image_generation]
-            name = "local-images"
-            protocol = "generic_http"
-            base_url = "https://images.example.test/v1"
-            [overlay.update_source]
-            kind = "base_url"
-            location = "https://downloads.example.test/grok"
-            channel = "nightly"
-        }
-        .into();
-        let runtime = OverlayRuntime::from_toml(Some(&document), env(&[])).expect("resolve config");
-
-        assert!(matches!(
-            runtime.capability(Capability::ImageGeneration),
-            CapabilityAvailability::Provider(ref provider)
-                if provider.name == "local-images"
-        ));
-        assert_eq!(
-            runtime
-                .update_source()
-                .map(|source| source.location.as_str()),
-            Some("https://downloads.example.test/grok")
-        );
-    }
-
-    #[test]
-    fn update_environment_overrides_file_source() {
-        let document: toml::Value = toml::toml! {
-            [overlay.update_source]
-            kind = "base_url"
-            location = "https://file.example.test"
-        }
-        .into();
-        let runtime = OverlayRuntime::from_toml(
-            Some(&document),
-            env(&[("GROK_CLI_BASE_URL", "https://env.example.test")]),
-        )
-        .expect("resolve update source");
-
-        assert_eq!(
-            runtime
-                .update_source()
-                .map(|source| source.location.as_str()),
-            Some("https://env.example.test")
-        );
     }
 }

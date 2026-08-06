@@ -158,6 +158,10 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+    agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
+        xai_grok_overlay_api::OverlayRuntime::default()
+    });
 
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
@@ -267,6 +271,10 @@ pub async fn connect_via_leader(
 
     let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
+        xai_grok_overlay_api::OverlayRuntime::default()
+    });
     // resolve_telemetry_mode reads remote_settings.
     agent_config.remote_settings = flags.remote_settings.clone();
 

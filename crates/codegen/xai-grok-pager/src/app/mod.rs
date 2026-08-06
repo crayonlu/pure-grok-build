@@ -576,6 +576,10 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
+        xai_grok_overlay_api::OverlayRuntime::default()
+    });
     let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
         Ok(c) => c,
         Err(e) => {
@@ -583,9 +587,10 @@ pub async fn run(
             xai_grok_shell::agent::config::Config::default()
         }
     };
+    let mut agent_config = agent_config;
+    agent_config.overlay_runtime = overlay_runtime.clone();
     let grok_com_config = agent_config.grok_com_config.clone();
     let allow_session_auth = agent_config.overlay_runtime.policy().allows_session_auth();
-    let overlay_runtime = agent_config.overlay_runtime.clone();
     let refreshed_auth = if allow_session_auth {
         tokio::time::timeout(
             xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,

@@ -8,7 +8,6 @@ description = "Stable extension seams for provider-neutral Grok overlays."
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-toml = { workspace = true }
 url = { workspace = true }
 
 [lints]

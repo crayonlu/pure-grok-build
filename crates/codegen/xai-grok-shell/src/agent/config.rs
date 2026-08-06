@@ -2150,11 +2150,10 @@ impl Config {
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
-        config.overlay_runtime =
-            xai_grok_overlay_api::OverlayRuntime::from_toml(Some(raw_config), |key| {
-                std::env::var(key).ok()
-            })
-            .map_err(|error| format!("invalid overlay configuration: {error}"))?;
+        // The distribution loader resolves `[overlay]` at the composition
+        // root. Keep the API's default here so upstream callers that
+        // instantiate Config directly preserve upstream behavior.
+        config.overlay_runtime = xai_grok_overlay_api::OverlayRuntime::default();
         Ok(config)
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
