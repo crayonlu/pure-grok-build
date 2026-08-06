@@ -2342,6 +2342,16 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
     if no_auto_update_flag {
         return false;
     }
+    let auto_updates_allowed = xai_grok_overlay::load_runtime()
+        .map(|runtime| {
+            let policy = runtime.policy();
+            !policy.mode.is_open() || policy.updates.allows_implicit()
+        })
+        .unwrap_or(false);
+    if !auto_updates_allowed {
+        tracing::debug!("automatic updates disabled by overlay policy");
+        return false;
+    }
     !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
         .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
 }

@@ -13719,6 +13719,7 @@ dependencies = [
  "xai-acp-lib",
  "xai-crash-handler",
  "xai-grok-config",
+ "xai-grok-overlay",
  "xai-grok-pager",
  "xai-grok-pager-minimal",
  "xai-grok-sandbox",
