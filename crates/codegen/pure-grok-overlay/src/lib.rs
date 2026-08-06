@@ -16,9 +16,7 @@ use xai_grok_overlay_api::{
 /// Resolve the overlay snapshot from the same effective TOML document used by
 /// the host application.
 pub fn load_runtime() -> Result<OverlayRuntime, OverlayConfigError> {
-    let document = xai_grok_config::load_effective_config_disk_only()
-        .ok()
-        .and_then(|document| toml::Value::try_from(document).ok());
+    let document = xai_grok_config::load_effective_config_disk_only().ok();
     OverlayRuntime::from_toml(document.as_ref(), |key| std::env::var(key).ok())
 }
 
