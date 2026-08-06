@@ -39,6 +39,8 @@ members = [
     "crates/codegen/xai-grok-pager-pty-harness",
     "crates/codegen/xai-grok-pager-render",
     "crates/codegen/xai-grok-paths",
+    "crates/codegen/xai-grok-overlay-api",
+    "crates/codegen/pure-grok-overlay",
     "crates/codegen/xai-grok-plugin-marketplace",
     "crates/codegen/xai-grok-sampler",
     "crates/codegen/xai-grok-sampling-types",
@@ -301,6 +303,8 @@ xai-grok-config-types = { path = "crates/codegen/xai-grok-config-types" }
 xai-grok-env = { path = "crates/codegen/xai-grok-env" }
 xai-grok-extra-ca = { path = "crates/codegen/xai-grok-extra-ca" }
 xai-grok-http = { path = "crates/codegen/xai-grok-http" }
+xai-grok-overlay-api = { path = "crates/codegen/xai-grok-overlay-api" }
+xai-grok-overlay = { path = "crates/codegen/pure-grok-overlay" }
 xai-grok-markdown = { path = "crates/codegen/xai-grok-markdown" }
 xai-grok-markdown-core = { path = "crates/codegen/xai-grok-markdown-core" }
 xai-grok-mcp = { path = "crates/codegen/xai-grok-mcp" }

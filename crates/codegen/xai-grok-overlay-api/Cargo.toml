@@ -1,0 +1,14 @@
+[package]
+name = "xai-grok-overlay-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Stable extension seams for provider-neutral Grok overlays."
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

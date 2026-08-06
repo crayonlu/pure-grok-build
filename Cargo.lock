@@ -13587,6 +13587,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-overlay"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "xai-grok-overlay-api",
+]
+
+[[package]]
+name = "xai-grok-overlay-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "xai-grok-pager"
 version = "0.2.120"
 dependencies = [
