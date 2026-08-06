@@ -13,6 +13,15 @@ use xai_grok_overlay_api::{
     EntitlementPolicy, OverlayMode, OverlayPolicy, UpdateChannel, UpdateSourceRef,
 };
 
+/// Resolve the overlay snapshot from the same effective TOML document used by
+/// the host application.
+pub fn load_runtime() -> Result<OverlayRuntime, OverlayConfigError> {
+    let document = xai_grok_config::load_effective_config_disk_only()
+        .ok()
+        .and_then(|document| toml::Value::try_from(document).ok());
+    OverlayRuntime::from_toml(document.as_ref(), |key| std::env::var(key).ok())
+}
+
 /// Errors raised while resolving the distribution overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayConfigError {
