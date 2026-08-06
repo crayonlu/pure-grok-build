@@ -308,8 +308,7 @@ impl acp::Agent for MvpAgent {
             }),
             ),
         );
-        let auth_policy = self.cfg.borrow().overlay_runtime.auth_policy();
-        let allow_session_auth = !matches!(auth_policy, xai_grok_overlay_api::AuthPolicy::ByokOnly);
+        let allow_session_auth = self.cfg.borrow().overlay_runtime.policy().allows_session_auth();
         let mut has_cached_token = allow_session_auth && init_has_current;
         if !init_has_current && init_is_expired {
             has_cached_token = if allow_session_auth {

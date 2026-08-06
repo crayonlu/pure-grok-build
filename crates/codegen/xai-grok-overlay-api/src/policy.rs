@@ -71,6 +71,16 @@ pub enum AuthPolicy {
     FirstPartyOnly,
 }
 
+impl AuthPolicy {
+    pub const fn allows_session_auth(self) -> bool {
+        !matches!(self, Self::ByokOnly)
+    }
+
+    pub const fn allows_first_party_auth(self) -> bool {
+        !matches!(self, Self::ByokOnly)
+    }
+}
+
 /// Resolved service and authentication policy for one process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -164,6 +174,10 @@ impl OverlayPolicy {
     pub const fn allows_explicit(&self, kind: ServiceKind) -> bool {
         self.service(kind).allows_explicit()
     }
+
+    pub const fn allows_session_auth(&self) -> bool {
+        self.auth.allows_session_auth()
+    }
 }
 
 #[cfg(test)]
@@ -189,8 +203,15 @@ mod tests {
 
         assert!(policy.mode.is_upstream());
         assert_eq!(policy.auth, AuthPolicy::Inherited);
+        assert!(policy.auth.allows_session_auth());
         assert!(policy.allows_implicit(ServiceKind::Telemetry));
         assert!(policy.allows_implicit(ServiceKind::Updates));
+    }
+
+    #[test]
+    fn byok_policy_disables_session_auth() {
+        assert!(!AuthPolicy::ByokOnly.allows_session_auth());
+        assert!(AuthPolicy::ProviderOrByok.allows_session_auth());
     }
 
     #[test]

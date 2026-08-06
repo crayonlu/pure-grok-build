@@ -371,10 +371,7 @@ pub async fn run_stdio_agent(
             // drive a token refresh before bootstrap reads policy; the same manager goes to the agent.
             let auth_manager = Arc::new(agent_config.create_auth_manager());
             // Proactive token refresh; runs until process exit.
-            if !matches!(
-                agent_config.overlay_runtime.auth_policy(),
-                xai_grok_overlay_api::AuthPolicy::ByokOnly
-            ) {
+            if agent_config.overlay_runtime.policy().allows_session_auth() {
                 auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
             }
             // Pause refreshes across system sleep so an OIDC refresh can't straddle a
@@ -567,10 +564,7 @@ pub async fn run_headless(
                 let gateway = GatewaySender::new(gw_tx);
                 let auth_manager = shared_auth_manager;
                 // Proactive token refresh for the headless agent.
-                if !matches!(
-                    agent_config_clone.overlay_runtime.auth_policy(),
-                    xai_grok_overlay_api::AuthPolicy::ByokOnly
-                ) {
+                if agent_config_clone.overlay_runtime.policy().allows_session_auth() {
                     auth_manager.start_proactive_refresh(agent_cancel.clone());
                 }
                 // Restore managed policy right before bootstrap reads it (no stale window after relay setup).
@@ -1197,13 +1191,10 @@ pub async fn run_leader(
     // (~5s) refresh only. A session-less-but-mintable leader is minted by the
     // post-readiness background task below, so readiness never blocks on the
     // provider command (which could take up to STARTUP_AUTH_TIMEOUT ~60s).
-    let auth: Option<GrokAuth> = if matches!(
-        agent_config.overlay_runtime.auth_policy(),
-        xai_grok_overlay_api::AuthPolicy::ByokOnly
-    ) {
-        None
-    } else {
+    let auth: Option<GrokAuth> = if agent_config.overlay_runtime.policy().allows_session_auth() {
         crate::auth::try_noninteractive_auth_no_mint(ctx).await
+    } else {
+        None
     };
 
     // ── Phase 6b: Legacy devbox auth migration ─────────────────────────────
@@ -1262,10 +1253,11 @@ pub async fn run_leader(
 
     let shared_auth_manager = Arc::new(agent_config_for_spawn.create_auth_manager());
     // Proactive token refresh for the leader; cancelled on shutdown.
-    if !matches!(
-        agent_config_for_spawn.overlay_runtime.auth_policy(),
-        xai_grok_overlay_api::AuthPolicy::ByokOnly
-    ) {
+    if agent_config_for_spawn
+        .overlay_runtime
+        .policy()
+        .allows_session_auth()
+    {
         shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
     }
     // Pause refreshes across system sleep on this local (laptop) leader

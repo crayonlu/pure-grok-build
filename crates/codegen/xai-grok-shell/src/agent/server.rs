@@ -303,10 +303,7 @@ async fn run_persistent_agent(
     // Create MvpAgent ONCE -- it persists for the lifetime of the server.
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     // Proactive token refresh; runs until process exit.
-    if !matches!(
-        agent_config.overlay_runtime.auth_policy(),
-        xai_grok_overlay_api::AuthPolicy::ByokOnly
-    ) {
+    if agent_config.overlay_runtime.policy().allows_session_auth() {
         auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
     }
     // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
