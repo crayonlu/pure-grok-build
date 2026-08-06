@@ -308,7 +308,11 @@ async fn run_persistent_agent(
     }
     // Restore managed policy right before bootstrap reads it — the agent is created lazily here,
     // so an earlier restore could go stale before the gate.
-    crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+    crate::managed_config::ensure_managed_policy_present_for_overlay(
+        &auth_manager,
+        &agent_config.overlay_runtime,
+    )
+    .await;
     crate::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
     let agent = Rc::new(
         MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)

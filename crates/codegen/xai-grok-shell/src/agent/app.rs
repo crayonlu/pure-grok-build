@@ -382,7 +382,11 @@ pub async fn run_stdio_agent(
             auth_manager.start_system_power_listener();
 
             // Restore managed policy right before bootstrap reads it (no stale window after prefetch).
-            crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+            crate::managed_config::ensure_managed_policy_present_for_overlay(
+                &auth_manager,
+                &agent_config.overlay_runtime,
+            )
+            .await;
             apply_otel_config(&auth_manager, &agent_config.grok_com_config);
             let handle_io = spawn_agent_local(
                 agent_config,
@@ -568,7 +572,11 @@ pub async fn run_headless(
                     auth_manager.start_proactive_refresh(agent_cancel.clone());
                 }
                 // Restore managed policy right before bootstrap reads it (no stale window after relay setup).
-                crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+                crate::managed_config::ensure_managed_policy_present_for_overlay(
+                    &auth_manager,
+                    &agent_config_clone.overlay_runtime,
+                )
+                .await;
                 let mut agent =
                     MvpAgent::new(gateway, &agent_config_clone, auth_manager, prefetched_models)
                         .unwrap_or_else(exit_on_config_error);
@@ -1284,7 +1292,11 @@ pub async fn run_leader(
     let auth_manager_for_mint = shared_auth_manager.clone();
 
     // Restore managed policy right before bootstrap reads it (no stale window after the long auth/prefetch phase).
-    crate::managed_config::ensure_managed_policy_present(&auth_manager_for_agent).await;
+    crate::managed_config::ensure_managed_policy_present_for_overlay(
+        &auth_manager_for_agent,
+        &agent_config_for_spawn.overlay_runtime,
+    )
+    .await;
 
     let (agent_config_for_spawn, shared_models_manager) = bootstrap(
         &agent_config_for_spawn,
