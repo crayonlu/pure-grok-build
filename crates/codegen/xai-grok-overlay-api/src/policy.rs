@@ -178,6 +178,12 @@ impl OverlayPolicy {
     pub const fn allows_session_auth(&self) -> bool {
         self.auth.allows_session_auth()
     }
+
+    /// Whether the host may perform an implicit first-party authentication
+    /// operation such as token refresh or cached-session recovery.
+    pub const fn allows_first_party_auth(&self) -> bool {
+        self.auth.allows_first_party_auth()
+    }
 }
 
 #[cfg(test)]

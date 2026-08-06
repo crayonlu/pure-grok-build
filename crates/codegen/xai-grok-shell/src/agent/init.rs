@@ -35,7 +35,14 @@ pub fn bootstrap(
 
     // Refresh on every auth refresh — the FSEvents watcher can silently die after
     // macOS sleep, stranding the catalog on bundled defaults.
-    models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());
+    if cfg
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());
+    } else {
+        tracing::debug!("model catalog auth-refresh watcher skipped by overlay policy");
+    }
 
     Ok((cfg, models_manager))
 }
@@ -224,6 +231,24 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
 /// Apply current telemetry config + auth identity. Tears down the client
 /// when telemetry is disabled, so it's safe to call repeatedly.
 pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager) {
+    if !config
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::Telemetry)
+    {
+        xai_grok_telemetry::client::init(
+            config.telemetry.clone(),
+            xai_grok_telemetry::config::TelemetryMode::Disabled,
+            None,
+            None,
+            None,
+            crate::http::origin_client_info_from_env(),
+            xai_grok_version::VERSION.to_owned(),
+            None,
+            crate::http::shared_client(),
+        );
+        tracing::debug!("telemetry client disabled by overlay policy");
+        return;
+    }
     let grok_auth = auth_manager.current().filter(|a| a.is_xai_auth());
     let user_id = grok_auth.as_ref().map(|a| a.user_id.clone());
     let team_id = grok_auth.as_ref().and_then(|a| a.team_id.clone());

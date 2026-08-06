@@ -804,6 +804,16 @@ impl ModelsManager {
 
     /// Refresh the model catalog on every auth token refresh.
     pub fn start_auth_refresh_watcher(&self, notify: Arc<tokio::sync::Notify>) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog auth-refresh watcher skipped by overlay policy");
+            return;
+        }
         let mgr = self.clone();
         let had_catalog_at_start = self.inner.catalog.read().has_fetched_real_catalog;
         xai_grok_telemetry::unified_log::info(

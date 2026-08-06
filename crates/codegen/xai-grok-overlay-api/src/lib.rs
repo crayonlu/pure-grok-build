@@ -9,9 +9,11 @@
 mod capabilities;
 mod entitlement;
 mod policy;
+mod runtime;
 mod updates;
 
 pub use capabilities::{Capability, CapabilityAvailability, CapabilityProviderRef, CapabilitySet};
 pub use entitlement::{EntitlementPolicy, EntitlementState};
 pub use policy::{AuthPolicy, OverlayMode, OverlayPolicy, ServiceKind, ServicePolicy};
+pub use runtime::{OverlayConfigError, OverlayRuntime};
 pub use updates::{UpdateChannel, UpdateSourceRef};

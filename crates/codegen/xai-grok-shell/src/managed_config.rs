@@ -954,7 +954,7 @@ pub async fn ensure_managed_policy_present(
 /// avoid entering it when implicit managed config is disabled.
 pub async fn ensure_managed_policy_present_for_overlay(
     auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
-    overlay: &xai_grok_overlay::OverlayRuntime,
+    overlay: &xai_grok_overlay_api::OverlayRuntime,
 ) {
     if !overlay
         .policy()

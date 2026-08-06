@@ -13602,6 +13602,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "toml",
  "url",
 ]
 
@@ -14078,7 +14079,6 @@ dependencies = [
  "xai-grok-mcp",
  "xai-grok-memory",
  "xai-grok-models",
- "xai-grok-overlay",
  "xai-grok-overlay-api",
  "xai-grok-paths",
  "xai-grok-plugin-marketplace",

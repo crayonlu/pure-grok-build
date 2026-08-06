@@ -1331,7 +1331,7 @@ pub struct Config {
     /// Resolved distribution overlay. This startup snapshot is consumed by
     /// hosts and adapters; the upstream config schema stays provider-neutral.
     #[serde(skip)]
-    pub overlay_runtime: xai_grok_overlay::OverlayRuntime,
+    pub overlay_runtime: xai_grok_overlay_api::OverlayRuntime,
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
@@ -1786,7 +1786,7 @@ impl Default for Config {
         let endpoints = EndpointsConfig::default();
         let mut cfg = Self {
             features: Features::default(),
-            overlay_runtime: xai_grok_overlay::OverlayRuntime::default(),
+            overlay_runtime: xai_grok_overlay_api::OverlayRuntime::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -2151,7 +2151,7 @@ impl Config {
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
         config.overlay_runtime =
-            xai_grok_overlay::OverlayRuntime::from_toml(Some(raw_config), |key| {
+            xai_grok_overlay_api::OverlayRuntime::from_toml(Some(raw_config), |key| {
                 std::env::var(key).ok()
             })
             .map_err(|error| format!("invalid overlay configuration: {error}"))?;

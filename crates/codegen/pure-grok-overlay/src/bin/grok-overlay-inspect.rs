@@ -5,7 +5,7 @@ fn main() {
         let document = std::fs::read_to_string(path)
             .ok()
             .and_then(|text| text.parse::<toml::Value>().ok());
-        xai_grok_overlay::OverlayRuntime::from_toml(document.as_ref(), |key| env::var(key).ok())
+        xai_grok_overlay_api::OverlayRuntime::from_toml(document.as_ref(), |key| env::var(key).ok())
     } else {
         xai_grok_overlay::load_runtime()
     }

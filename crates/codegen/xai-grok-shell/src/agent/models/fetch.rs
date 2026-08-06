@@ -167,7 +167,7 @@ pub fn start_early_prefetch_with_auth(auth: Option<GrokAuth>) -> Option<EarlyPre
 /// environment are re-read in the prefetch path.
 pub fn start_early_prefetch_with_auth_for_overlay(
     auth: Option<GrokAuth>,
-    overlay: &xai_grok_overlay::OverlayRuntime,
+    overlay: &xai_grok_overlay_api::OverlayRuntime,
 ) -> Option<EarlyPrefetchHandle> {
     if !overlay
         .policy()
@@ -210,7 +210,7 @@ pub fn start_early_prefetch(grok_com_config: Option<GrokComConfig>) -> Option<Ea
 /// starting the thread at all in provider-neutral mode.
 pub fn start_early_prefetch_for_overlay(
     grok_com_config: Option<GrokComConfig>,
-    overlay: &xai_grok_overlay::OverlayRuntime,
+    overlay: &xai_grok_overlay_api::OverlayRuntime,
 ) -> Option<EarlyPrefetchHandle> {
     if !overlay
         .policy()
