@@ -415,7 +415,10 @@ fn env_flag_enabled(value: &str) -> bool {
 }
 /// Blocking fetch of remote settings via the startup prefetch path.
 fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    join_early_prefetch(xai_grok_shell::agent::models::start_early_prefetch(None))
+    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_default();
+    join_early_prefetch(
+        xai_grok_shell::agent::models::start_early_prefetch_for_overlay(None, &overlay_runtime),
+    )
 }
 async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
     if matches!(

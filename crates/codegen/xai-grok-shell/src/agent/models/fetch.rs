@@ -162,6 +162,23 @@ pub fn start_early_prefetch_with_auth(auth: Option<GrokAuth>) -> Option<EarlyPre
     start_early_prefetch_with_auth_gated(auth, true)
 }
 
+/// Overlay-aware variant of [`start_early_prefetch_with_auth`]. The caller
+/// supplies the already-resolved startup snapshot, so no config layers or
+/// environment are re-read in the prefetch path.
+pub fn start_early_prefetch_with_auth_for_overlay(
+    auth: Option<GrokAuth>,
+    overlay: &xai_grok_overlay::OverlayRuntime,
+) -> Option<EarlyPrefetchHandle> {
+    if !overlay
+        .policy()
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        tracing::debug!("early prefetch skipped by overlay policy");
+        return None;
+    }
+    start_early_prefetch_with_auth(auth)
+}
+
 /// `sync_managed = false` skips the managed-config sync, so a remote kill-switch
 /// can apply on cold start before the fail-closed managed-policy gate without an
 /// online sync healing a tampered on-disk policy first.

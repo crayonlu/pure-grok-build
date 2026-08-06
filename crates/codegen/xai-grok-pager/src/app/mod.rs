@@ -576,24 +576,35 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
-        &raw_config,
-    ) {
-        Ok(c) => c.grok_com_config,
+    let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
+        Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
-            xai_grok_shell::auth::GrokComConfig::default()
+            tracing::warn!(error = %e, "failed to parse config for startup prefetch, using defaults");
+            xai_grok_shell::agent::config::Config::default()
         }
     };
-    let refreshed_auth = tokio::time::timeout(
-        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
-    )
-    .await
-    .unwrap_or(None);
+    let grok_com_config = agent_config.grok_com_config.clone();
+    let allow_session_auth = agent_config.overlay_runtime.policy().allows_session_auth();
+    let overlay_runtime = agent_config.overlay_runtime.clone();
+    let refreshed_auth = if allow_session_auth {
+        tokio::time::timeout(
+            xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
+        )
+        .await
+        .unwrap_or(None)
+    } else {
+        None
+    };
     let early_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-        None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth_for_overlay(
+            Some(auth),
+            &overlay_runtime,
+        ),
+        None => xai_grok_shell::agent::models::start_early_prefetch_for_overlay(
+            Some(grok_com_config.clone()),
+            &overlay_runtime,
+        ),
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});

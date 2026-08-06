@@ -1191,7 +1191,7 @@ pub(crate) use fetch::*;
 pub use fetch::{
     EarlyPrefetchHandle, EarlyPrefetchResult, start_early_prefetch,
     start_early_prefetch_for_overlay, start_early_prefetch_settings_only,
-    start_early_prefetch_with_auth,
+    start_early_prefetch_with_auth, start_early_prefetch_with_auth_for_overlay,
 };
 pub(crate) use resolution::*;
 
