@@ -257,10 +257,11 @@ impl ModelsManager {
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
         auth_manager: Arc<AuthManager>,
     ) -> Result<Self, String> {
-        let has_session = auth_manager.current_or_expired().is_some();
-        let is_session_auth = auth_manager
-            .current_or_expired()
-            .is_some_and(|a| a.is_session_auth());
+        let has_session = cfg.overlay_runtime.policy().allows_session_auth()
+            && auth_manager.current_or_expired().is_some();
+        let is_session_auth = auth_manager.current_or_expired().is_some_and(|a| {
+            cfg.overlay_runtime.policy().allows_session_auth() && a.is_session_auth()
+        });
         let fetch_auth = ModelFetchAuth::resolve(&cfg.endpoints, has_session);
         let prefetched_models = prefetched_models.or_else(|| {
             let cache = ModelsCacheManager::new();
