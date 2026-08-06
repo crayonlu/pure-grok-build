@@ -57,6 +57,15 @@ pub(crate) fn exit_on_config_error<T>(e: String) -> T {
 /// `sync_managed`: when true, missing-settings fallback may also refresh
 /// managed-config. Must be false before the managed-policy gate.
 fn ensure_remote_settings_side_effects(cfg: &mut AgentConfig, sync_managed: bool) {
+    if !cfg
+        .overlay_runtime
+        .policy()
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        tracing::debug!("remote settings fetch skipped by overlay policy");
+        crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
+        return;
+    }
     // Fallback: if the client didn't pre-supply remote settings, fetch them
     // now so remote-settings-gated features work regardless of which client
     // spawned us. Clients that already call `start_early_prefetch()` and
@@ -155,7 +164,12 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         let limits = crate::util::limits::ProcessLimits::read();
         limits.log();
 
-        if !cfg!(test) {
+        if !cfg!(test)
+            && cfg
+                .overlay_runtime
+                .policy()
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+        {
             // Clear a logged-out team's files before the background sync runs.
             crate::managed_config::clear_orphan();
             crate::managed_config::spawn_sync(tokio_util::sync::CancellationToken::new());
@@ -169,7 +183,12 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
         // At boot remote_settings may still be None (fetches are backgrounded),
         // so only an env opt-in fires here; the gate is re-evaluated once
         // settings arrive (see `MvpAgent::reapply_official_marketplace`).
-        if cfg.resolve_official_marketplace_auto_register().value {
+        if cfg.resolve_official_marketplace_auto_register().value
+            && cfg
+                .overlay_runtime
+                .policy()
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+        {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);
         }
 
