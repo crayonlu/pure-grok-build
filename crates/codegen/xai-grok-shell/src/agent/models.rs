@@ -782,6 +782,17 @@ impl ModelsManager {
 
     /// One-shot background catalog refresh after readiness; no-op when a fresh disk cache already loaded a real catalog.
     pub fn spawn_background_refresh(&self) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .policy()
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog background refresh skipped by overlay policy");
+            return;
+        }
         if self.inner.catalog.read().has_fetched_real_catalog {
             tracing::debug!(
                 "skipping startup background model refresh: fresh cache already loaded"
