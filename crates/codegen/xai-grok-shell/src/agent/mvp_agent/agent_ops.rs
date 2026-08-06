@@ -1466,17 +1466,17 @@ impl MvpAgent {
             xai_chat_state::AuthType::ApiKey
         }
     }
-    /// When `cached_token` cannot proceed, prefer non-interactive `xai.api_key`
-    /// iff `should_advertise_xai_api_key`; otherwise `grok.com`. Returns `None`
-    /// when `preferred_method` is pinned (fail-closed — no cross-method fallthrough).
+    /// Fall through to `xai.api_key` if the startup probe still allows it,
+    /// else `grok.com`. `None` when `preferred_method` is pinned.
     pub(super) fn cached_token_fallthrough_method_id(
         &self,
     ) -> Option<acp::AuthMethodId> {
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let id = auth_method::method_id_after_cached_token_unavailable(
-            auth_method::should_advertise_xai_api_key(
+            auth_method::should_advertise_xai_api_key_with_env_ok(
                 self.cfg.borrow().grok_com_config.api_key_auth_disabled(),
                 self.models_manager.models().values(),
+                self.auth_manager.first_party_env_api_key_ok(),
             ),
             preferred,
         )?;
@@ -2743,6 +2743,9 @@ impl MvpAgent {
             ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            post_unblock_jwt_retry_in_flight: Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             workspace_ops: RefCell::new(None),
             #[cfg(all(feature = "local-workspace", unix))]
             local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),
@@ -3240,7 +3243,8 @@ impl MvpAgent {
             return Err("send failed");
         }
         match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(_))) => Err("flush failed"),
             Ok(Err(_)) => Err("channel closed"),
             Err(_) => Err("timeout"),
         }

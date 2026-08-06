@@ -2337,6 +2337,9 @@ impl Config {
     pub(crate) fn is_session_recap_enabled(&self) -> bool {
         self.resolve_session_recap().value
     }
+    pub(crate) fn is_turn_summary_enabled(&self) -> bool {
+        self.resolve_turn_summary().value
+    }
     pub fn is_voice_mode_enabled(&self) -> bool {
         !self.fork.is_open() && self.resolve_voice_mode().value
     }
@@ -2573,6 +2576,26 @@ impl Config {
         BoolFlag::env("GROK_SESSION_RECAP")
             .config(self.features.session_recap)
             .feature_flag(ff)
+            .default(true)
+            .resolve()
+    }
+    /// Per-turn dashboard summary gate. Default ON — disable via remote
+    /// settings, the `[features] turn_summary` config key, or
+    /// `GROK_TURN_SUMMARY`.
+    pub(crate) fn resolve_turn_summary(&self) -> Resolved<bool> {
+        let raw_config = crate::config::load_effective_config().ok();
+        let config_value = raw_config
+            .as_ref()
+            .and_then(|value| value.get("features"))
+            .and_then(|features| features.get("turn_summary"))
+            .and_then(toml::Value::as_bool);
+        let remote_value = self
+            .remote_settings
+            .as_ref()
+            .and_then(|settings| settings.turn_summary);
+        BoolFlag::env("GROK_TURN_SUMMARY")
+            .config(config_value)
+            .feature_flag(remote_value)
             .default(true)
             .resolve()
     }
@@ -4618,6 +4641,10 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_recap: Option<bool>,
+    /// Per-turn dashboard summary generated at turn end.
+    /// `None` = defer to remote settings / env / default (`true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_summary: Option<bool>,
     /// Voice dictation (STT). `None` = env / remote / default on.
     /// Set `false` in requirements or managed config to force off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
