@@ -308,11 +308,17 @@ impl acp::Agent for MvpAgent {
             }),
             ),
         );
-        let mut has_cached_token = init_has_current;
+        let auth_policy = self.cfg.borrow().overlay_runtime.auth_policy();
+        let allow_session_auth = !matches!(auth_policy, xai_grok_overlay_api::AuthPolicy::ByokOnly);
+        let mut has_cached_token = allow_session_auth && init_has_current;
         if !init_has_current && init_is_expired {
-            has_cached_token = match self.auth_manager.silent_refresh().await {
-                SilentRefresh::Renewed(_) => true,
-                SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
+            has_cached_token = if allow_session_auth {
+                match self.auth_manager.silent_refresh().await {
+                    SilentRefresh::Renewed(_) => true,
+                    SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
+                }
+            } else {
+                false
             };
         }
         let (
