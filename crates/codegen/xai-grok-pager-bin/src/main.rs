@@ -1100,7 +1100,9 @@ async fn run_agent_command(
             }
         }
     }
-    let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
+    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_default();
+    let early_prefetch =
+        xai_grok_shell::agent::models::start_early_prefetch_for_overlay(None, &overlay_runtime);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
