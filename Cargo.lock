@@ -14079,6 +14079,7 @@ dependencies = [
  "xai-grok-memory",
  "xai-grok-models",
  "xai-grok-overlay",
+ "xai-grok-overlay-api",
  "xai-grok-paths",
  "xai-grok-plugin-marketplace",
  "xai-grok-sampler",

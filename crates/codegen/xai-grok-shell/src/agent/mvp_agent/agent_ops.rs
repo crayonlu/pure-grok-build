@@ -2268,6 +2268,15 @@ impl MvpAgent {
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        if matches!(
+            self.cfg
+                .borrow()
+                .overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::ImageGeneration),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return ImageGenConfig::Disabled;
+        }
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
@@ -2312,6 +2321,13 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
+        if matches!(
+            cfg.overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::VideoGeneration),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return VideoGenConfig::Disabled;
+        }
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
