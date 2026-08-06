@@ -17,6 +17,8 @@ pub enum Capability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityAvailability {
+    /// Let the host's native capability resolver decide.
+    Inherited,
     Disabled,
     Provider(CapabilityProviderRef),
 }
@@ -47,15 +49,32 @@ impl CapabilityProviderRef {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapabilitySet {
     pub selected: BTreeMap<Capability, CapabilityAvailability>,
+    default: CapabilityAvailability,
+}
+
+impl Default for CapabilitySet {
+    fn default() -> Self {
+        Self::inherited()
+    }
 }
 
 impl CapabilitySet {
     pub fn disabled() -> Self {
-        Self::default()
+        Self {
+            selected: BTreeMap::new(),
+            default: CapabilityAvailability::Disabled,
+        }
+    }
+
+    pub fn inherited() -> Self {
+        Self {
+            selected: BTreeMap::new(),
+            default: CapabilityAvailability::Inherited,
+        }
     }
 
     pub fn with_provider(
@@ -78,7 +97,7 @@ impl CapabilitySet {
         self.selected
             .get(&capability)
             .cloned()
-            .unwrap_or(CapabilityAvailability::Disabled)
+            .unwrap_or_else(|| self.default.clone())
     }
 }
 
@@ -87,10 +106,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capability_set_defaults_to_disabled() {
+    fn capability_set_defaults_to_inherited() {
         assert_eq!(
             CapabilitySet::default().get(Capability::ImageGeneration),
-            CapabilityAvailability::Disabled
+            CapabilityAvailability::Inherited
         );
     }
 

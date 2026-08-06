@@ -5643,6 +5643,43 @@ reasoning_effort = "low"
         assert_eq!(cfg.toolset.ask_user_question.timeout_enabled, Some(false));
         assert_eq!(cfg.toolset.ask_user_question.timeout_secs, Some(30));
     }
+
+    #[test]
+    fn overlay_defaults_to_upstream_without_overlay_table() {
+        let raw_config = toml::Value::Table(Default::default());
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+        assert_eq!(
+            cfg.overlay_runtime.policy().mode,
+            xai_grok_overlay_api::OverlayMode::Upstream
+        );
+        assert_eq!(
+            cfg.overlay_runtime.auth_policy(),
+            xai_grok_overlay_api::AuthPolicy::Inherited
+        );
+    }
+
+    #[test]
+    fn overlay_table_can_disable_media_capabilities() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [overlay]
+            mode = "open"
+            "#,
+        )
+        .expect("overlay config should parse");
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+        assert_eq!(
+            cfg.overlay_runtime.policy().mode,
+            xai_grok_overlay_api::OverlayMode::Open
+        );
+        assert_eq!(
+            cfg.overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::ImageGeneration),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        );
+    }
     #[test]
     fn parses_toolset_bash_float_timeout() {
         let raw_config: toml::Value = toml::from_str(

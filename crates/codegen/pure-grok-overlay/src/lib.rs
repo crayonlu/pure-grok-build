@@ -53,7 +53,7 @@ pub struct OverlayRuntime {
 
 impl Default for OverlayRuntime {
     fn default() -> Self {
-        Self::open()
+        Self::upstream()
     }
 }
 
@@ -76,6 +76,15 @@ impl OverlayRuntime {
         }
     }
 
+    pub fn upstream() -> Self {
+        Self {
+            policy: OverlayPolicy::upstream(),
+            entitlement: EntitlementPolicy::first_party(),
+            capabilities: CapabilitySet::inherited(),
+            update_source: None,
+        }
+    }
+
     /// Resolve `[overlay]` from a parsed config document.
     ///
     /// Environment overrides are intentionally supplied by the caller. This
@@ -85,27 +94,35 @@ impl OverlayRuntime {
         document: Option<&toml::Value>,
         getenv: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, OverlayConfigError> {
-        let file = document
-            .and_then(|document| document.get("overlay"))
+        let overlay_document = document.and_then(|document| document.get("overlay"));
+        let file = overlay_document
             .cloned()
             .map(toml::Value::try_into::<FileOverlayConfig>)
             .transpose()
             .map_err(|error| OverlayConfigError::InvalidMode(error.to_string()))?
             .unwrap_or_default();
 
-        let mode = getenv("GROK_OVERLAY_MODE")
-            .or(file.mode)
+        let explicit_mode = getenv("GROK_OVERLAY_MODE").or(file.mode.clone());
+        let mode = explicit_mode
             .map(|value| parse_mode(&value))
             .transpose()?
-            .unwrap_or_default();
+            .unwrap_or(if overlay_document.is_some() {
+                OverlayMode::Open
+            } else {
+                OverlayMode::Upstream
+            });
 
-        let mut runtime = if mode.is_open() {
-            Self::open()
-        } else {
-            Self::xai_compat()
+        let mut runtime = match mode {
+            OverlayMode::Upstream => Self::upstream(),
+            OverlayMode::Open => Self::open(),
+            OverlayMode::XaiCompat => Self::xai_compat(),
         };
 
-        runtime.capabilities = capability_set(file.capabilities)?;
+        runtime.capabilities = if mode.is_upstream() && file.capabilities.is_empty() {
+            CapabilitySet::inherited()
+        } else {
+            capability_set(file.capabilities)?
+        };
         runtime.update_source = resolve_update_source(
             file.update_source,
             getenv("GROK_UPDATE_REPO"),
@@ -262,15 +279,33 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_is_open_and_has_no_implicit_capabilities() {
+    fn no_overlay_preserves_upstream_defaults() {
         let runtime = OverlayRuntime::from_toml(None, env(&[])).expect("resolve defaults");
 
+        assert_eq!(runtime.policy().mode, OverlayMode::Upstream);
+        assert_eq!(runtime.auth_policy(), AuthPolicy::Inherited);
+        assert_eq!(
+            runtime.capability(Capability::ImageGeneration),
+            CapabilityAvailability::Inherited
+        );
+        assert!(runtime.update_source().is_none());
+    }
+
+    #[test]
+    fn explicit_overlay_table_defaults_to_open_mode() {
+        let document: toml::Value = toml::toml! {
+            [overlay]
+        }
+        .into();
+        let runtime =
+            OverlayRuntime::from_toml(Some(&document), env(&[])).expect("resolve overlay");
+
+        assert_eq!(runtime.policy().mode, OverlayMode::Open);
         assert_eq!(runtime.auth_policy(), AuthPolicy::ByokOnly);
         assert_eq!(
             runtime.capability(Capability::ImageGeneration),
             CapabilityAvailability::Disabled
         );
-        assert!(runtime.update_source().is_none());
     }
 
     #[test]

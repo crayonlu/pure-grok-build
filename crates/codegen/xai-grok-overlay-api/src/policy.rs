@@ -4,17 +4,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayMode {
+    /// No distribution overlay is active; preserve host/upstream behavior.
+    Upstream,
     Open,
     XaiCompat,
 }
 
 impl Default for OverlayMode {
     fn default() -> Self {
-        Self::Open
+        Self::Upstream
     }
 }
 
 impl OverlayMode {
+    pub const fn is_upstream(self) -> bool {
+        matches!(self, Self::Upstream)
+    }
+
     pub const fn is_open(self) -> bool {
         matches!(self, Self::Open)
     }
@@ -59,6 +65,7 @@ impl ServicePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthPolicy {
+    Inherited,
     ByokOnly,
     ProviderOrByok,
     FirstPartyOnly,
@@ -83,11 +90,27 @@ pub struct OverlayPolicy {
 
 impl Default for OverlayPolicy {
     fn default() -> Self {
-        Self::open()
+        Self::upstream()
     }
 }
 
 impl OverlayPolicy {
+    pub const fn upstream() -> Self {
+        Self {
+            mode: OverlayMode::Upstream,
+            auth: AuthPolicy::Inherited,
+            remote_settings: ServicePolicy::Enabled,
+            managed_config: ServicePolicy::Enabled,
+            telemetry: ServicePolicy::Enabled,
+            feedback: ServicePolicy::Enabled,
+            trace_upload: ServicePolicy::Enabled,
+            relay: ServicePolicy::Enabled,
+            billing: ServicePolicy::Enabled,
+            subscription: ServicePolicy::Enabled,
+            updates: ServicePolicy::Enabled,
+        }
+    }
+
     pub const fn open() -> Self {
         Self {
             mode: OverlayMode::Open,
@@ -158,6 +181,16 @@ mod tests {
         assert!(!policy.allows_implicit(ServiceKind::ManagedConfig));
         assert!(policy.allows_explicit(ServiceKind::RemoteSettings));
         assert!(policy.allows_explicit(ServiceKind::Updates));
+    }
+
+    #[test]
+    fn upstream_policy_preserves_host_defaults() {
+        let policy = OverlayPolicy::upstream();
+
+        assert!(policy.mode.is_upstream());
+        assert_eq!(policy.auth, AuthPolicy::Inherited);
+        assert!(policy.allows_implicit(ServiceKind::Telemetry));
+        assert!(policy.allows_implicit(ServiceKind::Updates));
     }
 
     #[test]
