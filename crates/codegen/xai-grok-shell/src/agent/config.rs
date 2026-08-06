@@ -1328,6 +1328,10 @@ pub struct ShellEnvironmentPolicyKnownKeys {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub features: Features,
+    /// Resolved distribution overlay. This startup snapshot is consumed by
+    /// hosts and adapters; the upstream config schema stays provider-neutral.
+    #[serde(skip)]
+    pub overlay_runtime: xai_grok_overlay::OverlayRuntime,
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
@@ -1782,6 +1786,7 @@ impl Default for Config {
         let endpoints = EndpointsConfig::default();
         let mut cfg = Self {
             features: Features::default(),
+            overlay_runtime: xai_grok_overlay::OverlayRuntime::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -2145,6 +2150,11 @@ impl Config {
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
+        config.overlay_runtime =
+            xai_grok_overlay::OverlayRuntime::from_toml(Some(raw_config), |key| {
+                std::env::var(key).ok()
+            })
+            .map_err(|error| format!("invalid overlay configuration: {error}"))?;
         Ok(config)
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
