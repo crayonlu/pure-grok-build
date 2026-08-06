@@ -156,7 +156,8 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     // Load agent config from disk
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
+    let host_config = xai_grok_overlay::without_overlay(&raw_config);
+    let mut agent_config = AgentConfig::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
     agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
         tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
@@ -164,7 +165,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     });
 
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
-        raw_config: &raw_config,
+        raw_config: &host_config,
         remote_settings: flags.remote_settings.as_ref(),
         is_headless: false,
         cli_subagents: Some(flags.subagents),
@@ -269,7 +270,8 @@ pub async fn connect_via_leader(
 
     apply_config_writes(&flags);
 
-    let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
+    let host_config = xai_grok_overlay::without_overlay(raw_config);
+    let mut agent_config = AgentConfig::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
     agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
         tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");

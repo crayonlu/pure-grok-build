@@ -5659,7 +5659,7 @@ reasoning_effort = "low"
     }
 
     #[test]
-    fn overlay_table_can_disable_media_capabilities() {
+    fn host_config_does_not_resolve_overlay_namespace() {
         let raw_config: toml::Value = toml::from_str(
             r#"
             [overlay]
@@ -5671,12 +5671,7 @@ reasoning_effort = "low"
 
         assert_eq!(
             cfg.overlay_runtime.policy().mode,
-            xai_grok_overlay_api::OverlayMode::Open
-        );
-        assert_eq!(
-            cfg.overlay_runtime
-                .capability(xai_grok_overlay_api::Capability::ImageGeneration),
-            xai_grok_overlay_api::CapabilityAvailability::Disabled
+            xai_grok_overlay_api::OverlayMode::Upstream
         );
     }
     #[test]

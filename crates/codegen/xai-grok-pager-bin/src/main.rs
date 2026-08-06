@@ -49,7 +49,8 @@ use xai_grok_shell::leader::{
 use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
 
 fn load_agent_config(raw_config: &toml::Value) -> Result<AgentConfig> {
-    let mut config = AgentConfig::new_from_toml_cfg(raw_config)
+    let host_config = xai_grok_overlay::without_overlay(raw_config);
+    let mut config = AgentConfig::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
     config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
         tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");

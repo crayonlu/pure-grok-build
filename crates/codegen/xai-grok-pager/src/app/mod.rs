@@ -576,11 +576,13 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let host_config = xai_grok_overlay::without_overlay(&raw_config);
     let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
         tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
         xai_grok_overlay_api::OverlayRuntime::default()
     });
-    let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
+    let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&host_config)
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "failed to parse config for startup prefetch, using defaults");
