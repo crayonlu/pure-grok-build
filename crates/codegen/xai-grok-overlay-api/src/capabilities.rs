@@ -23,6 +23,23 @@ pub enum CapabilityAvailability {
     Provider(CapabilityProviderRef),
 }
 
+impl CapabilityAvailability {
+    pub const fn is_inherited(&self) -> bool {
+        matches!(self, Self::Inherited)
+    }
+
+    pub const fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+
+    pub fn provider(&self) -> Option<&CapabilityProviderRef> {
+        match self {
+            Self::Provider(provider) => Some(provider),
+            Self::Inherited | Self::Disabled => None,
+        }
+    }
+}
+
 /// A serializable reference to a provider profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityProviderRef {
