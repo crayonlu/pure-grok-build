@@ -512,6 +512,19 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
+    /// Whether the model accepts image inputs. Unknown models remain
+    /// multimodal for backward compatibility with provider catalogs that do
+    /// not publish capability metadata.
+    pub fn model_supports_vision(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_vision)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn model_compactions_remaining(
         &self,
         model_id: &str,

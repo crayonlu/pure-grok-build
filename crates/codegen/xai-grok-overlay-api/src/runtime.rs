@@ -8,7 +8,7 @@ use crate::{
 /// The API crate owns this value and the policy decisions derived from it.
 /// Distribution-specific config discovery belongs to the loader crate, which
 /// keeps host applications independent from a particular overlay format.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OverlayRuntime {
     policy: OverlayPolicy,
     entitlement: EntitlementPolicy,
@@ -18,6 +18,9 @@ pub struct OverlayRuntime {
 
 impl Default for OverlayRuntime {
     fn default() -> Self {
+        // Preserve the neutral API crate's upstream-compatible default. Fork
+        // composition roots explicitly use `OverlayRuntime::open()` when the
+        // distribution overlay cannot be loaded.
         Self::upstream()
     }
 }
@@ -36,7 +39,7 @@ impl OverlayRuntime {
         Self::from_parts(
             OverlayPolicy::xai_compat(),
             EntitlementPolicy::first_party(),
-            CapabilitySet::disabled(),
+            CapabilitySet::inherited(),
             None,
         )
     }

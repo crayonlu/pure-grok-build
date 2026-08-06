@@ -1131,8 +1131,8 @@ async fn restore_session_from_remote(
     let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
     let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
-        xai_grok_overlay_api::OverlayRuntime::default()
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
     });
     let mut agent_config = agent_config;
     agent_config.overlay_runtime = overlay_runtime;

@@ -143,8 +143,13 @@ fn resolve_config(cfg: &AgentConfig, auth_manager: &AuthManager) -> AgentConfig 
             StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_xai_auth);
     }
     // A CLI/env-set Writeback still requires grok.com auth.
-    if cfg.storage_mode == StorageMode::Writeback && !has_xai_auth {
-        tracing::info!("Writeback is disabled: requires auth with grok.com");
+    if cfg.storage_mode == StorageMode::Writeback
+        && (!has_xai_auth || cfg.overlay_runtime.policy().mode.is_open())
+    {
+        tracing::info!(
+            open_mode = cfg.overlay_runtime.policy().mode.is_open(),
+            "Writeback is disabled: requires an allowed grok.com cloud policy"
+        );
         cfg.storage_mode = StorageMode::Local;
     }
 

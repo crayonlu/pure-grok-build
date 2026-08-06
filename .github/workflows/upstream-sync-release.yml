@@ -98,6 +98,19 @@ jobs:
             tag_sha="$(git rev-list -n 1 "${tag}")"
           fi
 
+          # Date tags are intentionally stable for a completed release. A
+          # forced rebuild or a fork-main replacement can legitimately produce
+          # a different commit on the same UTC day, so never move the published
+          # tag. Use semver build metadata for a second immutable release tag;
+          # binary asset names remain date-only below.
+          if [[ -n "${tag_sha}" && "${tag_sha}" != "${fork_sha}" ]]; then
+            tag="${tag}+${fork_sha:0:12}"
+            tag_sha=""
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              tag_sha="$(git rev-list -n 1 "${tag}")"
+            fi
+          fi
+
           # A release is complete only when today's tag points at the current
           # main commit and contains the release pointer plus every raw binary.
           # This lets a rerun repair a partially uploaded release instead of
@@ -244,40 +257,42 @@ jobs:
           EOF
           )"
 
-          existing="$(gh pr list \
-            --repo "${target_repo}" \
-            --head "${sync_branch}" \
-            --base main \
-            --state open \
-            --json number \
+          # Use the Pull Requests REST API directly. `gh pr create` performs
+          # an issue-capability preflight and fails when the repository has
+          # Issues disabled, even though Pull Requests remain available.
+          owner="${target_repo%%/*}"
+          existing="$(gh api --method GET "repos/${target_repo}/pulls" \
+            -f state=open \
+            -f head="${owner}:${sync_branch}" \
+            -f base=main \
             --jq '.[0].number // empty')"
 
           pr_url=""
           pr_state=""
           if [[ -n "${existing}" ]]; then
-            if pr_error="$(gh pr edit "${existing}" \
-              --repo "${target_repo}" \
-              --title "${title}" \
-              --body "${body}" 2>&1)"; then
-              pr_url="$(gh pr view "${existing}" --repo "${target_repo}" --json url --jq '.url')"
+            if pr_error="$(gh api --method PATCH \
+              "repos/${target_repo}/pulls/${existing}" \
+              -f title="${title}" \
+              -f body="${body}" 2>&1 >/dev/null)"; then
+              pr_url="$(gh api "repos/${target_repo}/pulls/${existing}" --jq '.html_url')"
               pr_state="updated"
             else
               pr_state="blocked"
               echo "::warning::Could not update conflict PR #${existing}: ${pr_error}"
             fi
           else
-            if pr_result="$(gh pr create \
-              --repo "${target_repo}" \
-              --head "${sync_branch}" \
-              --base main \
-              --title "${title}" \
-              --body "${body}" 2>&1)"; then
+            if pr_result="$(gh api --method POST "repos/${target_repo}/pulls" \
+              -f head="${sync_branch}" \
+              -f base=main \
+              -f title="${title}" \
+              -f body="${body}" \
+              --jq '.html_url' 2>&1)"; then
               pr_url="${pr_result}"
               pr_state="created"
             else
               pr_state="blocked"
               echo "::warning::Could not create conflict PR: ${pr_result}"
-              echo "::warning::Enable the repository setting allowing Actions to create pull requests, or configure SYNC_GITHUB_TOKEN with pull-request write permission."
+              echo "::warning::Configure SYNC_GITHUB_TOKEN (or GITHUB_TOKEN) with pull-request write permission. Issues do not need to be enabled."
             fi
           fi
 

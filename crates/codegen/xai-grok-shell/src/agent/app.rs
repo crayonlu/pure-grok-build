@@ -779,6 +779,12 @@ fn relay_config_for_session(
     agent_config: &AgentConfig,
     shared_auth_manager: &Arc<AuthManager>,
 ) -> Option<crate::agent::relay::RelayConfig> {
+    if !agent_config
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay)
+    {
+        return None;
+    }
     let session = auth?;
     // Seed the shared manager with the startup-resolved session unless it
     // already holds an equal-or-fresher token. See `should_seed_shared_session`
@@ -1503,16 +1509,23 @@ pub async fn run_leader(
                      (BYOK / local-only leader); will arm if an eligible \
                      token is hot-reloaded"
                 );
-                deferred_relay_arm = Some(DeferredRelayArm {
-                    relay_on_demand,
-                    relay_demand_rx,
-                    ws_to_agent_tx: ws_to_agent_tx.clone(),
-                    agent_to_ws_tx: agent_to_ws_tx.clone(),
-                    cancel: cancel_clone.clone(),
-                    slot: relay_handle_slot.clone(),
-                    grok_com_config: agent_config.grok_com_config.clone(),
-                    alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
-                });
+                if agent_config
+                    .overlay_runtime
+                    .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay)
+                {
+                    deferred_relay_arm = Some(DeferredRelayArm {
+                        relay_on_demand,
+                        relay_demand_rx,
+                        ws_to_agent_tx: ws_to_agent_tx.clone(),
+                        agent_to_ws_tx: agent_to_ws_tx.clone(),
+                        cancel: cancel_clone.clone(),
+                        slot: relay_handle_slot.clone(),
+                        grok_com_config: agent_config.grok_com_config.clone(),
+                        alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
+                    });
+                } else {
+                    info!("Relay disabled by overlay policy");
+                }
             }
 
             // Spawn auto-update checker if configured.

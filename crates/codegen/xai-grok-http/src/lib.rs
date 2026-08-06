@@ -101,6 +101,14 @@ static CLIENT_TYPE: OnceLock<ClientType> = OnceLock::new();
 // functions below.
 pub use xai_grok_sampler::OriginClientInfo;
 
+/// Compatibility re-export for the provider-neutral capability HTTP runtime.
+/// The implementation lives in the dependency-leaf `xai-grok-provider` crate;
+/// keeping this path avoids breaking downstream integrations that used the
+/// earlier `xai_grok_http::provider::*` seam.
+pub mod provider {
+    pub use xai_grok_provider::*;
+}
+
 /// Construct an [`OriginClientInfo`] from `GROK_CLIENT_NAME` /
 /// `GROK_CLIENT_VERSION` env vars. Returns `None` when
 /// `GROK_CLIENT_NAME` is unset.

@@ -199,6 +199,7 @@ mod tests {
         assert!(!policy.allows_implicit(ServiceKind::Telemetry));
         assert!(!policy.allows_explicit(ServiceKind::Telemetry));
         assert!(!policy.allows_implicit(ServiceKind::ManagedConfig));
+        assert!(!policy.allows_implicit(ServiceKind::Relay));
         assert!(policy.allows_explicit(ServiceKind::RemoteSettings));
         assert!(policy.allows_explicit(ServiceKind::Updates));
     }

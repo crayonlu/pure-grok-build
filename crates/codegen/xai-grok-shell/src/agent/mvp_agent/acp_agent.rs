@@ -2250,6 +2250,11 @@ impl acp::Agent for MvpAgent {
             }
             "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
             "x.ai/cloud/terminate" => {
+                crate::extensions::require_overlay_service(
+                    self,
+                    xai_grok_overlay_api::ServiceKind::Relay,
+                    method.as_ref(),
+                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2282,6 +2287,11 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
             "x.ai/cloud/env/list" => {
+                crate::extensions::require_overlay_service(
+                    self,
+                    xai_grok_overlay_api::ServiceKind::Relay,
+                    method.as_ref(),
+                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2307,6 +2317,11 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/create" => {
+                crate::extensions::require_overlay_service(
+                    self,
+                    xai_grok_overlay_api::ServiceKind::Relay,
+                    method.as_ref(),
+                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2364,6 +2379,11 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/update" => {
+                crate::extensions::require_overlay_service(
+                    self,
+                    xai_grok_overlay_api::ServiceKind::Relay,
+                    method.as_ref(),
+                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2424,6 +2444,11 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/delete" => {
+                crate::extensions::require_overlay_service(
+                    self,
+                    xai_grok_overlay_api::ServiceKind::Relay,
+                    method.as_ref(),
+                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",

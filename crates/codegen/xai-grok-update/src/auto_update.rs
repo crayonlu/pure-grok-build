@@ -27,19 +27,53 @@ const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
 /// Manual-install one-liner for this platform's bootstrap installer.
-fn manual_install_cmd() -> &'static str {
+fn manual_install_cmd() -> String {
+    let runtime = xai_grok_overlay::load_runtime().ok();
+    let open_mode = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.policy().mode.is_open());
+    if open_mode {
+        if let Some(source) = runtime.as_ref().and_then(|runtime| runtime.update_source()) {
+            return match source.kind.as_str() {
+                "github_release" => format!(
+                    "gh release download --repo {} --pattern 'grok-*'",
+                    source.location
+                ),
+                "base_url" => format!(
+                    "Download a matching binary from the configured update source: {}",
+                    source.location
+                ),
+                _ => "Configure a supported [overlay.update_source] before updating.".to_owned(),
+            };
+        }
+        return "No update source is configured for Open mode. Set [overlay.update_source] or GROK_CLI_BASE_URL/GROK_UPDATE_REPO.".to_owned();
+    }
     if cfg!(windows) {
-        "irm https://x.ai/cli/install.ps1 | iex"
+        "irm https://x.ai/cli/install.ps1 | iex".to_owned()
     } else {
-        "curl -fsSL https://x.ai/cli/install.sh | bash"
+        "curl -fsSL https://x.ai/cli/install.sh | bash".to_owned()
     }
 }
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
     match installer {
-        "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        "npm"
+            if !xai_grok_overlay::load_runtime()
+                .ok()
+                .is_some_and(|runtime| runtime.policy().mode.is_open()) =>
+        {
+            "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string()
+        }
+        "gh-release" => {
+            if let Some(repo) = crate::version::effective_release_repo() {
+                format!(
+                    "Please reinstall via GitHub Releases:\n  gh release download --repo {repo} --pattern 'grok-*' --output grok && chmod +x grok"
+                )
+            } else {
+                format!("Please reinstall via:\n  {}", manual_install_cmd())
+            }
+        }
         _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
@@ -765,6 +799,11 @@ pub async fn run_install_script(
     target: Option<&str>,
     update_config: &UpdateConfig,
 ) -> Result<()> {
+    if !crate::version::update_source_configured_for(installer) {
+        anyhow::bail!(
+            "no update source is configured for `{installer}` in Open mode; configure [overlay.update_source] or the matching GROK_* override"
+        );
+    }
     let result = match installer {
         "npm" => install_npm(
             target,
@@ -1165,7 +1204,8 @@ async fn download_cli_artifact_from_gcs(
 }
 
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<()> {
-    install_internal_from_bases(target, update_config, crate::version::CLI_BASE_URLS).await
+    let bases = crate::version::effective_cli_base_urls();
+    install_internal_from_bases(target, update_config, &bases).await
 }
 
 /// Try the base-dependent install phase ([`download_verified_from_base`]:
@@ -1181,20 +1221,20 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
 /// its failures are not base-dependent, so they abort the install instead of
 /// triggering a pointless re-download from the next base.
 #[doc(hidden)]
-pub async fn install_internal_from_bases(
+pub async fn install_internal_from_bases<S: AsRef<str>>(
     target: Option<&str>,
     update_config: &UpdateConfig,
-    bases: &[&str],
+    bases: &[S],
 ) -> Result<()> {
     let mut last_err: Option<anyhow::Error> = None;
     for (i, base) in bases.iter().enumerate() {
-        match download_verified_from_base(target, update_config, base).await {
+        match download_verified_from_base(target, update_config, base.as_ref()).await {
             Ok(download) => return activate_verified_download(&download).await,
             Err(e) => {
                 if i + 1 < bases.len() {
                     tracing::warn!(
                         "install via {} failed ({:#}); trying next base URL",
-                        base,
+                        base.as_ref(),
                         e
                     );
                 }
@@ -1292,7 +1332,11 @@ async fn download_verified_from_base(
     let download_dir = grok_home.join("downloads");
     tokio::fs::create_dir_all(&download_dir).await?;
 
-    let binary_name = format!("grok-{}-{}", version, platform);
+    // A same-day rebuild may use a semver build-metadata suffix in its release
+    // tag (`v2026.8.6+<sha>`) while the binary asset keeps the date-only name.
+    // Keep the tag and asset names independent so force builds remain usable.
+    let asset_version = version.split('+').next().unwrap_or(&version);
+    let binary_name = format!("grok-{}-{}", asset_version, platform);
     let binary_path = download_dir.join(&binary_name);
 
     eprintln!("  Downloading grok v{} ({})...", version, platform);
@@ -2057,6 +2101,22 @@ async fn agent_exe_differs(
 
 /// Download a single asset from a GitHub release via `gh release download`.
 async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -> Result<()> {
+    gh_release_download_from_repo(
+        tag,
+        pattern,
+        dest,
+        &crate::version::effective_release_repo()
+            .unwrap_or_else(|| crate::version::GH_RELEASE_REPO.to_owned()),
+    )
+    .await
+}
+
+async fn gh_release_download_from_repo(
+    tag: &str,
+    pattern: &str,
+    dest: &std::path::Path,
+    repo: &str,
+) -> Result<()> {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -2071,7 +2131,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         "download",
         tag,
         "--repo",
-        crate::version::GH_RELEASE_REPO,
+        repo,
         "--pattern",
         pattern,
         "--output",
@@ -2093,7 +2153,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
             "gh release download failed for {} tag {} from {}: {}",
             pattern,
             tag,
-            crate::version::GH_RELEASE_REPO,
+            repo,
             stderr.trim()
         );
     }
@@ -3561,41 +3621,75 @@ mod tests {
     #[test]
     fn test_reinstall_hint_npm_mentions_npm_command() {
         let hint = reinstall_hint("npm");
-        assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
-        assert!(
-            hint.contains("@xai-official/grok"),
-            "should name the package: {hint}"
-        );
+        if xai_grok_overlay::load_runtime()
+            .ok()
+            .is_some_and(|runtime| runtime.policy().mode.is_open())
+        {
+            assert!(
+                hint.contains("No update source")
+                    || hint.contains("configured update source")
+                    || hint.contains("gh release download")
+                    || hint.contains("https://"),
+                "Open mode must not suggest the first-party npm package: {hint}"
+            );
+            assert!(
+                !hint.contains("@xai-official/grok"),
+                "Open mode must not suggest the first-party npm package: {hint}"
+            );
+        } else {
+            assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
+            assert!(
+                hint.contains("@xai-official/grok"),
+                "should name the package: {hint}"
+            );
+        }
     }
 
     #[test]
     fn test_reinstall_hint_gh_release_mentions_gh_command() {
         let hint = reinstall_hint("gh-release");
         assert!(
-            hint.contains("gh release download"),
-            "should suggest gh release download: {hint}"
+            hint.contains("gh release download")
+                || hint.contains("No update source")
+                || hint.contains("configured update source"),
+            "should suggest an explicit release source: {hint}"
         );
-        assert!(
-            hint.contains("xai-org-shared/grok-build"),
-            "should name the repo: {hint}"
-        );
+        if xai_grok_overlay::load_runtime()
+            .ok()
+            .is_some_and(|runtime| runtime.policy().mode.is_open())
+        {
+            assert!(
+                !hint.contains("xai-org-shared/grok-build"),
+                "Open mode must not name the first-party repo: {hint}"
+            );
+        }
     }
 
     #[test]
     fn test_reinstall_hint_internal_mentions_platform_installer() {
         let hint = reinstall_hint("internal");
-        if cfg!(windows) {
-            assert!(hint.contains("irm"), "should suggest irm install: {hint}");
+        let open_mode = xai_grok_overlay::load_runtime()
+            .ok()
+            .is_some_and(|runtime| runtime.policy().mode.is_open());
+        if open_mode {
             assert!(
-                hint.contains("install.ps1"),
-                "should reference install.ps1: {hint}"
+                !hint.contains("x.ai"),
+                "Open mode must not use xAI installer: {hint}"
             );
         } else {
-            assert!(hint.contains("curl"), "should suggest curl install: {hint}");
-            assert!(
-                hint.contains("install.sh"),
-                "should reference install.sh: {hint}"
-            );
+            if cfg!(windows) {
+                assert!(hint.contains("irm"), "should suggest irm install: {hint}");
+                assert!(
+                    hint.contains("install.ps1"),
+                    "should reference install.ps1: {hint}"
+                );
+            } else {
+                assert!(hint.contains("curl"), "should suggest curl install: {hint}");
+                assert!(
+                    hint.contains("install.sh"),
+                    "should reference install.sh: {hint}"
+                );
+            }
         }
     }
 

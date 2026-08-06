@@ -3,7 +3,8 @@
 # Grok CLI installer — https://x.ai/cli/install.sh
 #
 # Auth: GROK_DEPLOYMENT_KEY (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL
+# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL,
+#      GROK_CLI_BASE_URL (self-hosted release host; skips upstream fallback)
 #
 # Usage:
 #   curl -fsSL https://x.ai/cli/install.sh | bash            # latest stable
@@ -160,18 +161,24 @@ mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 platform="${os}-${arch}"
 CHANNEL="${GROK_CHANNEL:-stable}"
 
-# Pick a working BASE_URL: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no explicit TARGET was passed, so the happy path costs zero
-# extra HTTP requests.
-if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
-probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
-if [ -n "$probe_result" ]; then
-    BASE_URL="$BASE_URL_PRIMARY"
-else
-    echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
-    BASE_URL="$BASE_URL_FALLBACK"
+# Pick a working BASE_URL. An explicit self-hosted base is authoritative;
+# otherwise try the x.ai CDN and fall back to direct GCS. The probe doubles as
+# the channel-pointer fetch when no explicit TARGET was passed.
+configured_base_url="$(printf '%s' "${GROK_CLI_BASE_URL:-}" | awk '{$1=$1; print}')"
+if [ -n "$configured_base_url" ]; then
+    BASE_URL="${configured_base_url%/}"
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version from ${BASE_URL}..." >&2; fi
     probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+else
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
+    probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
+    if [ -n "$probe_result" ]; then
+        BASE_URL="$BASE_URL_PRIMARY"
+    else
+        echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
+        BASE_URL="$BASE_URL_FALLBACK"
+        probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+    fi
 fi
 
 if [ -n "$TARGET" ]; then

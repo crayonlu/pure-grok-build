@@ -9,6 +9,7 @@ description = "Stable extension seams for provider-neutral Grok overlays."
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 url = { workspace = true }
+xai-grok-provider = { workspace = true }
 
 [lints]
 workspace = true

@@ -774,8 +774,8 @@ pub async fn run_single_turn(
     let mut agent_config = AgentConfig::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
     agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
-        xai_grok_overlay_api::OverlayRuntime::default()
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
     });
 
     // Canonical-only early stamp; remaps need the post-session catalog resolve below.

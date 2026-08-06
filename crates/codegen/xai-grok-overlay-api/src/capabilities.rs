@@ -14,7 +14,7 @@ pub enum Capability {
     Voice,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityAvailability {
     /// Let the host's native capability resolver decide.
@@ -41,11 +41,15 @@ impl CapabilityAvailability {
 }
 
 /// A serializable reference to a provider profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityProviderRef {
     pub name: String,
     pub protocol: String,
     pub base_url: Option<String>,
+    /// Full provider-neutral request/auth profile. The legacy scalar fields
+    /// remain populated for callers that only need discovery metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<xai_grok_provider::CapabilityProviderConfig>,
 }
 
 impl CapabilityProviderRef {
@@ -58,15 +62,32 @@ impl CapabilityProviderRef {
             name: name.into(),
             protocol: protocol.into(),
             base_url: base_url.map(Into::into),
+            profile: None,
+        }
+    }
+
+    pub fn from_profile(
+        name: impl Into<String>,
+        profile: xai_grok_provider::CapabilityProviderConfig,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            protocol: profile.protocol.clone(),
+            base_url: profile.base_url.clone(),
+            profile: Some(profile),
         }
     }
 
     pub fn parsed_base_url(&self) -> Result<Option<url::Url>, url::ParseError> {
         self.base_url.as_deref().map(url::Url::parse).transpose()
     }
+
+    pub fn provider_profile(&self) -> Option<&xai_grok_provider::CapabilityProviderConfig> {
+        self.profile.as_ref()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CapabilitySet {
     pub selected: BTreeMap<Capability, CapabilityAvailability>,

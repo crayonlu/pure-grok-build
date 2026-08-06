@@ -53,16 +53,16 @@ fn load_agent_config(raw_config: &toml::Value) -> Result<AgentConfig> {
     let mut config = AgentConfig::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
     config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
-        xai_grok_overlay_api::OverlayRuntime::default()
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
     });
     Ok(config)
 }
 
 fn load_overlay_runtime() -> xai_grok_overlay_api::OverlayRuntime {
     xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
-        xai_grok_overlay_api::OverlayRuntime::default()
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
     })
 }
 /// Apply headless args to an existing config, only overriding values that are

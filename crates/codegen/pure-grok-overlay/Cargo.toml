@@ -8,7 +8,9 @@ description = "Provider-neutral runtime overlay for Grok distributions."
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
+url = { workspace = true }
 xai-grok-overlay-api = { workspace = true }
+xai-grok-provider = { workspace = true }
 xai-grok-config = { workspace = true }
 
 [lints]

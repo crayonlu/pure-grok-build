@@ -176,6 +176,20 @@ pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
+/// Whether the distribution overlay exposes the built-in voice transport.
+///
+/// The current voice implementation is the xAI streaming STT protocol and
+/// forwards the session/API-key bearer through `xai_grok_voice`.  Open mode
+/// must therefore keep it unavailable until a provider-neutral voice driver
+/// exists; otherwise a provider-neutral build could still contact `api.x.ai`.
+/// Upstream and explicit `xai_compat` retain the native behavior.
+static VOICE_OVERLAY_ALLOWED: AtomicBool = AtomicBool::new(true);
+pub(crate) fn voice_overlay_allowed() -> bool {
+    VOICE_OVERLAY_ALLOWED.load(Ordering::Acquire)
+}
+pub(crate) fn set_voice_overlay_allowed(allowed: bool) {
+    VOICE_OVERLAY_ALLOWED.store(allowed, Ordering::Release);
+}
 /// Test helper for the process-global voice gate.
 pub fn set_voice_mode_enabled_for_test(on: bool) {
     VOICE_MODE_ENABLED.store(on, Ordering::Release);
@@ -238,6 +252,17 @@ pub(crate) fn resolve_voice_mode_enabled(
 }
 /// Resolve from live policy + env + remote + API-key state.
 pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
+    resolve_voice_mode_with_overlay(remote, is_api_key, voice_overlay_allowed())
+}
+
+fn resolve_voice_mode_with_overlay(
+    remote: Option<bool>,
+    is_api_key: bool,
+    overlay_allowed: bool,
+) -> bool {
+    if !overlay_allowed {
+        return false;
+    }
     resolve_voice_mode_enabled(
         voice_mode_requirement_pin(),
         voice_mode_config_value(),
@@ -247,7 +272,7 @@ pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) ->
 }
 #[cfg(test)]
 mod voice_gate_tests {
-    use super::resolve_voice_mode_enabled;
+    use super::{resolve_voice_mode_enabled, resolve_voice_mode_with_overlay};
     #[test]
     fn api_key_force_on_over_remote_kill_only() {
         assert!(resolve_voice_mode_enabled(None, None, Some(false), true));
@@ -267,6 +292,11 @@ mod voice_gate_tests {
             Some(false),
             true
         ));
+    }
+
+    #[test]
+    fn open_overlay_disables_xai_voice_transport() {
+        assert!(!resolve_voice_mode_with_overlay(None, true, false));
     }
 }
 /// Sticky banner shown while mouse reporting is off, telling the user how to
@@ -578,9 +608,19 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let host_config = xai_grok_overlay::without_overlay(&raw_config);
     let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using upstream defaults");
-        xai_grok_overlay_api::OverlayRuntime::default()
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
     });
+    // The pager's current voice client speaks the xAI streaming STT protocol
+    // and forwards the active bearer.  Keep that first-party route out of
+    // Open mode until a provider-neutral voice driver is implemented.
+    let voice_overlay_allowed = !overlay_runtime.policy().mode.is_open();
+    set_voice_overlay_allowed(voice_overlay_allowed);
+    if !voice_overlay_allowed {
+        tracing::info!(
+            "voice disabled in Open mode: no provider-neutral voice transport configured"
+        );
+    }
     let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&host_config)
     {
         Ok(c) => c,

@@ -5,7 +5,7 @@
 # the install logic so changes to the stable installer cannot break enterprise.
 #
 # Auth: GROK_DEPLOYMENT_KEY env var (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_BIN_DIR, GROK_PROXY_URL
+# Env: GROK_BIN_DIR, GROK_PROXY_URL, GROK_CLI_BASE_URL (self-hosted release host)
 #
 # Usage:
 #   irm https://x.ai/cli/enterprise-install.ps1 | iex                                       # latest enterprise
@@ -160,17 +160,23 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
 $Channel = 'enterprise'
 
-# Pick a working BaseUrl: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no -Version was passed, so the happy path costs zero extra requests.
-if (-not $Version) { Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray }
-$probeResult = Download-String "$BaseUrlPrimary/$Channel"
-if ($probeResult) {
-    $BaseUrl = $BaseUrlPrimary
-} else {
-    Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
-    $BaseUrl = $BaseUrlFallback
+# Pick a working BaseUrl. An explicit self-hosted base is authoritative;
+# otherwise try the x.ai CDN and fall back to direct GCS.
+$ConfiguredBaseUrl = if ($env:GROK_CLI_BASE_URL) { $env:GROK_CLI_BASE_URL.Trim() } else { '' }
+if ($ConfiguredBaseUrl) {
+    $BaseUrl = $ConfiguredBaseUrl.TrimEnd('/')
+    if (-not $Version) { Write-Host "Fetching latest $Channel version from $BaseUrl..." -ForegroundColor DarkGray }
     $probeResult = Download-String "$BaseUrl/$Channel"
+} else {
+    if (-not $Version) { Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray }
+    $probeResult = Download-String "$BaseUrlPrimary/$Channel"
+    if ($probeResult) {
+        $BaseUrl = $BaseUrlPrimary
+    } else {
+        Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
+        $BaseUrl = $BaseUrlFallback
+        $probeResult = Download-String "$BaseUrl/$Channel"
+    }
 }
 
 if ($Version) {

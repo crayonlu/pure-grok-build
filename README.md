@@ -38,6 +38,36 @@ for the version of the code present in this tree.
 
 ---
 
+## pure-grok-build overlay
+
+This fork keeps the upstream Grok Build runtime but adds a merge-friendly,
+provider-neutral overlay. In `open` mode the chat model and auxiliary services
+use explicit BYOK endpoints; xAI session credentials are never silently sent to
+third-party hosts. `upstream` and `xai_compat` modes remain available for
+deployments that intentionally need the first-party service behavior.
+
+Configure the overlay in `~/.grok/config.toml`:
+
+```toml
+[overlay]
+mode = "open"                         # open | upstream | xai_compat
+
+[overlay.update_source]
+kind = "github_release"               # or "base_url"
+location = "owner/repository"
+channel = "stable"
+```
+
+Model, image/video/search, and independent memory-embedding configuration is
+documented in the shipped [custom-model guide](crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md)
+and [memory guide](crates/codegen/xai-grok-pager/docs/user-guide/13-memory.md).
+For self-hosted release mirrors, see [Self-Hosted Update Source](crates/codegen/xai-grok-pager/docs/user-guide/25-self-hosted-updates.md).
+
+The nightly sync/release workflow is source-revision aware and opens a pull
+request when an upstream change cannot be applied automatically. This keeps
+the overlay isolated at composition roots so future upstream syncs remain
+small and reviewable.
+
 ## Installing the released binary
 
 Prebuilt binaries are published for macOS, Linux, and Windows:
@@ -69,8 +99,8 @@ Requirements:
 
 - **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
   or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+- macOS and Linux are supported build hosts. Windows release builds are
+  produced by GitHub Actions; local Windows builds remain best-effort.
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI

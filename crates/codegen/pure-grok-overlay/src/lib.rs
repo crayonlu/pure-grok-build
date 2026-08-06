@@ -47,6 +47,15 @@ pub fn resolve_runtime(
     getenv: impl Fn(&str) -> Option<String>,
 ) -> Result<OverlayRuntime, OverlayConfigError> {
     let overlay_document = document.and_then(|document| document.get("overlay"));
+    // `[fork]` and `GROK_FORK_MODE` were the public compatibility surface of
+    // the previous fork.  Keep accepting them while the host parser only sees
+    // the upstream-neutral document.  Overlay settings win over legacy
+    // settings, and the fork remains fail-closed (Open) when neither exists.
+    let legacy_mode = document
+        .and_then(|document| document.get("fork"))
+        .and_then(|fork| fork.get("mode"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
     let file = overlay_document
         .cloned()
         .map(toml::Value::try_into::<FileOverlayConfig>)
@@ -54,15 +63,19 @@ pub fn resolve_runtime(
         .map_err(|error| OverlayConfigError::InvalidMode(error.to_string()))?
         .unwrap_or_default();
 
-    let explicit_mode = getenv("GROK_OVERLAY_MODE").or(file.mode.clone());
+    let explicit_mode = getenv("GROK_OVERLAY_MODE")
+        .or(file.mode.clone())
+        .or_else(|| {
+            overlay_document
+                .is_none()
+                .then(|| getenv("GROK_FORK_MODE"))
+                .flatten()
+        })
+        .or_else(|| overlay_document.is_none().then_some(legacy_mode).flatten());
     let mode = explicit_mode
         .map(|value| parse_mode(&value))
         .transpose()?
-        .unwrap_or(if overlay_document.is_some() {
-            OverlayMode::Open
-        } else {
-            OverlayMode::Upstream
-        });
+        .unwrap_or(OverlayMode::Open);
 
     let (policy, entitlement, default_capabilities) = match mode {
         OverlayMode::Upstream => (
@@ -78,20 +91,27 @@ pub fn resolve_runtime(
         OverlayMode::XaiCompat => (
             OverlayPolicy::xai_compat(),
             EntitlementPolicy::first_party(),
-            CapabilitySet::disabled(),
+            // Compatibility mode preserves the host's native xAI capability
+            // drivers unless a provider-neutral profile explicitly overrides
+            // one of them. Open mode remains fail-closed below.
+            CapabilitySet::inherited(),
         ),
     };
 
-    let capabilities = if mode.is_upstream() && file.capabilities.is_empty() {
-        default_capabilities
-    } else {
-        capability_set(file.capabilities)?
-    };
+    let capabilities =
+        if (mode.is_upstream() || mode.is_xai_compat()) && file.capabilities.is_empty() {
+            default_capabilities
+        } else {
+            capability_set(file.capabilities)?
+        };
     let update_source = resolve_update_source(
         file.update_source,
         getenv("GROK_UPDATE_REPO"),
         getenv("GROK_CLI_BASE_URL"),
     )?;
+    if let Some(source) = update_source.as_ref() {
+        validate_update_source(source, mode)?;
+    }
 
     Ok(OverlayRuntime::from_parts(
         policy,
@@ -110,6 +130,9 @@ pub fn without_overlay(document: &toml::Value) -> toml::Value {
     let mut document = document.clone();
     if let toml::Value::Table(table) = &mut document {
         table.remove("overlay");
+        // The legacy fork table is consumed by this loader as well.  Removing
+        // it keeps the upstream parser independent of fork-only schema.
+        table.remove("fork");
     }
     document
 }
@@ -144,13 +167,14 @@ impl Default for FileUpdateSource {
 #[serde(default)]
 struct FileCapabilityProvider {
     name: String,
-    protocol: String,
-    base_url: Option<String>,
+    #[serde(flatten)]
+    profile: xai_grok_provider::CapabilityProviderConfig,
 }
 
 fn parse_mode(raw: &str) -> Result<OverlayMode, OverlayConfigError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "open" | "byok" | "provider_neutral" => Ok(OverlayMode::Open),
+        "upstream" | "native" => Ok(OverlayMode::Upstream),
         "xai_compat" | "xai-compat" | "compat" => Ok(OverlayMode::XaiCompat),
         _ => Err(OverlayConfigError::InvalidMode(raw.to_owned())),
     }
@@ -163,12 +187,16 @@ fn capability_set(
         .into_iter()
         .try_fold(CapabilitySet::disabled(), |set, (name, provider)| {
             let capability = parse_capability(&name)?;
-            if provider.name.trim().is_empty() || provider.protocol.trim().is_empty() {
+            if provider.name.trim().is_empty() || provider.profile.protocol.trim().is_empty() {
                 return Err(OverlayConfigError::InvalidCapability(name));
             }
+            provider
+                .profile
+                .validate()
+                .map_err(|_| OverlayConfigError::InvalidCapability(name.clone()))?;
             Ok(set.with_provider(
                 capability,
-                CapabilityProviderRef::new(provider.name, provider.protocol, provider.base_url),
+                CapabilityProviderRef::from_profile(provider.name, provider.profile),
             ))
         })
 }
@@ -194,13 +222,13 @@ fn resolve_update_source(
 ) -> Result<Option<UpdateSourceRef>, OverlayConfigError> {
     if let Some(repo) = repo.filter(|value| !value.trim().is_empty()) {
         return Ok(Some(UpdateSourceRef::github_release(
-            repo,
+            repo.trim(),
             UpdateChannel::Stable,
         )));
     }
     if let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) {
         return Ok(Some(UpdateSourceRef::base_url(
-            base_url,
+            base_url.trim().trim_end_matches('/'),
             UpdateChannel::Stable,
         )));
     }
@@ -217,9 +245,72 @@ fn resolve_update_source(
     }
     Ok(Some(UpdateSourceRef {
         kind: file.kind,
-        location: file.location,
+        location: file.location.trim().trim_end_matches('/').to_owned(),
         channel: file.channel,
     }))
+}
+
+fn validate_update_source(
+    source: &UpdateSourceRef,
+    mode: OverlayMode,
+) -> Result<(), OverlayConfigError> {
+    match source.kind.as_str() {
+        "github_release" => {
+            let mut parts = source.location.split('/');
+            let owner = parts.next().unwrap_or_default();
+            let repository = parts.next().unwrap_or_default();
+            if owner.is_empty()
+                || repository.is_empty()
+                || parts.next().is_some()
+                || source.location.chars().any(char::is_whitespace)
+            {
+                return Err(OverlayConfigError::InvalidUpdateSource(
+                    "github_release location must be an owner/repository pair".to_owned(),
+                ));
+            }
+            if mode.is_open()
+                && (owner.eq_ignore_ascii_case("xai-org")
+                    || owner.eq_ignore_ascii_case("xai-org-shared"))
+            {
+                return Err(OverlayConfigError::InvalidUpdateSource(
+                    "Open mode cannot use an xAI GitHub release source".to_owned(),
+                ));
+            }
+        }
+        "base_url" => {
+            let url = url::Url::parse(&source.location).map_err(|error| {
+                OverlayConfigError::InvalidUpdateSource(format!("invalid base URL: {error}"))
+            })?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(OverlayConfigError::InvalidUpdateSource(
+                    "base_url must use http or https and include a host".to_owned(),
+                ));
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                return Err(OverlayConfigError::InvalidUpdateSource(
+                    "base_url must not contain embedded credentials".to_owned(),
+                ));
+            }
+            if mode.is_open() && is_xai_first_party_host(url.host_str().unwrap_or_default()) {
+                return Err(OverlayConfigError::InvalidUpdateSource(
+                    "Open mode cannot use an xAI update endpoint".to_owned(),
+                ));
+            }
+        }
+        kind => {
+            return Err(OverlayConfigError::InvalidUpdateSource(kind.to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn is_xai_first_party_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "grok.com"
+        || host.ends_with(".grok.com")
+        || host == "api.x.ai"
 }
 
 #[cfg(test)]
@@ -237,14 +328,14 @@ mod tests {
     }
 
     #[test]
-    fn no_overlay_preserves_upstream_defaults() {
+    fn no_overlay_preserves_open_fork_defaults() {
         let runtime = resolve_runtime(None, env(&[])).expect("resolve defaults");
 
-        assert_eq!(runtime.policy().mode, OverlayMode::Upstream);
-        assert_eq!(runtime.auth_policy(), AuthPolicy::Inherited);
+        assert_eq!(runtime.policy().mode, OverlayMode::Open);
+        assert_eq!(runtime.auth_policy(), AuthPolicy::ByokOnly);
         assert_eq!(
             runtime.capability(Capability::ImageGeneration),
-            CapabilityAvailability::Inherited
+            CapabilityAvailability::Disabled
         );
         assert!(runtime.update_source().is_none());
     }
@@ -277,6 +368,25 @@ mod tests {
 
         assert_eq!(runtime.auth_policy(), AuthPolicy::ByokOnly);
         assert!(!runtime.entitlement().show_billing);
+    }
+
+    #[test]
+    fn xai_compat_preserves_native_capabilities_without_profiles() {
+        let document: toml::Value = toml::toml! {
+            [overlay]
+            mode = "xai_compat"
+        }
+        .into();
+        let runtime = resolve_runtime(Some(&document), env(&[])).expect("resolve compat mode");
+
+        assert_eq!(
+            runtime.capability(Capability::ImageGeneration),
+            CapabilityAvailability::Inherited
+        );
+        assert_eq!(
+            runtime.capability(Capability::WebSearch),
+            CapabilityAvailability::Inherited
+        );
     }
 
     #[test]
@@ -329,6 +439,38 @@ mod tests {
                 .map(|source| source.location.as_str()),
             Some("https://env.example.test")
         );
+    }
+
+    #[test]
+    fn open_mode_rejects_first_party_update_sources() {
+        let document: toml::Value = toml::toml! {
+            [overlay]
+            mode = "open"
+            [overlay.update_source]
+            kind = "base_url"
+            location = "https://x.ai/cli"
+        }
+        .into();
+        assert!(matches!(
+            resolve_runtime(Some(&document), env(&[])),
+            Err(OverlayConfigError::InvalidUpdateSource(_))
+        ));
+    }
+
+    #[test]
+    fn update_source_rejects_malformed_github_repository() {
+        let document: toml::Value = toml::toml! {
+            [overlay]
+            mode = "open"
+            [overlay.update_source]
+            kind = "github_release"
+            location = "not-a-repository"
+        }
+        .into();
+        assert!(matches!(
+            resolve_runtime(Some(&document), env(&[])),
+            Err(OverlayConfigError::InvalidUpdateSource(_))
+        ));
     }
 
     #[test]
