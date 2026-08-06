@@ -2367,6 +2367,15 @@ impl MvpAgent {
         }
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
+        if matches!(
+            self.cfg
+                .borrow()
+                .overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::WebSearch),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return None;
+        }
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
@@ -2418,6 +2427,13 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig {
         use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
         let cfg = self.cfg.borrow();
+        if matches!(
+            cfg.overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::WebFetch),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return WebFetchConfig::Disabled;
+        }
         if cfg.disable_web_search {
             return WebFetchConfig::Disabled;
         }
