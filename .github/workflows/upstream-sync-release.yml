@@ -169,6 +169,50 @@ jobs:
             echo "- Release required: \`${should_release}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Preflight upstream merge
+        id: preflight
+        if: steps.state.outputs.needs_sync == 'true'
+        run: |
+          set -euo pipefail
+          upstream_ref="upstream/${UPSTREAM_BRANCH}"
+
+          # merge-tree is read-only: it exercises the same three-way merge
+          # Git will use below without modifying the checkout. Keep this as a
+          # diagnostic step so a future upstream overlap is visible before the
+          # mutating merge/PR path runs.
+          set +e
+          merge_output="$(git merge-tree --write-tree --messages HEAD "${upstream_ref}" 2>&1)"
+          merge_status=$?
+          set -e
+
+          conflicting_files="$(awk '$3 ~ /^[123]$/ {print $4}' <<<"${merge_output}" | sort -u)"
+          if [[ "${merge_status}" -eq 0 ]]; then
+            echo "conflict=false" >> "${GITHUB_OUTPUT}"
+            echo "merge_tree_status=clean" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Upstream merge preflight"
+              echo
+              echo "The read-only three-way merge is clean; the mutating merge step may proceed."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "conflict=true" >> "${GITHUB_OUTPUT}"
+            echo "merge_tree_status=conflict" >> "${GITHUB_OUTPUT}"
+            {
+              echo "## Upstream merge preflight"
+              echo
+              echo "The read-only three-way merge reported conflicts before the mutating merge step."
+              echo
+              echo '```text'
+              if [[ -n "${conflicting_files}" ]]; then
+                echo "${conflicting_files}"
+              else
+                echo "${merge_output}"
+              fi
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            echo "::warning::Upstream merge preflight reported conflicts: ${conflicting_files//$'\n'/, }"
+          fi
+
       - name: Integrate upstream into a local merge
         id: integrate
         if: steps.state.outputs.needs_sync == 'true'
