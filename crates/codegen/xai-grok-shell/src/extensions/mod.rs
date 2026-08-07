@@ -58,9 +58,13 @@ pub(crate) fn require_overlay_service(
         return Ok(());
     }
     tracing::debug!(%method, ?kind, "extension disabled by overlay policy");
-    Err(acp::Error::method_not_found().data(format!(
-        "{method} is unavailable in Open mode; select xai_compat or configure a provider-neutral service"
-    )))
+    let guidance = if matches!(kind, xai_grok_overlay_api::ServiceKind::Auth) {
+        "use an API key or select xai_compat"
+    } else {
+        "select xai_compat or configure a provider-neutral service"
+    };
+    Err(acp::Error::method_not_found()
+        .data(format!("{method} is unavailable in Open mode; {guidance}")))
 }
 
 pub(crate) fn parse_params<T: DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {

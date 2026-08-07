@@ -33,6 +33,12 @@ impl OverlayMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceKind {
+    /// First-party interactive authentication and subscription recovery.
+    ///
+    /// This is deliberately separate from [`AuthPolicy`]: the latter governs
+    /// credential classes, while this service gate governs whether an
+    /// extension may start a first-party auth flow at all.
+    Auth,
     RemoteSettings,
     ManagedConfig,
     Telemetry,
@@ -155,6 +161,13 @@ impl OverlayPolicy {
 
     pub const fn service(&self, kind: ServiceKind) -> ServicePolicy {
         match kind {
+            ServiceKind::Auth => {
+                if self.allows_first_party_auth() {
+                    ServicePolicy::Enabled
+                } else {
+                    ServicePolicy::Disabled
+                }
+            }
             ServiceKind::RemoteSettings => self.remote_settings,
             ServiceKind::ManagedConfig => self.managed_config,
             ServiceKind::Telemetry => self.telemetry,
@@ -196,6 +209,7 @@ mod tests {
 
         assert!(policy.mode.is_open());
         assert_eq!(policy.auth, AuthPolicy::ByokOnly);
+        assert!(!policy.allows_explicit(ServiceKind::Auth));
         assert!(!policy.allows_implicit(ServiceKind::Telemetry));
         assert!(!policy.allows_explicit(ServiceKind::Telemetry));
         assert!(!policy.allows_implicit(ServiceKind::ManagedConfig));
@@ -211,6 +225,7 @@ mod tests {
         assert!(policy.mode.is_upstream());
         assert_eq!(policy.auth, AuthPolicy::Inherited);
         assert!(policy.auth.allows_session_auth());
+        assert!(policy.allows_explicit(ServiceKind::Auth));
         assert!(policy.allows_implicit(ServiceKind::Telemetry));
         assert!(policy.allows_implicit(ServiceKind::Updates));
     }
@@ -227,6 +242,7 @@ mod tests {
 
         assert!(policy.mode.is_xai_compat());
         assert_eq!(policy.auth, AuthPolicy::ProviderOrByok);
+        assert!(policy.allows_explicit(ServiceKind::Auth));
         assert!(policy.allows_implicit(ServiceKind::Telemetry));
         assert!(policy.allows_implicit(ServiceKind::Subscription));
     }
