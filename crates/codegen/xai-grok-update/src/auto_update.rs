@@ -135,7 +135,15 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
 
 pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let installer = get_installer().await.map(|value| value.to_string());
-    let current_version = get_installed_grok_version();
+    // The running binary embeds the upstream semver (for example 0.2.121),
+    // but managed fork installs are versioned by the subscription source
+    // (for example 2026.8.7).  Compare against the versioned install on disk
+    // whenever the installer owns that layout; otherwise fall back to the
+    // compiled-in version used by npm/dev installs.
+    let current_version = installer
+        .as_deref()
+        .and_then(disk_version_for_installer)
+        .unwrap_or_else(get_installed_grok_version);
     let current_config = config::load_config().await;
     let auto_update = current_config.cli.auto_update;
     let channel = update_config.channel.clone();
