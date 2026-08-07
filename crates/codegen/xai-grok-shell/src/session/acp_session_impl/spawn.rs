@@ -280,6 +280,7 @@ pub(crate) async fn spawn_session_actor(
     background_workflows_enabled: bool,
     subagents_enabled: bool,
     subagents_max_depth: u32,
+    workflow_max_concurrent_agents: usize,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -1381,6 +1382,7 @@ pub(crate) async fn spawn_session_actor(
             }),
             cmd_tx.clone(),
             std::collections::HashMap::new(),
+            workflow_max_concurrent_agents,
         ),
     ));
     let (workflow_launch_tx, mut workflow_launch_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2289,6 +2291,7 @@ pub(crate) async fn spawn_session_on_thread(
     background_workflows_enabled: bool,
     subagents_enabled: bool,
     subagents_max_depth: u32,
+    workflow_max_concurrent_agents: usize,
     ask_user_question_enabled: bool,
     client_hooks: crate::extensions::hooks::ClientHooks,
     prompt_display_cwd: Option<String>,
@@ -2464,6 +2467,7 @@ pub(crate) async fn spawn_session_on_thread(
                         background_workflows_enabled,
                         subagents_enabled,
                         subagents_max_depth,
+                        workflow_max_concurrent_agents,
                         ask_user_question_enabled,
                         client_hooks,
                         prompt_display_cwd,
