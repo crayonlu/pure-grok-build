@@ -216,7 +216,7 @@ if (-not $downloaded) {
 
 # --- Install binary (locked-file safe) ---
 
-foreach ($binName in @('grok.exe', 'agent.exe')) {
+foreach ($binName in @('grok.exe')) {
     $dest = Join-Path $BinDir $binName
     $old = "$dest.old"
 
@@ -236,7 +236,9 @@ foreach ($binName in @('grok.exe', 'agent.exe')) {
     }
 }
 
-Write-Host "  Installed to $BinDir\grok.exe and $BinDir\agent.exe." -ForegroundColor DarkGray
+# Remove the legacy top-level alias; only `grok` is supported now.
+Remove-Item (Join-Path $BinDir 'agent.exe') -Force -ErrorAction SilentlyContinue
+Write-Host "  Installed to $BinDir\grok.exe." -ForegroundColor DarkGray
 
 # --- Generate completions (best-effort) ---
 
@@ -338,4 +340,4 @@ if ($pathEntries -notcontains $BinDir) {
 }
 
 Write-Host ''
-Write-Host "Run 'grok' or 'agent' to get started!" -ForegroundColor Cyan
+Write-Host "Run 'grok' to get started!" -ForegroundColor Cyan

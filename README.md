@@ -152,6 +152,7 @@ uninstall command. They and this fork use <code>~/.grok</code>.
 macOS/Linux/WSL/Git Bash:
 
 ~~~sh
+# `agent` is included only to clean up the legacy alias from older releases.
 rm -f "$HOME/.grok/bin/grok" "$HOME/.grok/bin/agent"
 rm -rf "$HOME/.grok/downloads" "$HOME/.grok/completions"
 ~~~
@@ -159,6 +160,7 @@ rm -rf "$HOME/.grok/downloads" "$HOME/.grok/completions"
 Windows PowerShell:
 
 ~~~powershell
+# `agent.exe` is included only to clean up the legacy alias from older releases.
 Remove-Item "$env:USERPROFILE\.grok\bin\grok.exe","$env:USERPROFILE\.grok\bin\agent.exe" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.grok\downloads","$env:USERPROFILE\.grok\completions" -Recurse -Force -ErrorAction SilentlyContinue
 ~~~
@@ -340,6 +342,7 @@ auth_scheme = "bearer"
 macOS/Linux/WSL/Git Bash：
 
 ~~~sh
+# `agent` is included only to clean up the legacy alias from older releases。
 rm -f "$HOME/.grok/bin/grok" "$HOME/.grok/bin/agent"
 rm -rf "$HOME/.grok/downloads" "$HOME/.grok/completions"
 ~~~
@@ -347,6 +350,7 @@ rm -rf "$HOME/.grok/downloads" "$HOME/.grok/completions"
 Windows PowerShell：
 
 ~~~powershell
+# `agent.exe` is included only to clean up the legacy alias from older releases。
 Remove-Item "$env:USERPROFILE\.grok\bin\grok.exe","$env:USERPROFILE\.grok\bin\agent.exe" -Force -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.grok\downloads","$env:USERPROFILE\.grok\completions" -Recurse -Force -ErrorAction SilentlyContinue
 ~~~

@@ -1372,7 +1372,7 @@ pub async fn install_internal_from_base(
 }
 
 /// A downloaded and smoke-tested binary in `~/.grok/downloads/`, not yet
-/// activated as the managed `grok`/`agent`.
+/// activated as the managed `grok` entry point.
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
@@ -1441,7 +1441,8 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
     let bin_dir = grok_home.join("bin");
     tokio::fs::create_dir_all(&bin_dir).await?;
 
-    // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
+    // Atomically replace ~/.grok/bin/grok with the downloaded binary. Any
+    // legacy `agent` alias is removed by the swap helper.
     let link_path = swap_managed_bin_links(&download.binary_path, &bin_dir).await?;
 
     remove_stale_pager(&bin_dir).await;
@@ -1534,36 +1535,32 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
     target.to_path_buf()
 }
 
-/// Swap `~/.grok/bin/{grok,agent}` to point at `binary_path`. Returns the
-/// `grok` link path (for [`regenerate_completions`]).
+/// Swap `~/.grok/bin/grok` to point at `binary_path`. Returns the `grok` link
+/// path (for [`regenerate_completions`]).
 ///
-/// `grok` and `agent` are first-class entry points that the bootstrap
-/// installers (`install.sh`, `install.ps1`, `install-enterprise.sh`)
-/// maintain in lockstep, and so must the updater — otherwise `grok update`
-/// leaves `agent` pinned at the previous version.
+/// Older installers created an `agent` alias next to `grok`. The fork no
+/// longer exposes that alias; after a successful swap, the helper removes a
+/// legacy managed alias without touching unrelated user files.
 ///
 /// Unix: atomic symlink swap with relative target (survives Docker
 /// bind-mounts of `~/.grok/`). Windows: [`windows_replace_exe`].
 ///
-/// **All-or-nothing.** Each link's prior state is captured (Unix: prior
-/// symlink target; Windows: `.rollback.bak`; or `Absent` marker via
-/// `symlink_metadata`) before the swap, and any earlier successful swaps
-/// are rolled back if a later one fails — including *removing* a link that
-/// didn't exist before. Restore failures go to `tracing::warn!`; the swap
-/// error itself propagates unwrapped so the caller's `reinstall_hint` wrap
-/// stays the user-visible message.
+/// **All-or-nothing.** The prior `grok` state is captured (Unix: prior
+/// symlink target; Windows: `.rollback.bak`; or `Absent` via
+/// `symlink_metadata`) before the swap. If activation fails, the prior state
+/// is restored, including *removing* a link that did not exist before.
+/// Restore failures go to `tracing::warn!`; the swap error itself propagates
+/// unwrapped so the caller's `reinstall_hint` wrap stays the user-visible
+/// message.
 async fn swap_managed_bin_links(
     binary_path: &std::path::Path,
     bin_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
     let grok_name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    let agent_name = if cfg!(windows) { "agent.exe" } else { "agent" };
     let grok_link = bin_dir.join(grok_name);
-    let agent_link = bin_dir.join(agent_name);
-    let link_paths: [std::path::PathBuf; 2] = [grok_link.clone(), agent_link];
+    let link_paths: [std::path::PathBuf; 1] = [grok_link.clone()];
 
-    // Capture every link up-front so a 2nd-link capture failure can't
-    // strand the 1st mid-swap.
+    // Capture the prior grok state before mutating the active entry point.
     let mut captured: Vec<LinkRollback> = Vec::with_capacity(link_paths.len());
     for path in &link_paths {
         match LinkRollback::capture(path).await {
@@ -1629,6 +1626,7 @@ async fn swap_managed_bin_links(
     for cap in &captured {
         cap.cleanup().await;
     }
+    remove_legacy_agent_entrypoint(bin_dir).await;
     Ok(grok_link)
 }
 
@@ -2074,99 +2072,128 @@ fn installer_manages_bin_entrypoints(installer: &str) -> bool {
     matches!(installer, "internal" | "gh-release")
 }
 
-#[cfg_attr(not(any(unix, windows)), allow(clippy::unused_async))]
 async fn heal_managed_install(installer: &str) {
     if !installer_manages_bin_entrypoints(installer) {
         return;
     }
 
-    #[cfg(any(unix, windows))]
-    {
-        let bin_dir = grok_home().join("bin");
+    let bin_dir = grok_home().join("bin");
+    remove_legacy_agent_entrypoint(&bin_dir).await;
+}
 
-        #[cfg(unix)]
-        reconcile_agent_to_grok(&bin_dir).await;
+#[cfg(unix)]
+async fn remove_legacy_agent_entrypoint(bin_dir: &std::path::Path) {
+    remove_legacy_agent_system_links(bin_dir).await;
 
-        #[cfg(windows)]
-        reconcile_agent_exe_to_grok(&bin_dir).await;
+    let agent_link = bin_dir.join("agent");
+
+    // On Unix the old alias was a symlink. Leave a regular file alone: it may
+    // be a user-owned executable that happens to be named `agent`.
+    let Ok(metadata) = tokio::fs::symlink_metadata(&agent_link).await else {
+        return;
+    };
+    if !metadata.file_type().is_symlink() {
+        return;
+    }
+
+    // Only remove aliases that resolve to the managed grok binary or to this
+    // install's downloads directory. This avoids deleting an unrelated
+    // symlink a user created in ~/.grok/bin.
+    let same_as_grok = match (
+        tokio::fs::canonicalize(bin_dir.join("grok")).await,
+        tokio::fs::canonicalize(&agent_link).await,
+    ) {
+        (Ok(grok_target), Ok(agent_target)) => grok_target == agent_target,
+        _ => false,
+    };
+    let in_managed_downloads = if let Some(parent) = bin_dir.parent() {
+        match (
+            tokio::fs::canonicalize(&agent_link).await,
+            tokio::fs::canonicalize(parent.join("downloads")).await,
+        ) {
+            (Ok(agent_target), Ok(downloads)) => agent_target.starts_with(downloads),
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if !same_as_grok && !in_managed_downloads {
+        return;
+    }
+
+    match tokio::fs::remove_file(&agent_link).await {
+        Ok(()) => tracing::info!("removed legacy ~/.grok/bin/agent alias"),
+        Err(e) => tracing::warn!("failed to remove legacy agent alias: {e:#}"),
     }
 }
 
 #[cfg(unix)]
-async fn reconcile_agent_to_grok(bin_dir: &std::path::Path) {
-    let grok_link = bin_dir.join("grok");
-    let agent_link = bin_dir.join("agent");
+async fn remove_legacy_agent_system_links(bin_dir: &std::path::Path) {
+    #[allow(deprecated)]
+    let user_home = std::env::home_dir().unwrap_or_default();
+    let candidates = [
+        user_home.join(".local/bin/agent"),
+        std::path::PathBuf::from("/usr/local/bin/agent"),
+    ];
+    let expected = bin_dir.join("agent");
 
-    let Ok(grok_target) = tokio::fs::read_link(&grok_link).await else {
-        return;
-    };
-    if tokio::fs::metadata(&grok_link).await.is_err() {
-        return;
-    }
-    if let Ok(agent_target) = tokio::fs::read_link(&agent_link).await
-        && agent_target == grok_target
-    {
-        return;
-    }
-    match atomic_symlink_swap(&grok_target, &agent_link).await {
-        Ok(()) => tracing::info!(
-            grok_target = %grok_target.display(),
-            "reconciled agent bin symlink to grok target"
-        ),
-        Err(e) => tracing::warn!("failed to reconcile agent bin symlink: {e:#}"),
+    for candidate in candidates {
+        let Ok(metadata) = tokio::fs::symlink_metadata(&candidate).await else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(target) = tokio::fs::read_link(&candidate).await else {
+            continue;
+        };
+        let target_display = target.to_string_lossy();
+        let managed_target = if target.is_absolute() {
+            target == expected
+        } else {
+            candidate
+                .parent()
+                .map(|parent| parent.join(&target) == expected)
+                .unwrap_or(false)
+        } || target_display.ends_with("/.grok/bin/agent");
+        if !managed_target {
+            continue;
+        }
+
+        match tokio::fs::remove_file(&candidate).await {
+            Ok(()) => {
+                tracing::info!(path = %candidate.display(), "removed legacy system agent alias")
+            }
+            Err(e) => {
+                tracing::debug!(path = %candidate.display(), "failed to remove legacy system agent alias: {e:#}")
+            }
+        }
     }
 }
 
 #[cfg(windows)]
-async fn reconcile_agent_exe_to_grok(bin_dir: &std::path::Path) {
-    let grok_exe = bin_dir.join("grok.exe");
+async fn remove_legacy_agent_entrypoint(bin_dir: &std::path::Path) {
     let agent_exe = bin_dir.join("agent.exe");
 
-    if tokio::fs::metadata(&grok_exe).await.is_err() {
+    // Windows installers historically copied the executable instead of
+    // creating a symlink. The managed bin directory is owned by the CLI, so
+    // remove the legacy copy whenever it is present; leave directories and
+    // other unexpected filesystem objects untouched.
+    let Ok(metadata) = tokio::fs::symlink_metadata(&agent_exe).await else {
+        return;
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
         return;
     }
-    match agent_exe_differs(&grok_exe, &agent_exe).await {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(e) => {
-            tracing::debug!("agent.exe reconcile: compare failed: {e:#}");
-            return;
-        }
-    }
-    match windows_replace_exe(&grok_exe, &agent_exe).await {
-        Ok(()) => tracing::info!("reconciled agent.exe to grok.exe"),
-        Err(e) => tracing::warn!("failed to reconcile agent.exe to grok.exe: {e:#}"),
+
+    match tokio::fs::remove_file(&agent_exe).await {
+        Ok(()) => tracing::info!("removed legacy ~/.grok/bin/agent.exe alias"),
+        Err(e) => tracing::warn!("failed to remove legacy agent.exe alias: {e:#}"),
     }
 }
 
-#[cfg(windows)]
-async fn agent_exe_differs(
-    grok: &std::path::Path,
-    agent: &std::path::Path,
-) -> std::io::Result<bool> {
-    use tokio::io::{AsyncReadExt, BufReader};
-    let grok_len = tokio::fs::metadata(grok).await?.len();
-    match tokio::fs::metadata(agent).await {
-        Ok(m) if m.len() != grok_len => return Ok(true),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(e) => return Err(e),
-    }
-    let mut rg = BufReader::new(tokio::fs::File::open(grok).await?);
-    let mut ra = BufReader::new(tokio::fs::File::open(agent).await?);
-    let mut bg = [0u8; 64 * 1024];
-    let mut ba = [0u8; 64 * 1024];
-    loop {
-        let n = rg.read(&mut bg).await?;
-        if n == 0 {
-            return Ok(false);
-        }
-        ra.read_exact(&mut ba[..n]).await?;
-        if bg[..n] != ba[..n] {
-            return Ok(true);
-        }
-    }
-}
+#[cfg(not(any(unix, windows)))]
+async fn remove_legacy_agent_entrypoint(_bin_dir: &std::path::Path) {}
 
 /// Download a single asset from a GitHub release via `gh release download`.
 async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -> Result<()> {
@@ -2267,7 +2294,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
-    // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
+    // Atomically replace ~/.grok/bin/grok with the downloaded binary. The
+    // swap helper also removes the legacy `agent` alias.
     swap_managed_bin_links(&binary_path, &bin_dir).await?;
 
     // Update grok-latest -> versioned binary so any existing symlinks that route
@@ -2282,12 +2310,12 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         }
     }
 
-    // Also update /usr/local/bin/{grok,agent} if either points directly into
+    // Also update /usr/local/bin/grok if it points directly into
     // ~/.grok/downloads/ (legacy layout — skips the grok-latest indirection).
     // Permission errors ignored.
     #[cfg(unix)]
-    for name in ["grok", "agent"] {
-        let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
+    {
+        let system_link = std::path::PathBuf::from("/usr/local/bin/grok");
         if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
             let target_str = existing_target.to_string_lossy();
             if target_str.contains(".grok/downloads/") && !target_str.ends_with("grok-latest") {
@@ -2938,7 +2966,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_reconcile_agent_repoints_diverged_agent() {
+    async fn test_remove_legacy_agent_removes_managed_diverged_alias() {
         let (_dir, bin, downloads) = managed_layout();
         std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
         std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
@@ -2948,106 +2976,79 @@ mod tests {
         std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
             .unwrap();
 
-        reconcile_agent_to_grok(&bin).await;
+        remove_legacy_agent_entrypoint(&bin).await;
 
-        assert_eq!(
-            std::fs::read_link(bin.join("agent")).unwrap(),
-            std::path::PathBuf::from("../downloads/grok-0.2.101-macos-aarch64"),
-        );
-        assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
+        assert!(!bin.join("agent").exists());
         assert!(downloads.join("grok-0.1.199-macos-aarch64").exists());
+        assert_eq!(std::fs::read_to_string(bin.join("grok")).unwrap(), "new");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_reconcile_agent_heals_legacy_unversioned_agent() {
+    async fn test_remove_legacy_agent_removes_same_target_alias() {
         let (_dir, bin, downloads) = managed_layout();
         std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-        std::fs::write(downloads.join("grok-macos-aarch64"), "legacy").unwrap();
-
         std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
             .unwrap();
-        std::os::unix::fs::symlink("../downloads/grok-macos-aarch64", bin.join("agent")).unwrap();
+        std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("agent"))
+            .unwrap();
 
-        reconcile_agent_to_grok(&bin).await;
+        remove_legacy_agent_entrypoint(&bin).await;
 
-        assert_eq!(
-            std::fs::read_link(bin.join("agent")).unwrap(),
-            std::path::PathBuf::from("../downloads/grok-0.2.101-macos-aarch64"),
-        );
-        assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
+        assert!(!bin.join("agent").exists());
+        assert_eq!(std::fs::read_to_string(bin.join("grok")).unwrap(), "new");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_reconcile_agent_creates_missing_agent() {
+    async fn test_remove_legacy_agent_preserves_unrelated_symlink() {
         let (_dir, bin, downloads) = managed_layout();
         std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-        std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-            .unwrap();
+        let user_target = bin.parent().unwrap().join("user-agent");
+        std::fs::write(&user_target, "user tool").unwrap();
+        std::os::unix::fs::symlink(&user_target, bin.join("agent")).unwrap();
 
-        reconcile_agent_to_grok(&bin).await;
+        remove_legacy_agent_entrypoint(&bin).await;
 
         assert!(bin.join("agent").is_symlink());
-        assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(bin.join("agent")).unwrap(),
+            "user tool"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_reconcile_agent_noop_when_consistent() {
+    async fn test_remove_legacy_agent_preserves_unrelated_regular_file() {
         let (_dir, bin, downloads) = managed_layout();
         std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-        let target = "../downloads/grok-0.2.101-macos-aarch64";
-        std::os::unix::fs::symlink(target, bin.join("grok")).unwrap();
-        std::os::unix::fs::symlink(target, bin.join("agent")).unwrap();
+        std::fs::write(bin.join("agent"), "user tool").unwrap();
 
-        reconcile_agent_to_grok(&bin).await;
+        remove_legacy_agent_entrypoint(&bin).await;
 
         assert_eq!(
-            std::fs::read_link(bin.join("agent")).unwrap(),
-            std::path::PathBuf::from(target),
-        );
-        let leftovers = std::fs::read_dir(&bin)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-link"))
-            .count();
-        assert_eq!(leftovers, 0, "no temp links from a no-op reconcile");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_reconcile_agent_skips_when_grok_dangling() {
-        let (_dir, bin, downloads) = managed_layout();
-        std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-            .unwrap();
-        std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
-        std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
-            .unwrap();
-
-        reconcile_agent_to_grok(&bin).await;
-
-        assert_eq!(
-            std::fs::read_link(bin.join("agent")).unwrap(),
-            std::path::PathBuf::from("../downloads/grok-0.1.199-macos-aarch64"),
+            std::fs::read_to_string(bin.join("agent")).unwrap(),
+            "user tool"
         );
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_reconcile_agent_skips_when_grok_not_symlink() {
+    async fn test_swap_managed_bin_links_removes_legacy_agent() {
         let (_dir, bin, downloads) = managed_layout();
-        std::fs::write(bin.join("grok"), "copy-binary").unwrap();
-        std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
+        let old = downloads.join("grok-0.1.199-macos-aarch64");
+        let new = downloads.join("grok-0.2.101-macos-aarch64");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+        std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("grok"))
+            .unwrap();
         std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
             .unwrap();
 
-        reconcile_agent_to_grok(&bin).await;
+        swap_managed_bin_links(&new, &bin).await.unwrap();
 
-        assert_eq!(
-            std::fs::read_link(bin.join("agent")).unwrap(),
-            std::path::PathBuf::from("../downloads/grok-0.1.199-macos-aarch64"),
-        );
+        assert!(!bin.join("agent").exists());
+        assert_eq!(std::fs::read_to_string(bin.join("grok")).unwrap(), "new");
     }
 
     #[cfg(unix)]
