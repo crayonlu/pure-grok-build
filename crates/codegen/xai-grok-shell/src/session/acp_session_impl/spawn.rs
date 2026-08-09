@@ -261,7 +261,6 @@ pub(crate) async fn spawn_session_actor(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -1148,6 +1147,7 @@ pub(crate) async fn spawn_session_actor(
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
     let is_subagent_spawn = startup_hints.is_subagent;
+    let session_non_interactive = startup_hints.non_interactive;
     install_system_prompt(
         &mut conversation,
         &mut startup_hints.inherited_prefix_len,
@@ -1770,7 +1770,6 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        managed_mcp_expires_at: std::sync::Mutex::new(managed_mcp_expires_at),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announced_servers: Mutex::new(
             persisted_announcement_state
@@ -2162,6 +2161,7 @@ pub(crate) async fn spawn_session_actor(
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,
+            non_interactive: session_non_interactive,
             plan_mode: plan_mode.clone(),
             force_compact,
             permission_handle: permissions_for_handle,
@@ -2270,7 +2270,6 @@ pub(crate) async fn spawn_session_on_thread(
     loc_tracking_enabled: bool,
     feedback_flags: crate::session::feedback_manager::FeedbackFlags,
     managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
-    managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     managed_mcp_proxy_base_url: String,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
@@ -2446,7 +2445,6 @@ pub(crate) async fn spawn_session_on_thread(
                         loc_tracking_enabled,
                         feedback_flags,
                         managed_mcp_handle,
-                        managed_mcp_expires_at,
                         managed_mcp_proxy_base_url,
                         session_model_id,
                         session_yolo_mode,
