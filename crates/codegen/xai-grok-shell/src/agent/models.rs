@@ -597,6 +597,19 @@ impl ModelsManager {
             .unwrap_or(true)
     }
 
+    /// Whether the model may emit tool calls that the agent runs in parallel.
+    /// Unknown models default to `true` (the historical behavior) so catalogs
+    /// that don't publish the flag keep running tools concurrently.
+    pub fn model_supports_parallel_tool_calls(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_parallel_tool_calls)
+            .unwrap_or(true)
+    }
+
     pub(crate) fn model_compactions_remaining(
         &self,
         model_id: &str,

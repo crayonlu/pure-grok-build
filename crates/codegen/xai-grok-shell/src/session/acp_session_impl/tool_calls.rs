@@ -607,11 +607,21 @@ impl SessionActor {
                 }
             })
             .collect();
-        tokio::task::yield_now().await;
-        let mut dispatch_stream = futures::stream::FuturesUnordered::new();
-        for fut in dispatch_futures {
-            dispatch_stream.push(fut);
+        // Models flagged `supports_parallel_tool_calls = false` must run their
+        // tool calls one at a time, in model-emitted order. We still drive them
+        // through the same channel/post-processing pipeline; only the fan-out
+        // strategy changes (FuturesUnordered vs sequential await).
+        let parallel = self
+            .models_manager
+            .model_supports_parallel_tool_calls(&self.current_model_id().await);
+        if !parallel {
+            tracing::debug!(
+                session_id = %self.session_info.id.0,
+                batch_size = dispatch_futures.len(),
+                "model does not support parallel tool calls; executing sequentially"
+            );
         }
+        tokio::task::yield_now().await;
         let mut approved_slots: Vec<Option<PreparedToolCall>> =
             approved.into_iter().map(Some).collect();
         let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -621,9 +631,22 @@ impl SessionActor {
         )>();
         let drainer = tokio::spawn(
             async move {
-                while let Some(item) = dispatch_stream.next().await {
-                    if dispatch_tx.send(item).is_err() {
-                        break;
+                if parallel {
+                    let mut dispatch_stream = futures::stream::FuturesUnordered::new();
+                    for fut in dispatch_futures {
+                        dispatch_stream.push(fut);
+                    }
+                    while let Some(item) = dispatch_stream.next().await {
+                        if dispatch_tx.send(item).is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    for fut in dispatch_futures {
+                        let item = fut.await;
+                        if dispatch_tx.send(item).is_err() {
+                            break;
+                        }
                     }
                 }
             }
