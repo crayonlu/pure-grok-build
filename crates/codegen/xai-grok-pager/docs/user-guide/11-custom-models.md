@@ -112,6 +112,23 @@ compatibility. Set it to `false` for a text-only endpoint. Grok then keeps
 attachments on disk and sends a text-only note instead of embedding image
 pixels in user messages, `read_file` results, or rendered PDF pages.
 
+### Parallel Tool Calls
+
+Model entries accept `supports_parallel_tool_calls`, which defaults to `true`.
+When a model returns several tool calls in one turn, Grok normally runs them
+concurrently. Some models or providers work better with strict one-at-a-time
+execution (for example, tools that share state, or endpoints that reject
+overlapping requests). Set this to `false` and Grok will run that model's tool
+calls sequentially, in the order the model emitted them:
+
+```toml
+[model.my-model]
+supports_parallel_tool_calls = false
+```
+
+The flag is per-model, so you can leave parallel dispatch on for models that
+benefit from it while opting out only where needed.
+
 ### Global Default Headers
 
 To apply the same headers to *every* model in the catalog -- built-in, prefetched from `/v1/models`, or custom -- set them once under the global `[models]` section instead of repeating them per model:

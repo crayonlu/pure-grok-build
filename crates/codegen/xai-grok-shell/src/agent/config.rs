@@ -3826,6 +3826,8 @@ struct DefaultModelJson {
     supports_backend_search: bool,
     #[serde(default = "default_true")]
     supports_vision: bool,
+    #[serde(default = "default_true")]
+    supports_parallel_tool_calls: bool,
     #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
@@ -3891,6 +3893,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 reasoning_efforts: m.reasoning_efforts,
                 supports_backend_search: m.supports_backend_search,
                 supports_vision: m.supports_vision,
+                supports_parallel_tool_calls: m.supports_parallel_tool_calls,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -4000,6 +4003,11 @@ pub struct ModelEntryConfig {
     pub supports_backend_search: bool,
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_vision: bool,
+    /// Whether the model may emit multiple tool calls that the agent runs in
+    /// parallel. Defaults to `true`; set to `false` for models whose tool
+    /// calls must execute one at a time (in model-emitted order).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_parallel_tool_calls: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4082,6 +4090,8 @@ pub struct ConfigModelOverride {
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
     pub supports_vision: Option<bool>,
+    /// Override for `ModelInfo::supports_parallel_tool_calls`.
+    pub supports_parallel_tool_calls: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
@@ -4173,6 +4183,9 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_vision {
             entry.info.supports_vision = v;
+        }
+        if let Some(v) = self.supports_parallel_tool_calls {
+            entry.info.supports_parallel_tool_calls = v;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -4268,6 +4281,12 @@ pub struct ModelInfo {
     pub supports_backend_search: bool,
     #[serde(default = "default_true")]
     pub supports_vision: bool,
+    /// Whether the agent may run this model's tool calls concurrently.
+    /// Defaults to `true`; models that must execute tools one at a time set
+    /// this to `false`, in which case `execute_tool_calls_batch` drives the
+    /// prepared calls sequentially in model-emitted order.
+    #[serde(default = "default_true")]
+    pub supports_parallel_tool_calls: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -4315,6 +4334,7 @@ impl ModelInfo {
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4353,6 +4373,7 @@ impl ModelInfo {
             reasoning_efforts: entry.reasoning_efforts.clone(),
             supports_backend_search: entry.supports_backend_search,
             supports_vision: entry.supports_vision,
+            supports_parallel_tool_calls: entry.supports_parallel_tool_calls,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -5113,6 +5134,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -5328,6 +5350,7 @@ fn resolve_hidden_default_web_search_sampling_config(
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -6578,6 +6601,7 @@ reasoning_effort = "low"
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -7604,6 +7628,7 @@ reasoning_effort = "low"
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7764,6 +7789,7 @@ reasoning_effort = "low"
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8216,6 +8242,7 @@ reasoning_effort = "low"
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
             supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -12066,6 +12093,7 @@ default = "grok-4.5"
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
                 supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
