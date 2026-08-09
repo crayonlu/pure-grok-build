@@ -86,6 +86,7 @@ temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
 context_window = 128000                   # Total context window in tokens
+supports_vision = true                    # Set false for text-only models
 extra_headers = { "x-api-key" = "sk-..." } # Extra request headers, sent verbatim (optional)
 query_params = { api-version = "2026-07-22" } # Query params appended to every request URL (optional)
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # Headers from env vars, resolved at client build (optional)
@@ -103,6 +104,13 @@ Grok resolves the API key in this order:
 ### Context Window
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.
+
+### Vision Capability
+
+Model entries accept `supports_vision`, which defaults to `true` for backward
+compatibility. Set it to `false` for a text-only endpoint. Grok then keeps
+attachments on disk and sends a text-only note instead of embedding image
+pixels in user messages, `read_file` results, or rendered PDF pages.
 
 ### Global Default Headers
 

@@ -2341,6 +2341,7 @@ mod inline_auto_compact_flow_tests {
             )),
             telemetry_enabled: false,
             supports_backend_search: std::cell::Cell::new(false),
+            supports_vision: std::cell::Cell::new(true),
             tool_overrides: std::cell::RefCell::new(None),
             resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
             compactions_remaining: std::cell::Cell::new(None),

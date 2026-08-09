@@ -152,6 +152,9 @@ pub struct VideoGenClient {
     /// (free / X Basic). The video tools short-circuit before any HTTP call
     /// and return the SuperGrok upsell prose. See [`VideoGenClient::is_tier_restricted`].
     tier_restricted: bool,
+    /// Provider-neutral async operation profile. When present, create/poll
+    /// requests use the generic runtime and never inherit xAI auth semantics.
+    capability_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
 }
 
 impl VideoGenClient {
@@ -165,6 +168,7 @@ impl VideoGenClient {
             extra_headers,
             zdr_video_output_s3,
             tier_restricted,
+            capability_profile,
         } = config
         else {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(
@@ -176,14 +180,16 @@ impl VideoGenClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         // Always bake the static api_key as the default Authorization header.
         // The dynamic provider overrides per-request; this is the fallback.
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Invalid API key for header: {e}"
-                ))
-            })?,
-        );
+        if capability_profile.is_none() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Invalid API key for header: {e}"
+                    ))
+                })?,
+            );
+        }
 
         extra_headers.into_iter().try_for_each(|(key, value)| {
             let header_name =
@@ -234,6 +240,7 @@ impl VideoGenClient {
             api_key_provider,
             attribution_callback: None,
             tier_restricted: *tier_restricted,
+            capability_profile: capability_profile.clone(),
         })
     }
 
@@ -272,6 +279,19 @@ impl VideoGenClient {
         image: Option<String>,
         reference_images: Vec<String>,
     ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
+        if self.capability_profile.is_some() {
+            return self
+                .generate_profiled(
+                    model,
+                    prompt,
+                    duration,
+                    aspect_ratio,
+                    resolution,
+                    image,
+                    reference_images,
+                )
+                .await;
+        }
         let start_url = format!("{}/videos/generations", self.base_url.trim_end_matches('/'));
 
         let presigned = match &self.zdr_video_output_s3 {
@@ -455,6 +475,220 @@ impl VideoGenClient {
                     );
                 }
             }
+        }
+    }
+
+    async fn generate_profiled(
+        &self,
+        model: &'static str,
+        prompt: &str,
+        duration: Option<u32>,
+        aspect_ratio: Option<&str>,
+        resolution: &str,
+        image: Option<String>,
+        reference_images: Vec<String>,
+    ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
+        let profile = self.capability_profile.as_ref().expect("checked above");
+        let operation_name = if profile.operation("create").is_some() {
+            "create"
+        } else {
+            "default"
+        };
+        let operation = profile.operation(operation_name).ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "video capability profile has no create/default operation",
+            )
+        })?;
+        let provider_model = profile
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(model);
+        let mut input = xai_grok_provider::ProviderRequestInput::new()
+            .value("model", provider_model)
+            .value("prompt", prompt)
+            .value("resolution", resolution)
+            .value(
+                "duration",
+                duration
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .value(
+                "aspect_ratio",
+                aspect_ratio
+                    .map(str::to_owned)
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        if let Some(image) = image {
+            input = input.value("image", image);
+        }
+        input = input.value(
+            "reference_images",
+            serde_json::Value::Array(
+                reference_images
+                    .into_iter()
+                    .map(serde_json::Value::from)
+                    .collect(),
+            ),
+        );
+        let built = xai_grok_provider::ProviderHttpRuntime::new(self.http.clone())
+            .build(profile, operation_name, &input, |name| {
+                std::env::var(name).ok()
+            })
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))?;
+        let response = self.http.execute(built.request).await.map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Video provider request failed: {error}"
+            ))
+        })?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            self.record_401_attribution(ToolConsumer::VideoGenStart, profile.api_key.as_deref());
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(xai_tool_runtime::ToolError::new(
+                xai_tool_runtime::ToolErrorKind::Custom,
+                format!(
+                    "Video provider create failed with HTTP {status}: {}",
+                    body.chars().take(200).collect::<String>()
+                ),
+            ));
+        }
+        let create_body: serde_json::Value = response.json().await.map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Invalid video create response: {error}"
+            ))
+        })?;
+        let job_id = operation
+            .response
+            .job_id
+            .as_deref()
+            .and_then(|pointer| xai_grok_provider::json_pointer(&create_body, pointer))
+            .and_then(|value| value.as_str())
+            .or_else(|| create_body.get("id").and_then(|value| value.as_str()))
+            .ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments(
+                    "Video provider response did not contain a job id",
+                )
+            })?
+            .to_owned();
+        let create_poll_url = operation
+            .response
+            .poll_url
+            .as_deref()
+            .and_then(|pointer| xai_grok_provider::json_pointer(&create_body, pointer))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        let async_config = operation.async_config.clone().unwrap_or_default();
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(async_config.timeout_secs.max(1));
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "Video provider job timed out (job_id={job_id})"
+                )));
+            }
+            // Respect the provider's configured polling cadence. The generic
+            // profile defaults to two seconds, while tests/providers may opt
+            // into a shorter interval explicitly; silently capping the value
+            // at 100ms would create avoidable rate-limit pressure.
+            let wait = async_config.poll_interval_ms.max(1);
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            let mut poll_profile = profile.clone();
+            let poll_name = if poll_profile.operation("poll").is_some() {
+                "poll"
+            } else {
+                operation_name
+            };
+            if let Some(url) = create_poll_url.as_deref() {
+                set_absolute_operation_url(&mut poll_profile, poll_name, url)?;
+            } else if let Some(poll) = poll_profile.operations.get_mut(poll_name) {
+                poll.path = poll.path.replace("{job_id}", &job_id);
+            }
+            let poll_input =
+                xai_grok_provider::ProviderRequestInput::new().value("job_id", job_id.clone());
+            let poll_operation = poll_profile.operation(poll_name).ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments(
+                    "Video capability profile has no poll operation",
+                )
+            })?;
+            let poll_built = xai_grok_provider::ProviderHttpRuntime::new(self.http.clone())
+                .build(&poll_profile, poll_name, &poll_input, |name| {
+                    std::env::var(name).ok()
+                })
+                .map_err(|error| {
+                    xai_tool_runtime::ToolError::invalid_arguments(error.to_string())
+                })?;
+            let poll_response = self
+                .http
+                .execute(poll_built.request)
+                .await
+                .map_err(|error| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Video provider poll failed: {error}"
+                    ))
+                })?;
+            if poll_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                self.record_401_attribution(ToolConsumer::VideoGenPoll, profile.api_key.as_deref());
+            }
+            if !poll_response.status().is_success() {
+                let status = poll_response.status();
+                let body = poll_response.text().await.unwrap_or_default();
+                return Err(xai_tool_runtime::ToolError::new(
+                    xai_tool_runtime::ToolErrorKind::Custom,
+                    format!(
+                        "Video provider poll failed with HTTP {status}: {}",
+                        body.chars().take(200).collect::<String>()
+                    ),
+                ));
+            }
+            let poll_body: serde_json::Value = poll_response.json().await.map_err(|error| {
+                xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "Invalid video poll response: {error}"
+                ))
+            })?;
+            let status = poll_operation
+                .response
+                .status
+                .as_deref()
+                .and_then(|pointer| xai_grok_provider::json_pointer(&poll_body, pointer))
+                .and_then(|value| value.as_str())
+                .unwrap_or("completed");
+            if async_config
+                .failure_statuses
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(status))
+            {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "Video provider job failed: {status}"
+                )));
+            }
+            if !async_config
+                .success_statuses
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(status))
+            {
+                continue;
+            }
+            let output_url = poll_operation
+                .response
+                .url
+                .as_deref()
+                .and_then(|pointer| xai_grok_provider::json_pointer(&poll_body, pointer))
+                .and_then(|value| value.as_str())
+                .or_else(|| poll_body.get("output").and_then(|value| value.as_str()))
+                .ok_or_else(|| {
+                    xai_tool_runtime::ToolError::invalid_arguments(
+                        "Video provider completion did not contain an output URL",
+                    )
+                })?;
+            return self
+                .download_video(output_url)
+                .await
+                .map(VideoOutcome::Bytes);
         }
     }
 
@@ -670,6 +904,65 @@ fn is_http_url(raw: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn set_absolute_operation_url(
+    profile: &mut xai_grok_provider::CapabilityProviderConfig,
+    operation_name: &str,
+    raw_url: &str,
+) -> Result<(), xai_tool_runtime::ToolError> {
+    let mut url = url::Url::parse(raw_url).map_err(|error| {
+        xai_tool_runtime::ToolError::invalid_arguments(format!("Invalid video poll URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "Video poll URL must use http or https",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "Video poll URL must not contain embedded credentials",
+        ));
+    }
+    let same_origin = profile
+        .base_url
+        .as_deref()
+        .and_then(|base| url::Url::parse(base).ok())
+        .is_some_and(|base| {
+            base.scheme().eq_ignore_ascii_case(url.scheme())
+                && base.host_str() == url.host_str()
+                && base.port_or_known_default() == url.port_or_known_default()
+        });
+    if !same_origin {
+        // A provider may return a presigned or third-party poll URL. Never
+        // forward the original provider key, secret env headers, or query
+        // credentials to a different origin. The endpoint can still be
+        // polled anonymously; providers that require auth must configure an
+        // explicit same-origin `poll` operation instead of returning a URL.
+        tracing::warn!(url = %url, "video poll URL changed origin; stripping provider credentials");
+        profile.api_key = None;
+        profile.env_key = None;
+        profile.extra_headers.clear();
+        profile.env_headers.clear();
+        profile.query_params.clear();
+    }
+    let path = format!(
+        "{}{}",
+        url.path(),
+        url.query()
+            .map(|query| format!("?{query}"))
+            .unwrap_or_default()
+    );
+    url.set_path("");
+    url.set_query(None);
+    profile.base_url = Some(url.to_string());
+    let operation = profile.operations.get_mut(operation_name).ok_or_else(|| {
+        xai_tool_runtime::ToolError::invalid_arguments(
+            "Video capability profile has no poll operation",
+        )
+    })?;
+    operation.path = path;
+    Ok(())
+}
+
 /// Session-level configuration. Same shape as [`ImageGenConfig`].
 ///
 /// [`ImageGenConfig`]: super::image_gen::ImageGenConfig
@@ -687,6 +980,7 @@ pub enum VideoGenConfig {
         /// at call time with the SuperGrok upsell prose. Set by the host from
         /// the subscription tier; always `false` for team / API-key / workspace.
         tier_restricted: bool,
+        capability_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     },
 }
 
@@ -1198,6 +1492,8 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
 mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn image_to_video_name_and_description() {
@@ -1367,6 +1663,31 @@ mod tests {
         });
         let (creds, source) = zdr_get_credentials(&config);
         assert_eq!((source, creds.access_key_id.as_str()), ("read_write", "rw"));
+    }
+
+    #[test]
+    fn external_video_poll_url_strips_provider_credentials() {
+        let mut profile = xai_grok_provider::CapabilityProviderConfig {
+            base_url: Some("https://provider.example/v1".into()),
+            api_key: Some("secret".into()),
+            env_key: Some(xai_grok_provider::ProviderEnvKeys::One(
+                "PROVIDER_KEY".into(),
+            )),
+            extra_headers: [("X-Tenant".into(), "tenant".into())].into_iter().collect(),
+            env_headers: [("X-Secret".into(), "SECRET_ENV".into())]
+                .into_iter()
+                .collect(),
+            query_params: [("tenant".into(), "private".into())].into_iter().collect(),
+            operations: [("poll".into(), Default::default())].into_iter().collect(),
+            ..Default::default()
+        };
+        set_absolute_operation_url(&mut profile, "poll", "https://poll.example/jobs/123").unwrap();
+        assert_eq!(profile.api_key, None);
+        assert_eq!(profile.env_key, None);
+        assert!(profile.extra_headers.is_empty());
+        assert!(profile.env_headers.is_empty());
+        assert!(profile.query_params.is_empty());
+        assert_eq!(profile.base_url.as_deref(), Some("https://poll.example/"));
     }
 
     #[test]
@@ -1543,5 +1864,110 @@ mod tests {
         };
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json.get("duration"), Some(&serde_json::Value::from(12)));
+    }
+
+    #[tokio::test]
+    async fn profiled_async_video_provider_creates_polls_and_downloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/videos"))
+            .and(header("x-api-key", "video-secret"))
+            .and(body_json(serde_json::json!({
+                "model": "profile-video-model",
+                "prompt": "a cat",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "job-1"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/videos/job-1"))
+            .and(header("x-api-key", "video-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "succeeded",
+                "output": format!("{}/downloads/job-1", server.uri())
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/downloads/job-1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(b"video-bytes".to_vec()),
+            )
+            .mount(&server)
+            .await;
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "replicate_video".into(),
+            base_url: Some(server.uri()),
+            model: Some("profile-video-model".into()),
+            api_key: Some("video-secret".into()),
+            auth: xai_grok_provider::ProviderAuthConfig {
+                name: "x-api-key".into(),
+                prefix: String::new(),
+                ..Default::default()
+            },
+            operations: [
+                (
+                    "create".into(),
+                    xai_grok_provider::CapabilityOperationConfig {
+                        method: "POST".into(),
+                        path: "/videos".into(),
+                        request: xai_grok_provider::RequestMapping {
+                            fields: [
+                                ("model".into(), "model".into()),
+                                ("prompt".into(), "prompt".into()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                        response: xai_grok_provider::ResponseMapping {
+                            job_id: Some("/id".into()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "poll".into(),
+                    xai_grok_provider::CapabilityOperationConfig {
+                        method: "GET".into(),
+                        path: "/videos/{job_id}".into(),
+                        response: xai_grok_provider::ResponseMapping {
+                            status: Some("/status".into()),
+                            url: Some("/output".into()),
+                            ..Default::default()
+                        },
+                        async_config: Some(xai_grok_provider::AsyncOperationConfig {
+                            poll_interval_ms: 1,
+                            timeout_secs: 2,
+                            success_statuses: vec!["succeeded".into()],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let config = VideoGenConfig::Enabled {
+            api_key: String::new(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            zdr_video_output_s3: None,
+            tier_restricted: false,
+            capability_profile: Some(profile),
+        };
+        let client = VideoGenClient::new(&config, None).unwrap();
+        let outcome = client
+            .generate_with_images("video-model", "a cat", None, None, "480p", None, vec![])
+            .await
+            .unwrap();
+        assert!(matches!(outcome, VideoOutcome::Bytes(bytes) if bytes == b"video-bytes"));
     }
 }

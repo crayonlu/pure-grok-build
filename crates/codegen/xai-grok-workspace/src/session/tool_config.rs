@@ -427,6 +427,8 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 model_override: None,
                                 edit_model_override: None,
                                 tier_restricted: false,
+                                provider: None,
+                                capability_profile: None,
                             },
                             VideoGenConfig::Enabled {
                                 api_key: token.clone(),
@@ -434,6 +436,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 extra_headers: headers.clone(),
                                 zdr_video_output_s3: None,
                                 tier_restricted: false,
+                                capability_profile: None,
                             },
                             WebSearchConfig::Enabled {
                                 api_key: token,

@@ -319,10 +319,11 @@ impl ModelsManager {
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
         auth_manager: Arc<AuthManager>,
     ) -> Result<Self, String> {
-        let has_session = auth_manager.current_or_expired().is_some();
-        let is_session_auth = auth_manager
-            .current_or_expired()
-            .is_some_and(|a| a.is_session_auth());
+        let has_session = cfg.overlay_runtime.policy().allows_session_auth()
+            && auth_manager.current_or_expired().is_some();
+        let is_session_auth = auth_manager.current_or_expired().is_some_and(|a| {
+            cfg.overlay_runtime.policy().allows_session_auth() && a.is_session_auth()
+        });
         let fetch_auth = ModelFetchAuth::resolve(&cfg.endpoints, has_session);
         let mut cached_etag = None;
         let prefetched_models = prefetched_models.or_else(|| {
@@ -581,6 +582,19 @@ impl ModelsManager {
             .get(model_id)
             .map(|e| e.info().supports_backend_search)
             .unwrap_or(false)
+    }
+
+    /// Whether the model accepts image inputs. Unknown models remain
+    /// multimodal for backward compatibility with provider catalogs that do
+    /// not publish capability metadata.
+    pub fn model_supports_vision(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_vision)
+            .unwrap_or(true)
     }
 
     pub(crate) fn model_compactions_remaining(
@@ -922,6 +936,17 @@ impl ModelsManager {
 
     /// One-shot background catalog refresh after readiness; no-op when a fresh disk cache already loaded a real catalog.
     pub fn spawn_background_refresh(&self) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .policy()
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog background refresh skipped by overlay policy");
+            return;
+        }
         self.spawn_background_refresh_inner(crate::util::config::resolve_remote_fetch_enabled());
     }
 
@@ -937,6 +962,16 @@ impl ModelsManager {
 
     /// Refresh the model catalog on every auth token refresh.
     pub fn start_auth_refresh_watcher(&self, notify: Arc<tokio::sync::Notify>) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog auth-refresh watcher skipped by overlay policy");
+            return;
+        }
         let mgr = self.clone();
         let had_catalog_at_start = self.inner.catalog.read().has_fetched_real_catalog;
         xai_grok_telemetry::unified_log::info(
@@ -1356,7 +1391,8 @@ pub(crate) use endpoint::*;
 pub(crate) use fetch::*;
 pub use fetch::{
     EarlyPrefetchHandle, EarlyPrefetchResult, start_early_prefetch,
-    start_early_prefetch_settings_only, start_early_prefetch_with_auth,
+    start_early_prefetch_for_overlay, start_early_prefetch_settings_only,
+    start_early_prefetch_with_auth, start_early_prefetch_with_auth_for_overlay,
 };
 pub(crate) use resolution::*;
 
