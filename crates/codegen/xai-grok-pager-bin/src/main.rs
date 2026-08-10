@@ -47,6 +47,24 @@ use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
 use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
+
+fn load_agent_config(raw_config: &toml::Value) -> Result<AgentConfig> {
+    let host_config = xai_grok_overlay::without_overlay(raw_config);
+    let mut config = AgentConfig::new_from_toml_cfg(&host_config)
+        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
+    });
+    Ok(config)
+}
+
+fn load_overlay_runtime() -> xai_grok_overlay_api::OverlayRuntime {
+    xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
+    })
+}
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
 /// specific args are not provided.
@@ -415,7 +433,10 @@ fn env_flag_enabled(value: &str) -> bool {
 }
 /// Blocking fetch of remote settings via the startup prefetch path.
 fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    join_early_prefetch(xai_grok_shell::agent::models::start_early_prefetch(None))
+    let overlay_runtime = load_overlay_runtime();
+    join_early_prefetch(
+        xai_grok_shell::agent::models::start_early_prefetch_for_overlay(None, &overlay_runtime),
+    )
 }
 async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
     if matches!(
@@ -516,8 +537,7 @@ async fn workspace_control(
 ) -> Result<()> {
     let raw_config = xai_grok_shell::config::load_effective_config_disk_only()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    let agent_config = load_agent_config(&raw_config)?;
     let client = connect_workspace_control(&agent_config, target).await?;
     ensure_workspace_caps(client.registration())?;
     let payload = client.send_control(command).await??;
@@ -534,8 +554,7 @@ async fn workspace_start(
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    let agent_config = load_agent_config(&raw_config)?;
     let (use_leader, _) = resolve_use_leader(
         args.leader,
         args.no_leader,
@@ -1100,7 +1119,9 @@ async fn run_agent_command(
             }
         }
     }
-    let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
+    let overlay_runtime = load_overlay_runtime();
+    let early_prefetch =
+        xai_grok_shell::agent::models::start_early_prefetch_for_overlay(None, &overlay_runtime);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
@@ -1127,8 +1148,7 @@ async fn run_agent_command(
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
-    let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+    let mut agent_config = load_agent_config(&raw_config)?;
     agent_config.default_model_override = agent_args.model.clone();
     agent_config.reasoning_effort_override = agent_args
         .reasoning_effort
@@ -2040,8 +2060,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_agent_config(&config)?;
                 return xai_grok_pager::models::list_available_models(&agent_config).await;
             }
             Command::Leader(leader_args) => {
@@ -2054,8 +2073,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_agent_config(&config)?;
                 return xai_grok_pager::worktree_cmd::run(worktree_args, &agent_config).await;
             }
             Command::DiskUsage(disk_usage_args) => {
@@ -2073,8 +2091,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_agent_config(&config)?;
                 return xai_grok_pager::sessions_cmd::run(sessions_args, &agent_config).await;
             }
             Command::Share(ref share_args) => {
@@ -2082,8 +2099,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_agent_config(&config)?;
                 return xai_grok_pager::share_cmd::run(share_args, &agent_config).await;
             }
             Command::Export(export_args) => {
@@ -2095,8 +2111,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_agent_config(&config)?;
                 return xai_grok_pager::trace_cmd::run(trace_args, &agent_config).await;
             }
             Command::Memory(memory_args) => {
@@ -2134,8 +2149,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let config = load_agent_config(&config)?;
                 xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
@@ -2144,8 +2158,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let config = load_agent_config(&config)?;
                 xai_grok_shell::auth::run_cli_logout(&config)?;
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
@@ -2344,6 +2357,15 @@ fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
         return false;
     }
     if no_auto_update_flag {
+        return false;
+    }
+    let auto_updates_allowed = {
+        let runtime = load_overlay_runtime();
+        let policy = runtime.policy();
+        !policy.mode.is_open() || policy.updates.allows_implicit()
+    };
+    if !auto_updates_allowed {
+        tracing::debug!("automatic updates disabled by overlay policy");
         return false;
     }
     !std::env::var_os("GROK_DISABLE_AUTOUPDATER")

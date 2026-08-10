@@ -7,7 +7,7 @@
 # the stable installer cannot accidentally break enterprise deployments.
 #
 # Auth: GROK_DEPLOYMENT_KEY (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_BIN_DIR, GROK_PROXY_URL
+# Env: GROK_BIN_DIR, GROK_PROXY_URL, GROK_CLI_BASE_URL (self-hosted release host)
 #
 # Usage:
 #   curl -fsSL https://x.ai/cli/enterprise-install.sh | bash            # latest enterprise
@@ -164,18 +164,23 @@ mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 platform="${os}-${arch}"
 CHANNEL="enterprise"
 
-# Pick a working BASE_URL: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no explicit TARGET was passed, so the happy path costs zero
-# extra HTTP requests.
-if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
-probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
-if [ -n "$probe_result" ]; then
-    BASE_URL="$BASE_URL_PRIMARY"
-else
-    echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
-    BASE_URL="$BASE_URL_FALLBACK"
+# Pick a working BASE_URL. An explicit self-hosted base is authoritative;
+# otherwise try the x.ai CDN and fall back to direct GCS.
+configured_base_url="$(printf '%s' "${GROK_CLI_BASE_URL:-}" | awk '{$1=$1; print}')"
+if [ -n "$configured_base_url" ]; then
+    BASE_URL="${configured_base_url%/}"
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version from ${BASE_URL}..." >&2; fi
     probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+else
+    if [ -z "$TARGET" ]; then echo "Fetching latest ${CHANNEL} version..." >&2; fi
+    probe_result=$(download_file "${BASE_URL_PRIMARY}/${CHANNEL}" 2>/dev/null) || true
+    if [ -n "$probe_result" ]; then
+        BASE_URL="$BASE_URL_PRIMARY"
+    else
+        echo "Note: ${BASE_URL_PRIMARY} unreachable, falling back to direct GCS." >&2
+        BASE_URL="$BASE_URL_FALLBACK"
+        probe_result=$(download_file "${BASE_URL}/${CHANNEL}" 2>/dev/null) || true
+    fi
 fi
 
 if [ -n "$TARGET" ]; then
@@ -232,7 +237,7 @@ fi
 if [ "$os" = "windows" ]; then
     # Symlinks require Developer Mode on Windows; copy instead.
     # If the exe is locked by a running process, rename it aside then retry.
-    for bin_name in grok.exe agent.exe; do
+    for bin_name in grok.exe; do
         rm -f "$BIN_DIR/$bin_name.old" 2>/dev/null || true  # stale backup from prior update
         if ! cp -f "$binary_path" "$BIN_DIR/$bin_name" 2>/dev/null; then
             mv -f "$BIN_DIR/$bin_name" "$BIN_DIR/$bin_name.old" 2>/dev/null || true
@@ -244,12 +249,15 @@ if [ "$os" = "windows" ]; then
             fi
         fi
     done
-    echo "  Binary installed to $BIN_DIR/grok.exe and $BIN_DIR/agent.exe." >&2
+    # Remove the legacy top-level alias; only `grok` is supported now.
+    rm -f "$BIN_DIR/agent.exe" 2>/dev/null || true
+    echo "  Binary installed to $BIN_DIR/grok.exe." >&2
 else
     chmod +x "$binary_path"
     ln -sf "$binary_path" "$BIN_DIR/grok"
-    ln -sf "$binary_path" "$BIN_DIR/agent"
-    echo "  Binary linked to $BIN_DIR/grok and $BIN_DIR/agent." >&2
+    # Remove the legacy top-level alias; only `grok` is supported now.
+    rm -f "$BIN_DIR/agent" 2>/dev/null || true
+    echo "  Binary linked to $BIN_DIR/grok." >&2
 fi
 
 # Generate shell completions (best-effort)
@@ -326,6 +334,22 @@ path_has_dir() {
     case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
 }
 
+remove_legacy_agent_link() {
+    local candidate="$1" legacy_target
+    if [ -L "$candidate/agent" ]; then
+        legacy_target="$(readlink "$candidate/agent" 2>/dev/null || true)"
+        case "$legacy_target" in
+            "$BIN_DIR/agent"|*/.grok/bin/agent) rm -f "$candidate/agent" 2>/dev/null || true ;;
+        esac
+    fi
+}
+
+# Clean old system-level aliases even when the managed bin directory is
+# already on PATH (the branch below may not create a new symlink).
+for candidate in "$HOME/.local/bin" "/usr/local/bin"; do
+    remove_legacy_agent_link "$candidate"
+done
+
 # Try to symlink into a directory already on PATH so grok works immediately
 # without restarting the shell. Candidate dirs in preference order.
 SYMLINK_CREATED=""
@@ -333,10 +357,9 @@ if [ "$os" != "windows" ] && ! path_has_dir "$BIN_DIR"; then
     for candidate in "$HOME/.local/bin" "/usr/local/bin"; do
         if path_has_dir "$candidate" && [ -d "$candidate" ] && [ -w "$candidate" ]; then
             ln -sf "$BIN_DIR/grok" "$candidate/grok"
-            ln -sf "$BIN_DIR/agent" "$candidate/agent"
+            remove_legacy_agent_link "$candidate"
             SYMLINK_CREATED="$candidate"
             echo "  Symlinked $candidate/grok -> $BIN_DIR/grok" >&2
-            echo "  Symlinked $candidate/agent -> $BIN_DIR/agent" >&2
             break
         fi
     done
@@ -417,11 +440,11 @@ fi
 
 echo "" >&2
 if path_has_dir "$BIN_DIR" || [ -n "$SYMLINK_CREATED" ]; then
-    echo "Run 'grok' or 'agent' to get started!" >&2
+    echo "Run 'grok' to get started!" >&2
 elif [ -n "$config_file" ]; then
-    echo "Restart your terminal, then run 'grok' or 'agent' to get started!" >&2
+    echo "Restart your terminal, then run 'grok' to get started!" >&2
 else
-    echo "Add $BIN_DIR to your PATH, then run 'grok' or 'agent' to get started:" >&2
+    echo "Add $BIN_DIR to your PATH, then run 'grok' to get started:" >&2
     echo '  export PATH="$HOME/.grok/bin:$PATH"' >&2
 fi
 

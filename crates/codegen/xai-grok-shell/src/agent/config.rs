@@ -1328,6 +1328,10 @@ pub struct ShellEnvironmentPolicyKnownKeys {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub features: Features,
+    /// Resolved distribution overlay. This startup snapshot is consumed by
+    /// hosts and adapters; the upstream config schema stays provider-neutral.
+    #[serde(skip)]
+    pub overlay_runtime: xai_grok_overlay_api::OverlayRuntime,
     /// `[goal]` section: canonical `/goal` configuration. See [`GoalConfig`].
     #[serde(default)]
     pub goal: GoalConfig,
@@ -1369,6 +1373,14 @@ pub struct Config {
     pub shell_environment_policy: ShellEnvironmentPolicyKnownKeys,
     #[serde(default)]
     pub endpoints: EndpointsConfig,
+    /// Legacy/provider-specific image generation configuration. The endpoint
+    /// and credential are independent from the chat model.
+    #[serde(default, skip_serializing)]
+    pub image_gen:
+        Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
+    /// Provider-neutral capability profiles consumed by search/media adapters.
+    #[serde(default)]
+    pub capabilities: xai_grok_config_types::CapabilityProvidersConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     /// Session behavior configuration.
@@ -1789,6 +1801,10 @@ impl Default for Config {
         let endpoints = EndpointsConfig::default();
         let mut cfg = Self {
             features: Features::default(),
+            // Keep the host config API upstream-compatible.  The fork's
+            // composition roots load the distribution overlay explicitly and
+            // replace this value with Open when no override is configured.
+            overlay_runtime: xai_grok_overlay_api::OverlayRuntime::default(),
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
@@ -1804,6 +1820,8 @@ impl Default for Config {
             toolset: ShellToolsetConfig::default(),
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
+            image_gen: None,
+            capabilities: xai_grok_config_types::CapabilityProvidersConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
@@ -2157,6 +2175,10 @@ impl Config {
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
         config.apply_env_overrides();
+        // The distribution loader resolves `[overlay]` at the composition
+        // root. Keep the host parser's default here so upstream callers that
+        // instantiate Config directly preserve upstream behavior.
+        config.overlay_runtime = xai_grok_overlay_api::OverlayRuntime::default();
         Ok(config)
     }
     /// Populate trust-independent `#[serde(skip)]` subagent base fields.
@@ -3802,6 +3824,10 @@ struct DefaultModelJson {
     supported_in_api: bool,
     #[serde(default)]
     supports_backend_search: bool,
+    #[serde(default = "default_true")]
+    supports_vision: bool,
+    #[serde(default = "default_true")]
+    supports_parallel_tool_calls: bool,
     #[serde(default)]
     compactions_remaining: Option<CompactionsRemaining>,
     #[serde(default)]
@@ -3866,6 +3892,8 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 supports_reasoning_effort: m.supports_reasoning_effort,
                 reasoning_efforts: m.reasoning_efforts,
                 supports_backend_search: m.supports_backend_search,
+                supports_vision: m.supports_vision,
+                supports_parallel_tool_calls: m.supports_parallel_tool_calls,
                 compactions_remaining: m.compactions_remaining,
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
@@ -3973,6 +4001,13 @@ pub struct ModelEntryConfig {
     pub supported_in_api: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_backend_search: bool,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_vision: bool,
+    /// Whether the model may emit multiple tool calls that the agent runs in
+    /// parallel. Defaults to `true`; set to `false` for models whose tool
+    /// calls must execute one at a time (in model-emitted order).
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_parallel_tool_calls: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -4054,6 +4089,9 @@ pub struct ConfigModelOverride {
     pub supports_reasoning_effort: Option<bool>,
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: Option<bool>,
+    pub supports_vision: Option<bool>,
+    /// Override for `ModelInfo::supports_parallel_tool_calls`.
+    pub supports_parallel_tool_calls: Option<bool>,
     /// Aliases must be registered in `config_model_override_parse::ALIASES`;
     /// serde rejects a table that contains both spellings otherwise.
     #[serde(alias = "send_compactions_remaining")]
@@ -4142,6 +4180,12 @@ impl ConfigModelOverride {
         }
         if let Some(v) = self.supports_backend_search {
             entry.info.supports_backend_search = v;
+        }
+        if let Some(v) = self.supports_vision {
+            entry.info.supports_vision = v;
+        }
+        if let Some(v) = self.supports_parallel_tool_calls {
+            entry.info.supports_parallel_tool_calls = v;
         }
         if self.compactions_remaining.is_some() {
             entry.info.compactions_remaining = self.compactions_remaining;
@@ -4235,6 +4279,14 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_efforts: Vec<ReasoningEffortOption>,
     pub supports_backend_search: bool,
+    #[serde(default = "default_true")]
+    pub supports_vision: bool,
+    /// Whether the agent may run this model's tool calls concurrently.
+    /// Defaults to `true`; models that must execute tools one at a time set
+    /// this to `false`, in which case `execute_tool_calls_batch` drives the
+    /// prepared calls sequentially in model-emitted order.
+    #[serde(default = "default_true")]
+    pub supports_parallel_tool_calls: bool,
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     pub compactions_remaining: Option<CompactionsRemaining>,
     /// Per-model config for the `x-compaction-at` header; `None` disables it.
@@ -4281,6 +4333,8 @@ impl ModelInfo {
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -4318,6 +4372,8 @@ impl ModelInfo {
             supports_reasoning_effort: entry.supports_reasoning_effort,
             reasoning_efforts: entry.reasoning_efforts.clone(),
             supports_backend_search: entry.supports_backend_search,
+            supports_vision: entry.supports_vision,
+            supports_parallel_tool_calls: entry.supports_parallel_tool_calls,
             compactions_remaining: entry.compactions_remaining,
             compaction_at_tokens: entry.compaction_at_tokens,
             show_model_fingerprint: entry.show_model_fingerprint,
@@ -4427,6 +4483,9 @@ impl std::ops::Deref for ModelEntry {
 }
 fn is_false(v: &bool) -> bool {
     !v
+}
+fn is_true(v: &bool) -> bool {
+    *v
 }
 fn default_true() -> bool {
     true
@@ -5074,6 +5133,8 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -5212,6 +5273,7 @@ pub(crate) fn sampling_config_for_model(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: info.supports_backend_search,
+        supports_vision: info.supports_vision,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
@@ -5287,6 +5349,8 @@ fn resolve_hidden_default_web_search_sampling_config(
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -5689,6 +5753,38 @@ reasoning_effort = "low"
         assert_eq!(cfg.toolset.bash.timeout_secs, Some(123.0));
         assert_eq!(cfg.toolset.ask_user_question.timeout_enabled, Some(false));
         assert_eq!(cfg.toolset.ask_user_question.timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn overlay_defaults_to_upstream_without_overlay_table() {
+        let raw_config = toml::Value::Table(Default::default());
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+        assert_eq!(
+            cfg.overlay_runtime.policy().mode,
+            xai_grok_overlay_api::OverlayMode::Upstream
+        );
+        assert_eq!(
+            cfg.overlay_runtime.auth_policy(),
+            xai_grok_overlay_api::AuthPolicy::Inherited
+        );
+    }
+
+    #[test]
+    fn host_config_does_not_resolve_overlay_namespace() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [overlay]
+            mode = "open"
+            "#,
+        )
+        .expect("overlay config should parse");
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+        assert_eq!(
+            cfg.overlay_runtime.policy().mode,
+            xai_grok_overlay_api::OverlayMode::Upstream
+        );
     }
     #[test]
     fn parses_toolset_bash_float_timeout() {
@@ -6504,6 +6600,8 @@ reasoning_effort = "low"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
@@ -7529,6 +7627,8 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7688,6 +7788,8 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8139,6 +8241,8 @@ reasoning_effort = "low"
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: true,
+            supports_parallel_tool_calls: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -11988,6 +12092,8 @@ default = "grok-4.5"
                 supports_reasoning_effort: false,
                 reasoning_efforts: Vec::new(),
                 supports_backend_search: false,
+                supports_vision: true,
+                supports_parallel_tool_calls: true,
                 compactions_remaining: None,
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,

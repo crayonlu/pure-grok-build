@@ -2003,6 +2003,15 @@ impl MvpAgent {
             maybe_sync_bundle_to_root,
         };
         use std::sync::atomic::Ordering;
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+        {
+            tracing::debug!("proactive bundle sync disabled by overlay policy");
+            return;
+        }
         let am = self.auth_manager.clone();
         let deployment_key = self.deployment_key();
         if !has_bundle_credentials(Some(&am), deployment_key.as_deref()) {
