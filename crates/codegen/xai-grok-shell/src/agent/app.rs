@@ -2,9 +2,7 @@ use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::init::{bootstrap, exit_on_config_error};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
-#[cfg(test)]
-use crate::auth::AuthMode;
-use crate::auth::{AuthManager, GrokAuth, GrokComConfig, run_auth_flow};
+use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig, run_auth_flow};
 use crate::leader::protocol::InternalMethod;
 use crate::util::grok_home;
 use agent_client_protocol as acp;
@@ -665,6 +663,99 @@ fn spawn_leader_relay(
         *slot_for_task.borrow_mut() = Some(handle);
     });
 }
+
+/// Migrate a legacy devbox WebLogin token to fresh OIDC in place (mint, persist,
+/// drop the legacy scope). No-op outside a devbox or for non-WebLogin / `None`.
+/// On mint/save failure, returns the existing token so the leader still starts.
+async fn migrate_devbox_auth_if_legacy(
+    auth: Option<GrokAuth>,
+    agent_config: &AgentConfig,
+) -> Option<GrokAuth> {
+    let auth = auth?;
+    if !crate::auth::devbox_login::is_devbox_environment() || auth.auth_mode != AuthMode::WebLogin {
+        return Some(auth);
+    }
+
+    info!("Devbox legacy auth detected, attempting migration to OIDC");
+    xai_grok_telemetry::unified_log::info(
+        "devbox legacy auth migration: starting",
+        None,
+        Some(serde_json::json!({
+            "user_id": auth.user_id,
+            "auth_mode": format!("{:?}", auth.auth_mode),
+        })),
+    );
+
+    // save + remove_scope are two non-atomic writes to auth.json (no lock). Safe
+    // at startup: no concurrent writer yet, and `lookup_auth` prefers the primary
+    // scope if a reader sees the intermediate state.
+    let migration_auth_manager = agent_config.create_auth_manager();
+
+    let mint = crate::auth::devbox_login::mint_devbox_auth(&migration_auth_manager);
+    let on_fail = |reason: String| {
+        tracing::warn!(%reason, "devbox legacy auth migration failed, continuing with legacy auth");
+        xai_grok_telemetry::unified_log::error(
+            "devbox legacy auth migration failed",
+            None,
+            Some(serde_json::json!({ "reason": reason })),
+        );
+    };
+    let budget = xai_grok_telemetry::startup::ReadinessBudget::new(
+        crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+    );
+    let minted = budget
+        .run(
+            xai_grok_telemetry::startup::StartupPhase::ManagedPolicy,
+            mint,
+        )
+        .await;
+    let new_auth = match minted {
+        Some(Ok(new_auth)) => new_auth,
+        Some(Err(e)) => {
+            on_fail(format!("devbox login helper call failed: {e}"));
+            return Some(auth);
+        }
+        None => {
+            on_fail(format!(
+                "mint timed out after {}s",
+                crate::http::STARTUP_AUTH_REFRESH_TIMEOUT.as_secs()
+            ));
+            return Some(auth);
+        }
+    };
+    match migration_auth_manager
+        .save_without_enrichment(new_auth)
+        .await
+    {
+        Ok(saved_auth) => {
+            if let Err(e) = migration_auth_manager.remove_scope(crate::auth::LEGACY_AUTH_SCOPE) {
+                tracing::warn!(error = ?e, "Failed to remove legacy auth scope entry (non-fatal)");
+            }
+            xai_grok_telemetry::unified_log::info(
+                "devbox legacy auth migration: succeeded",
+                None,
+                Some(serde_json::json!({
+                    "user_id": saved_auth.user_id,
+                    "has_refresh_token": saved_auth.refresh_token.is_some(),
+                    "expires_at": saved_auth.expires_at.map(|e| e.to_rfc3339()),
+                    "auth_mode": format!("{:?}", saved_auth.auth_mode),
+                })),
+            );
+            info!(user_id = %saved_auth.user_id, "Devbox legacy auth migrated to OIDC successfully");
+            Some(saved_auth)
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "devbox legacy auth migration: failed to save new auth, continuing with legacy");
+            xai_grok_telemetry::unified_log::error(
+                "devbox legacy auth migration: save failed",
+                None,
+                Some(serde_json::json!({ "error": e.to_string() })),
+            );
+            Some(auth)
+        }
+    }
+}
+
 /// Everything needed to arm the leader's grok.com relay *after* startup.
 ///
 /// A leader that boots without auth used to disable the relay forever — the
