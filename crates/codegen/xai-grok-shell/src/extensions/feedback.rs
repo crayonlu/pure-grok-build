@@ -13,7 +13,7 @@ use std::sync::Arc;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
 
-use super::{ExtResult, parse_params};
+use super::{ExtResult, parse_params, require_overlay_service};
 use crate::agent::MvpAgent;
 use crate::session::persistence::{LocalFeedbackEntry, UserFeedbackEntry};
 use crate::session::{
@@ -90,6 +90,11 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::Feedback,
+        args.method.as_ref(),
+    )?;
     if !agent.cfg.borrow().is_feedback_enabled() {
         return Err(acp::Error::internal_error().data(
             "Feedback is disabled. To enable, set GROK_FEEDBACK_ENABLED=true or \
@@ -357,6 +362,11 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
 /// - `x.ai/review/comment`: record a new inline code comment to cloud storage
 /// - `x.ai/review/comment/delete`: record a tombstone event for a deleted comment
 async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::TraceUpload,
+        args.method.as_ref(),
+    )?;
     match args.method.as_ref() {
         "x.ai/review/comment" => {
             let request: CommentRequest = parse_params(args)?;

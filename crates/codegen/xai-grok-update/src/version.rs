@@ -26,38 +26,89 @@ pub(crate) const CLI_BASE_URL_FALLBACK: &str =
 /// download, in-app updater) try each in turn and stop at the first success.
 pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_FALLBACK];
 
-/// [`CLI_BASE_URLS`] with a test seam: `GROK_CLI_BASE_URL` points fetches
-/// and downloads at one base (env-seam family of `GROK_INSTALLER`).
-/// Loopback-only: downloads are verified by a smoke test, not a checksum,
-/// so an arbitrary redirect base would be an install-hijack vector.
-pub(crate) fn cli_base_urls() -> Vec<String> {
-    if let Ok(base) = std::env::var("GROK_CLI_BASE_URL") {
-        let base = base.trim();
-        if is_loopback_base(base) {
-            return vec![base.to_owned()];
-        }
-        if !base.is_empty() {
-            tracing::warn!("GROK_CLI_BASE_URL ignored: only loopback bases are honored");
-        }
+/// Resolve the configured release repository without baking a distribution
+/// into the updater.  Environment overrides are useful for packaged builds;
+/// `[overlay.update_source]` is the persistent configuration path.
+pub fn effective_release_repo() -> Option<String> {
+    let runtime = xai_grok_overlay::load_runtime().ok();
+    let open_mode = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.policy().mode.is_open());
+    if open_mode {
+        return runtime
+            .and_then(|runtime| runtime.update_source().cloned())
+            .filter(|source| source.kind == "github_release")
+            .map(|source| source.location);
     }
-    CLI_BASE_URLS.iter().map(|s| (*s).to_owned()).collect()
+    if let Some(repo) = std::env::var("GROK_UPDATE_REPO")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(repo);
+    }
+    runtime
+        .and_then(|runtime| runtime.update_source().cloned())
+        .filter(|source| source.kind == "github_release")
+        .map(|source| source.location)
+        .or_else(|| Some(GH_RELEASE_REPO.to_owned()))
 }
 
-/// Parsed, not prefix-matched: `http://127.0.0.1:9@evil.com` starts with a
-/// loopback prefix but its host is `evil.com` (userinfo trick).
-fn is_loopback_base(base: &str) -> bool {
-    let Ok(u) = url::Url::parse(base) else {
-        return false;
-    };
-    if u.scheme() != "http" || !u.username().is_empty() || u.password().is_some() {
-        return false;
+/// Resolve configured binary/channel-pointer bases.  A base-url update source
+/// is deliberately treated as a single source; the built-in xAI URLs remain a
+/// compatibility fallback only when no overlay source is configured.
+pub fn effective_cli_base_urls() -> Vec<String> {
+    let runtime = xai_grok_overlay::load_runtime().ok();
+    let open_mode = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.policy().mode.is_open());
+    if open_mode {
+        return runtime
+            .and_then(|runtime| runtime.update_source().cloned())
+            .filter(|source| source.kind == "base_url")
+            .map(|source| vec![source.location])
+            .unwrap_or_default();
     }
-    match u.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(d)) => d == "localhost",
-        None => false,
+    if let Some(base_url) = std::env::var("GROK_CLI_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return vec![base_url];
     }
+    if let Some(source) = runtime.and_then(|runtime| runtime.update_source().cloned())
+        && source.kind == "base_url"
+    {
+        return vec![source.location];
+    }
+    CLI_BASE_URLS
+        .iter()
+        .map(|base| (*base).to_owned())
+        .collect()
+}
+
+/// Whether an installer has an explicitly configured source in Open mode.
+/// Upstream/xai-compat modes retain their historical built-in sources; the
+/// provider-neutral mode never silently falls back to xAI distribution URLs.
+pub fn update_source_configured_for(installer: &str) -> bool {
+    let runtime = xai_grok_overlay::load_runtime().ok();
+    if runtime
+        .as_ref()
+        .is_some_and(|runtime| !runtime.policy().mode.is_open())
+    {
+        return true;
+    }
+    match installer {
+        "gh-release" => effective_release_repo().is_some(),
+        "internal" => !effective_cli_base_urls().is_empty(),
+        _ => false,
+    }
+}
+
+fn effective_release_repo_or_default() -> anyhow::Result<String> {
+    effective_release_repo().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no GitHub release update source is configured; set GROK_UPDATE_REPO or [overlay.update_source]"
+        )
+    })
 }
 
 /// Minimal configuration the update system needs from the environment.
@@ -222,11 +273,16 @@ pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
 }
 
 async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
+    let repo = effective_release_repo_or_default()?;
+    fetch_gh_release_latest_from_repo(exclude_pre, &repo).await
+}
+
+async fn fetch_gh_release_latest_from_repo(exclude_pre: bool, repo: &str) -> Result<String> {
     let mut args = vec![
         "release",
         "list",
         "--repo",
-        GH_RELEASE_REPO,
+        repo,
         "--limit",
         "1",
         "--exclude-drafts",
@@ -253,7 +309,7 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
     // Tags are formatted as "v0.1.141", strip the leading "v"
     let version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
     if version.is_empty() {
-        anyhow::bail!("No releases found in {}", GH_RELEASE_REPO);
+        anyhow::bail!("No releases found in {}", repo);
     }
     Ok(version)
 }
@@ -272,8 +328,11 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
 /// backoff (1s, 2s, 4s) on transient failures before falling through to the
 /// next base.
 pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
+    fetch_gcs_version_from_bases(channel, &effective_cli_base_urls()).await
+}
+
+async fn fetch_gcs_version_from_bases(channel: &str, bases: &[String]) -> Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
-    let bases = cli_base_urls();
     for (i, base) in bases.iter().enumerate() {
         match fetch_gcs_version_from_base(channel, base).await {
             Ok(v) => return Ok(v),
@@ -378,6 +437,11 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
 /// written (e.g. auto-update should only cache after a successful install or
 /// when no update is needed).
 pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
+    if !update_source_configured_for(installer) {
+        anyhow::bail!(
+            "no update source is configured for `{installer}` in Open mode; configure [overlay.update_source] or the matching GROK_* override"
+        );
+    }
     match installer {
         "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
         "gh-release" => fetch_gh_release_version(&config.channel).await,
@@ -525,8 +589,9 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
 /// (~30 min). This keeps startup and post-install paths fast.
 pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
     tokio::time::timeout(Duration::from_millis(500), async {
-        for base in cli_base_urls() {
-            if let Ok(v) = fetch_gcs_channel_pointer("stable", &base).await {
+        let bases = effective_cli_base_urls();
+        for base in &bases {
+            if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {
                 return Some(v);
             }
         }
@@ -604,20 +669,6 @@ pub fn channel_label() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn loopback_base_rejects_userinfo_and_non_loopback() {
-        use super::is_loopback_base;
-        assert!(is_loopback_base("http://127.0.0.1:8971"));
-        assert!(is_loopback_base("http://localhost:8971"));
-        assert!(is_loopback_base("http://[::1]:8971"));
-        // Prefix-check bypass vectors.
-        assert!(!is_loopback_base("http://127.0.0.1:9@evil.com"));
-        assert!(!is_loopback_base("http://localhost.evil.com:80"));
-        assert!(!is_loopback_base("https://x.ai/cli"));
-        assert!(!is_loopback_base("http://192.168.1.1:80"));
-        assert!(!is_loopback_base(""));
-    }
-
     use super::*;
 
     /// Verifies that a future `checked_at` timestamp (e.g. from clock skew or

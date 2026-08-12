@@ -91,6 +91,39 @@ pub fn is_xai_api_url(url: &str) -> bool {
 /// Like [`is_xai_api_url`], but requires `https` on every arm, so a
 /// session bearer is never attached to a cleartext endpoint, including loopback
 /// (a co-located process could otherwise read a token sent to `http://localhost`).
+/// True when url belongs to a first-party xAI remote service.
+///
+/// This deliberately differs from is_xai_api_url: the latter treats
+/// loopback hosts as cli-chat-proxy for legacy auth/test compatibility, while
+/// an explicitly configured local provider is a valid Open-mode endpoint and
+/// must not be rejected as first-party. Use this helper for distribution
+/// policy decisions, not for the host's historical auth heuristics.
+pub fn is_first_party_remote_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || parsed
+            .host()
+            .is_some_and(|host| matches!(host, url::Host::Ipv4(ip) if ip.is_loopback()))
+        || parsed
+            .host()
+            .is_some_and(|host| matches!(host, url::Host::Ipv6(ip) if ip.is_loopback()))
+    {
+        return false;
+    }
+    host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "grok.com"
+        || host.ends_with(".grok.com")
+        || is_prod_cli_chat_proxy_url(url)
+}
+
 pub fn is_xai_api_bearer_url(url: &str) -> bool {
     is_xai_api_url_impl(url, true)
 }
@@ -344,6 +377,17 @@ mod tests {
         assert!(!is_xai_api_url(""));
         assert!(is_xai_api_url("http://api.x.ai/v1"));
         assert!(is_xai_api_url("http://localhost:11434/v1"));
+    }
+    #[test]
+    fn test_is_first_party_remote_url_excludes_loopback() {
+        assert!(is_first_party_remote_url("https://api.x.ai/v1"));
+        assert!(is_first_party_remote_url("https://grok.com/v1"));
+        assert!(is_first_party_remote_url(
+            "https://cli-chat-proxy.grok.com/v1"
+        ));
+        assert!(!is_first_party_remote_url("http://localhost:11434/v1"));
+        assert!(!is_first_party_remote_url("http://127.0.0.1:8080/v1"));
+        assert!(!is_first_party_remote_url("https://embed.example/v1"));
     }
     #[test]
     fn test_is_xai_api_bearer_url() {

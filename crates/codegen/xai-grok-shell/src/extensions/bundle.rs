@@ -3,7 +3,7 @@
 //! These endpoints operate on the on-disk bundled cache only. Sync updates the
 //! cache for future agent construction / future conversations; it does not live
 //! reload the currently running `MvpAgent` instance.
-use super::{ExtResult, parse_params, to_ext_response};
+use super::{ExtResult, parse_params, require_overlay_service, to_ext_response};
 use crate::agent::MvpAgent;
 use crate::bundle::{self, BundleManifest};
 use crate::remote::{FetchedBundle, fetch_bundle};
@@ -107,6 +107,11 @@ pub struct EntryGetResult {
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/bundle/sync" => {
+            require_overlay_service(
+                agent,
+                xai_grok_overlay_api::ServiceKind::ManagedConfig,
+                args.method.as_ref(),
+            )?;
             let req: BundleSyncRequest = parse_params(args)?;
             to_ext_response(sync_bundle(agent, req).await)
         }

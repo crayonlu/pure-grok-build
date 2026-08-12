@@ -833,6 +833,35 @@ impl SessionActor {
         .map_err(|e| {
             acp::Error::internal_error().data(format!("failed to create session dir: {e}"))
         })?;
+        if !self.supports_vision.get() {
+            let persisted =
+                crate::session::image_describe::persist_user_images(&session_dir, images).map_err(
+                    |e| {
+                        acp::Error::internal_error()
+                            .data(format!("failed to save user images to assets dir: {e}"))
+                    },
+                )?;
+            let image_paths: Vec<String> = persisted
+                .iter()
+                .map(|p| p.path.to_string_lossy().into_owned())
+                .collect();
+            let note = format!(
+                "The user attached {} image(s) to this message, but the active model does not \
+                 support vision so they were not transcribed. The images were saved to the \
+                 workspace paths listed below and can be inspected with a vision-capable model \
+                 or a text-extraction tool.",
+                image_paths.len(),
+            );
+            let mut parts = Vec::with_capacity(3);
+            parts.push(note);
+            if let Some(block) =
+                crate::session::image_describe::render_image_files_block(&image_paths)
+            {
+                parts.push(block);
+            }
+            parts.push(original_user_message);
+            return Ok(parts.join("\n\n"));
+        }
         let persisted = crate::session::image_describe::persist_user_images(&session_dir, images)
             .map_err(|e| {
             acp::Error::internal_error()
