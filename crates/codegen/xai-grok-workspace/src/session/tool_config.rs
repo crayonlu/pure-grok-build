@@ -436,6 +436,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
                                 extra_headers: headers.clone(),
                                 zdr_video_output_s3: None,
                                 tier_restricted: false,
+                                zdr_restricted: false,
                                 capability_profile: None,
                             },
                             WebSearchConfig::Enabled {

@@ -2415,6 +2415,7 @@ impl MvpAgent {
                 extra_headers: profile.extra_headers.clone(),
                 zdr_video_output_s3: None,
                 tier_restricted: false,
+                zdr_restricted: false,
                 capability_profile: Some(profile),
             };
         }
@@ -2434,9 +2435,10 @@ impl MvpAgent {
             .then(|| cfg.zdr_video_output_s3.clone())
             .flatten()
             .filter(|s3| s3.is_valid());
-        if cfg.disable_zdr_incompatible_tools && zdr_video_output_s3.is_none() {
-            tracing::info!("video_gen disabled by tools.disable_zdr_incompatible_tools");
-            return VideoGenConfig::Disabled;
+        let zdr_restricted = cfg.disable_zdr_incompatible_tools
+            && zdr_video_output_s3.is_none();
+        if zdr_restricted {
+            tracing::info!("video_gen zdr-restricted by tools.disable_zdr_incompatible_tools");
         }
         let base_url = cfg.endpoints.xai_api_base_url.clone();
         let version = cfg
@@ -2458,6 +2460,7 @@ impl MvpAgent {
             extra_headers: headers,
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
             tier_restricted,
+            zdr_restricted,
             capability_profile: None,
         }
     }
@@ -3829,9 +3832,10 @@ impl MvpAgent {
             spawn_upload_task(
                 "harness_trace_turn",
                 async move {
-                    let session_state = build_chat_history_session_state(
-                        &capture.messages,
-                    );
+                    let (session_state, capture) = build_chat_history_then_move_capture(
+                            capture,
+                        )
+                        .await;
                     futures::join!(
                     upload_metadata(&ctx, metadata),
                     upload_turn_messages(&ctx, capture, UploadWait::Confirm),

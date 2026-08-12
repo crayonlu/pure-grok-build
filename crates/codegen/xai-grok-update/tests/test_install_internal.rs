@@ -19,8 +19,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{reset_home, test_home};
+use xai_grok_telemetry::events::CliUpdateErrorKind;
 use xai_grok_update::UpdateConfig;
-use xai_grok_update::auto_update::{install_internal_from_base, install_internal_from_bases};
+use xai_grok_update::auto_update::{
+    classify_install_error, install_internal_from_base, install_internal_from_bases,
+};
 
 fn host_platform() -> String {
     let os = if cfg!(target_os = "macos") {
@@ -332,6 +335,8 @@ async fn install_internal_fails_on_grok_binary_404() {
         .unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("Download failed"), "msg: {msg}");
+    // A real download failure classifies as Download end to end.
+    assert_eq!(classify_install_error(&err), CliUpdateErrorKind::Download);
 }
 
 #[tokio::test]
@@ -607,4 +612,48 @@ async fn install_internal_from_bases_propagates_last_error_when_all_fail() {
     .unwrap_err();
     let msg = format!("{err:#}");
     assert!(msg.contains("Download failed"), "msg: {msg}");
+}
+
+/// Regression: a local failure after a successful download (sabotaged
+/// `agent` swap) must fail the install immediately — the fallback base must
+/// never be contacted for a pointless re-download.
+#[tokio::test]
+#[serial]
+async fn install_internal_from_bases_does_not_redownload_on_local_swap_failure() {
+    let _ = test_home();
+    reset_home();
+    let platform = host_platform();
+
+    let primary = mount_gcs("0.1.181", &platform).await;
+    let fallback = mount_gcs("0.1.181", &platform).await;
+    let cfg = make_config("stable");
+
+    let home = test_home();
+    let bin_dir = home.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    // Sabotage activation: agent as a non-empty dir fails the swap's
+    // rollback capture (read_link on a directory) before any rename.
+    let agent_dir = bin_dir.join("agent");
+    std::fs::create_dir(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("blocker"), b"x").unwrap();
+
+    let err = install_internal_from_bases(
+        Some("0.1.181"),
+        &cfg,
+        &[primary.uri().as_str(), fallback.uri().as_str()],
+    )
+    .await
+    .expect_err("swap failure must fail the install");
+    // A real activation failure classifies as Activate end to end.
+    assert_eq!(classify_install_error(&err), CliUpdateErrorKind::Activate);
+
+    let fallback_requests = fallback
+        .received_requests()
+        .await
+        .expect("request recording is enabled on MockServer::start()");
+    assert!(
+        fallback_requests.is_empty(),
+        "local swap failure must not fall through to the next base: {} request(s)",
+        fallback_requests.len()
+    );
 }
