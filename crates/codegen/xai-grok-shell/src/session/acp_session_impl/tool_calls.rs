@@ -958,7 +958,7 @@ impl SessionActor {
         );
         let parse_result = serde_json::from_str::<serde_json::Value>(args_str);
         let mut concatenated_json_count: usize = 0;
-        let raw_input = match &parse_result {
+        let mut raw_input = match &parse_result {
             Ok(value) => value.clone(),
             Err(e) => {
                 if let Some(objects) = crate::session::helpers::tool_input_parsing::try_extract_concatenated_json_objects(
@@ -1056,6 +1056,7 @@ impl SessionActor {
         let resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
+        let mut hook_updated_input: Option<serde_json::Map<String, serde_json::Value>> = None;
         if self.hook_event_active(xai_grok_hooks::event::HookEventName::PreToolUse) {
             let (hook_tool_input, hook_tool_input_truncated) =
                 xai_grok_hooks::event::truncate_payload(raw_input.clone());
@@ -1076,6 +1077,7 @@ impl SessionActor {
                 let pre_result =
                     xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
                         .await;
+                hook_updated_input = pre_result.updated_input.clone();
                 self.send_hook_execution(
                     "pre_tool_use",
                     Some(&resolved_tool_name),
@@ -1108,6 +1110,34 @@ impl SessionActor {
                 .await?
             {
                 return Ok(Err(denied));
+            }
+        }
+        // --- Apply hook-requested input rewrites (Claude Code `updatedInput`) ---
+        // A `PreToolUse` hook can shallow-merge `hookSpecificOutput.updatedInput`
+        // into the tool call's input (e.g. RTK prefixing a bash command). Re-parse
+        // so access control and execution observe the rewritten input.
+        let mut tool_input = tool_input;
+        let mut access_kind = access_kind;
+        if let Some(updated) = hook_updated_input {
+            let merged = match raw_input.clone() {
+                serde_json::Value::Object(mut obj) => {
+                    for (k, v) in updated {
+                        obj.insert(k, v);
+                    }
+                    serde_json::Value::Object(obj)
+                }
+                _ => serde_json::Value::Object(updated),
+            };
+            if let Ok(new_input) = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .try_parse(&call.function.name, merged.clone())
+                .await
+            {
+                tool_input = new_input;
+                access_kind = AccessKind::from(&tool_input);
+                raw_input = merged;
             }
         }
         let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
