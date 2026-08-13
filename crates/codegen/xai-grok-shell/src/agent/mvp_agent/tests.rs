@@ -1971,6 +1971,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+mod list_running_heal_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
 mod session_rename_tests;
@@ -3617,7 +3618,14 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     agent
         .session_registry
         .set_permission_receiver(&sid, permission_rx);
+    let _ = agent.session_registry.live_orphan_heal_lock(&sid);
+    assert_eq!(agent.session_registry.counts().live_orphan_heal_locks, 1);
     agent.remove_session(&sid);
+    assert_eq!(
+        agent.session_registry.counts().live_orphan_heal_locks,
+        0,
+        "remove_session must evict the live-orphan heal mutex"
+    );
     assert!(
         toolset_weak.upgrade().is_none(),
         "the workspace binding must release the toolset"
@@ -3934,10 +3942,10 @@ async fn ext_notification_forwards_each_queue_method_to_session_actor() {
                 assert_eq!(owner.as_deref(), Some("grok-tui"));
                 assert_eq!(new_text.as_deref(), Some("now"));
             }
-            ("x.ai/queue/hold_edit", SessionCommand::HoldCombineEdit { id }) => {
+            ("x.ai/queue/hold_edit", SessionCommand::HoldEdit { id }) => {
                 assert_eq!(id, "p-hold");
             }
-            ("x.ai/queue/release_edit", SessionCommand::ReleaseCombineEdit { id }) => {
+            ("x.ai/queue/release_edit", SessionCommand::ReleaseEdit { id }) => {
                 assert_eq!(id, "p-release");
             }
             (method, _) => {

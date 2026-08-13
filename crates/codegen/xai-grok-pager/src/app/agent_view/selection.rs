@@ -13,8 +13,7 @@ use crate::scrollback::text_selection::{
     block_drag_threshold_exceeded, compute_autoscroll, configured_word_separators,
     drag_threshold_exceeded, reconstruct_full_selection_text_with_boundaries,
     reconstruct_selection_text, reconstruct_selection_text_with_boundaries,
-    reconstruct_table_selection_text, resolve_table_drag_kind, url_range_at_col,
-    word_boundaries_at_col,
+    reconstruct_table_selection_text, resolve_table_drag_kind, semantic_selection_at,
 };
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crossterm::event::MouseEvent;
@@ -26,21 +25,6 @@ use std::time::{Duration, Instant};
 /// [`MULTI_CLICK_TIMEOUT_MS`] so it measures separate gestures, and short
 /// enough that the second gesture plausibly continues the first intent.
 const WORD_SELECT_REPEAT_WINDOW: Duration = Duration::from_secs(10);
-
-fn semantic_selection_at(
-    model: &ResolvedSelectionModel,
-    hit: &RangeHit,
-    separators: &str,
-) -> Option<(std::ops::Range<u16>, String)> {
-    let line = model.line_for_hit(hit)?;
-    let range = url_range_at_col(&line.text, hit.col_within_range)
-        .unwrap_or_else(|| word_boundaries_at_col(&line.text, hit.col_within_range, separators));
-    if range.is_empty() {
-        return None;
-    }
-    let text = crate::scrollback::types::slice_display_cols(&line.text, range.start, range.end);
-    Some((range, text))
-}
 
 impl AgentView {
     /// Tick the selection highlight timer. Returns true if the selection
@@ -1156,29 +1140,19 @@ impl AgentView {
     pub(in crate::app) fn select_word_at(&mut self, hit: &RangeHit) {
         let model = self.selection_model_for_hit(hit);
         let separators = configured_word_separators();
-        let Some((selection_range, clipboard_text)) = semantic_selection_at(model, hit, separators)
-        else {
+        let Some(selection) = semantic_selection_at(model, hit, separators) else {
             return;
         };
         self.persistent_text_selection = Some(PersistentTextSelection {
             entry_idx: hit.entry_idx,
             range_id: hit.range_id,
-            anchor: SelectionEndpoint {
-                block_line_idx: hit.block_line_idx,
-                col_within_range: selection_range.start,
-            },
-            head: SelectionEndpoint {
-                block_line_idx: hit.block_line_idx,
-                col_within_range: selection_range.end.saturating_sub(1),
-            },
+            anchor: selection.anchor,
+            head: selection.head,
             origin: SelectionOrigin::DoubleClick,
             kind: SelectionKind::Linear,
         });
         self.selection_created_at = Some(Instant::now());
-
-        if !clipboard_text.is_empty() {
-            self.copy_to_clipboard_debounced(&clipboard_text);
-        }
+        self.copy_to_clipboard_debounced(&selection.text);
 
         if hit.entry_idx != BTW_OVERLAY_ENTRY_IDX {
             self.scrollback.set_selected(Some(hit.entry_idx));
@@ -1450,15 +1424,61 @@ mod tests {
                 block_line_idx: 0,
                 col_within_range: hit_col,
             };
-            let (_, copied) = semantic_selection_at(
+            let copied = semantic_selection_at(
                 &model,
                 &hit,
                 crate::scrollback::text_selection::DEFAULT_WORD_SEPARATORS,
             )
-            .expect("semantic range");
+            .expect("semantic range")
+            .text;
             assert_eq!(copied, expected);
         }
         assert!(!boundaries.is_empty());
+    }
+
+    #[test]
+    fn select_word_at_stores_wrap_aware_endpoints() {
+        let mut agent = make_agent();
+        let mut model = ResolvedSelectionModel::default();
+        for (i, (text, joiner)) in [("hello_world_", None), ("identifier", Some(""))]
+            .into_iter()
+            .enumerate()
+        {
+            model.push_line(ResolvedSelectableLine {
+                entry_idx: 0,
+                range_id: 0,
+                block_line_idx: i,
+                screen_y: i as u16,
+                screen_x: 0,
+                selectable_cols: 0..text.len() as u16,
+                text: text.to_string(),
+                joiner_to_previous: joiner.map(str::to_string),
+            });
+        }
+        agent.update_scrollback_selection_state(model, Default::default());
+        agent.select_word_at(&RangeHit {
+            entry_idx: 0,
+            range_id: 0,
+            block_line_idx: 1,
+            col_within_range: 0,
+        });
+        assert_eq!(
+            agent.persistent_text_selection,
+            Some(PersistentTextSelection {
+                entry_idx: 0,
+                range_id: 0,
+                anchor: SelectionEndpoint {
+                    block_line_idx: 0,
+                    col_within_range: 0,
+                },
+                head: SelectionEndpoint {
+                    block_line_idx: 1,
+                    col_within_range: 9,
+                },
+                origin: SelectionOrigin::DoubleClick,
+                kind: SelectionKind::Linear,
+            })
+        );
     }
 
     #[test]

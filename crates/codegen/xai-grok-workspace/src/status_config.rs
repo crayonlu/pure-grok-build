@@ -116,6 +116,10 @@ pub struct StatusConfig {
     /// True when restore injects `GROK_REVIVE_SCRIPT_CONFIGURED=true` (launchable
     /// revive configured); unset on first boot and non-launchable restores.
     pub revive_script_configured: bool,
+    /// True when restore injects `GROK_RESUME_NUDGE_DISABLED=true` (per-env
+    /// `resume_nudge_disabled` sandbox config): the session-resumed nudge is
+    /// suppressed at source for this boot.
+    pub resume_nudge_disabled: bool,
 }
 
 impl Default for StatusConfig {
@@ -146,6 +150,7 @@ impl Default for StatusConfig {
             preview_control_port: None,
             session_restored: false,
             revive_script_configured: false,
+            resume_nudge_disabled: false,
         }
     }
 }
@@ -213,6 +218,8 @@ impl StatusConfig {
             preview_control_port: defaults.preview_control_port,
             session_restored: std::env::var("GROK_SESSION_RESTORED").as_deref() == Ok("true"),
             revive_script_configured: std::env::var("GROK_REVIVE_SCRIPT_CONFIGURED").as_deref()
+                == Ok("true"),
+            resume_nudge_disabled: std::env::var("GROK_RESUME_NUDGE_DISABLED").as_deref()
                 == Ok("true"),
         };
         cfg.validate();
@@ -566,6 +573,7 @@ mod tests {
             "GROK_WORKSPACE_PRESENCE_ACTIVITY_WINDOW_MS",
             "GROK_SESSION_RESTORED",
             "GROK_REVIVE_SCRIPT_CONFIGURED",
+            "GROK_RESUME_NUDGE_DISABLED",
         ] {
             unsafe { std::env::remove_var(var) };
         }
@@ -601,6 +609,7 @@ mod tests {
             cfg.revive_script_configured,
             default.revive_script_configured
         );
+        assert_eq!(cfg.resume_nudge_disabled, default.resume_nudge_disabled);
     }
 
     #[test]
@@ -624,6 +633,18 @@ mod tests {
         let non_canonical = StatusConfig::from_env().revive_script_configured;
         unsafe { std::env::remove_var("GROK_REVIVE_SCRIPT_CONFIGURED") };
         assert!(configured);
+        assert!(!non_canonical);
+    }
+
+    #[test]
+    fn from_env_reads_resume_nudge_disabled_true_only() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GROK_RESUME_NUDGE_DISABLED", "true") };
+        let disabled = StatusConfig::from_env().resume_nudge_disabled;
+        unsafe { std::env::set_var("GROK_RESUME_NUDGE_DISABLED", "1") };
+        let non_canonical = StatusConfig::from_env().resume_nudge_disabled;
+        unsafe { std::env::remove_var("GROK_RESUME_NUDGE_DISABLED") };
+        assert!(disabled);
         assert!(!non_canonical);
     }
 

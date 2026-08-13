@@ -4,6 +4,7 @@
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
 use crate::auth::PreferredAuthMethod;
+use crate::upload::trace::PromptMetadataParams;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
 use xai_tty_utils::ProcessScope;
 /// `preferred` model, else catalog `current`, else first with own credentials.
@@ -258,7 +259,7 @@ impl MvpAgent {
         let auth_manager = self.auth_manager.clone();
         tokio::task::spawn_local(async move {
             let auth_key = auth_manager
-                .get_valid_token()
+                .get_valid_token_background()
                 .await
                 .ok()
                 .or_else(|| auth_manager.current_or_expired().map(|a| a.key));
@@ -1603,11 +1604,14 @@ impl MvpAgent {
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
         self.otel_gate.resolve(&identity, outcome, live.as_deref())
     }
-    /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`]
-    /// refresh and re-fetch if it yields a *different* token (recovers a 401
-    /// from a token that expired mid-fetch). The refresh is bounded by
-    /// `STARTUP_AUTH_REFRESH_TIMEOUT` so a wedged IdP can't hang the caller; on
-    /// timeout or error the original `Rejected` stands.
+    /// Fetch settings; on a `401` try one self-healing background refresh
+    /// and re-fetch if it yields a *different* token (recovers a 401 from a
+    /// token that expired mid-fetch). Recovery-driven, so background urgency
+    /// (see [`AuthManager::auth_background`]); a dark-wake deferral leaves
+    /// the `Rejected` outcome standing, which every caller tolerates. The
+    /// refresh is bounded by `STARTUP_AUTH_REFRESH_TIMEOUT` so a wedged IdP
+    /// can't hang the caller; on timeout or error the original `Rejected`
+    /// stands.
     async fn fetch_settings_self_healing_401(
         &self,
         auth: &crate::auth::GrokAuth,
@@ -1616,7 +1620,7 @@ impl MvpAgent {
         if matches!(outcome, crate::remote::SettingsFetch::Rejected)
             && let Ok(Ok(fresh)) = tokio::time::timeout(
                     crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
+                    self.auth_manager.auth_background(),
                 )
                 .await && fresh.key != auth.key
         {
@@ -1794,7 +1798,7 @@ impl MvpAgent {
                 async move {
                     let auth_result = tokio::time::timeout(
                             crate::http::STARTUP_FETCH_TIMEOUT,
-                            auth_manager.auth(),
+                            auth_manager.auth_background(),
                         )
                         .await;
                     if let Ok(Ok(auth)) = auth_result {
@@ -1878,7 +1882,7 @@ impl MvpAgent {
     /// announcements-only apply. Every failure path is a silent skip — the
     /// next tick retries.
     async fn fetch_and_store_polled_announcements(&self) {
-        let Ok(auth) = self.auth_manager.auth().await else {
+        let Ok(auth) = self.auth_manager.auth_background().await else {
             tracing::debug!("announcements refresh skipped: not authenticated");
             return;
         };
@@ -3099,10 +3103,11 @@ impl MvpAgent {
         &self,
         session_id: &str,
         task_id: &str,
+        source: xai_grok_tools::types::KillSource,
     ) -> Result<xai_grok_tools::types::KillOutcome, String> {
         let sid = acp::SessionId::new(session_id);
         if let Some(handle) = self.get_session_handle(&sid) {
-            handle.kill_background_task(task_id).await
+            handle.kill_background_task(task_id, source).await
         } else {
             Err("session not found".to_string())
         }
@@ -3138,11 +3143,23 @@ impl MvpAgent {
     ) -> Vec<
         xai_grok_tools::implementations::grok_build::task::types::SubagentInspection,
     > {
-        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
-            )
-            .list_running(parent_session_id)
-            .await
+        let backend = xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+            self.subagent_event_tx.clone(),
+        );
+        let sid = acp::SessionId::new(parent_session_id);
+        if let Some(handle) = self.get_session_handle(&sid) {
+            let session_dir = crate::session::persistence::session_dir(&handle.info);
+            crate::agent::subagent::reconcile_live_orphaned_subagents(
+                    &backend,
+                    &session_dir,
+                    parent_session_id,
+                    &self.gateway,
+                    Some(&handle.cmd_tx),
+                    self.session_registry.live_orphan_heal_lock(&sid),
+                )
+                .await;
+        }
+        backend.list_running(parent_session_id).await
     }
     pub(crate) async fn inspect_subagent(
         &self,
@@ -3878,36 +3895,27 @@ impl MvpAgent {
                 }
                 break;
             };
-            let metadata = PromptMetadata {
+            let metadata = PromptMetadata::new(PromptMetadataParams {
                 schema_version: GCS_SCHEMA_VERSION.to_string(),
                 session_id: session_id.0.to_string(),
                 turn_number,
                 request_id: format!("harness-trace-{turn_number}"),
                 turn_started_at: chrono::Utc::now().to_rfc3339(),
-                repo_root: None,
-                remote_url: None,
-                user_id: None,
-                user_email: None,
-                team_id: None,
-                client_source: None,
-                client_version: None,
                 model: model.to_string(),
                 reasoning_effort: ctx
                     .session_handle
                     .reasoning_effort
                     .map(|e| e.as_str().to_string()),
-                experiment_id: None,
                 host_os: std::env::consts::OS.to_string(),
                 host_arch: std::env::consts::ARCH.to_string(),
                 prompt_has_image: Some(false),
                 prompt_was_truncated: Some(false),
                 prompt_verbatim: Some(true),
                 cwd: Some(info.cwd.clone()),
-                agent_type: None,
                 shell_version: Some(xai_grok_version::VERSION.to_string()),
-                workspace_type: None,
                 sandbox: local_sandbox_telemetry(),
-            };
+                ..Default::default()
+            });
             let capture = xai_chat_state::TurnCapture {
                 messages: items,
                 compaction_occurred: false,
@@ -4850,6 +4858,9 @@ impl MvpAgent {
                 code_nav: client_code_nav_enabled,
                 git_head_changed,
             });
+            tool_ctx.live_orphan_heal_lock = self
+                .session_registry
+                .live_orphan_heal_lock(&session_info.id);
             spawn_session_on_thread(
                     session_info.clone(),
                     self.gateway.clone(),

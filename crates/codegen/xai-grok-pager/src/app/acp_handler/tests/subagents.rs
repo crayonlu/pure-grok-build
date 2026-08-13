@@ -370,6 +370,205 @@
         );
     }
 
+    #[test]
+    fn subagent_tool_call_delta_stamps_writing_activity_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(changed, "first delta must request a redraw");
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        let info = agent.subagent_sessions.get(child_sid).unwrap();
+        assert_eq!(info.activity_label.as_deref(), Some("Preparing write…"));
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_ignored_while_child_loading_replay() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-replay";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none()
+        );
+        assert_eq!(
+            agent
+                .subagent_views
+                .get(child_sid)
+                .unwrap()
+                .session
+                .tracker
+                .activity(),
+            None,
+            "reloading child tracker must not pick up the delta"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_without_registry_row_reports_no_redraw() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-orphan";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_sessions
+            .remove(child_sid);
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed, "no registry row → nothing visible → no redraw");
+    }
+
+    #[test]
+    fn subagent_acp_chunk_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-acp-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+        // Simulate the racing child rail still looking live.
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .state = AgentState::TurnRunning;
+
+        let _ = handle(
+            make_agent_chunk_with_event(child_sid, "late text", "p-child", None),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must not be re-stamped by the child ACP fan-out"
+        );
+    }
+
+    #[test]
+    fn subagent_tool_call_delta_after_finish_does_not_restamp_label() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-writing-finished";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", child_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_finished(child_sid)),
+            &mut app,
+        );
+
+        let changed = handle(
+            make_ext_session_notification(
+                child_sid,
+                XaiSessionUpdate::ToolCallDeltaChunk {
+                    tool_call_id: Some("call_1".into()),
+                    tool_index: 0,
+                    name: Some("write".into()),
+                    arguments_delta: None,
+                },
+            ),
+            &mut app,
+        );
+        assert!(!changed);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .activity_label
+                .is_none(),
+            "finished row must keep its cleared label"
+        );
+    }
+
     /// Regression: replayed SubagentSpawned (resumed_from unset) must load child
     /// updates.jsonl so fullscreen scrollback is not prompt-only.
     #[test]
@@ -751,6 +950,84 @@
                 1,
                 "open must not duplicate spawn replay when child_updates_replayed is set"
             );
+        });
+    }
+
+    #[test]
+    fn subagent_spawn_live_foreign_cwd_does_not_hydrate() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-foreign-cwd";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            spawn_subagent_with_optional_updates(&mut app, child_sid, None);
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                0,
+                "live spawn must not scan a foreign-cwd transcript"
+            );
+            assert!(
+                agent
+                    .subagent_sessions
+                    .get(child_sid)
+                    .is_some_and(|i| i.child_updates_replayed),
+                "live spawn must latch child_updates_replayed even on Empty"
+            );
+        });
+    }
+
+    #[test]
+    fn subagent_spawn_live_resume_hydrates_foreign_cwd() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-foreign";
+            write_child_updates_jsonl_under_cwd(
+                home,
+                "/other/cwd",
+                child_sid,
+                &(child_tool_line(child_sid) + "\n"),
+            );
+
+            let mut app = make_app_with_agent("sess-parent");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let tools = child_scrollback_tool_call_count(agent, child_sid);
+            let replayed = agent
+                .subagent_sessions
+                .get(child_sid)
+                .is_some_and(|i| i.child_updates_replayed);
+            if tools != 1 {
+                assert!(
+                    !replayed,
+                    "live resume must hydrate now or leave first-open able to scan"
+                );
+                let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+                agent.open_subagent_fullscreen(child_sid.to_string());
+                assert_eq!(
+                    child_scrollback_tool_call_count(agent, child_sid),
+                    1,
+                    "opening after live resume must hydrate the dest transcript"
+                );
+            }
         });
     }
 

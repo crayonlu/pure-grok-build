@@ -2133,9 +2133,7 @@ mod tests {
             &self,
             _reason: crate::auth::manager::RefreshReason,
         ) -> crate::auth::refresh::RefreshOutcome {
-            crate::auth::refresh::RefreshOutcome::TransientFailure {
-                message: "simulated network failure".into(),
-            }
+            crate::auth::refresh::RefreshOutcome::transient("simulated network failure")
         }
     }
 

@@ -345,10 +345,7 @@ pub(crate) async fn spawn_session_actor(
             session_yolo_mode,
         ) {
             permissions.set_auto_mode(true);
-            let turns = build_classifier_turns(&conversation, CLASSIFIER_SPAWN_SEED_TURNS);
-            if !turns.is_empty() {
-                permissions.set_classifier_transcript(turns);
-            }
+            refresh_classifier_transcript(&permissions, &conversation);
         }
         (permissions, permission_events_rx, deny_read_globs)
     };
@@ -527,7 +524,7 @@ pub(crate) async fn spawn_session_actor(
     let state = TokioMutex::new(State {
         running_task: None,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        edit_holds: HashMap::new(),
         pending_notifications: Vec::new(),
         notifications_suppressed: false,
         rewindable: false,
@@ -1694,6 +1691,7 @@ pub(crate) async fn spawn_session_actor(
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
+        last_live_orphan_reconcile: std::cell::Cell::new(None),
         deferred_prefix: TaskSlot::new(),
         extension_registry: session_extension_registry(weak.clone()),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
@@ -1729,6 +1727,7 @@ pub(crate) async fn spawn_session_actor(
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle,
         rebuild_spec: rebuild_spec.clone(),
         image_description_model,

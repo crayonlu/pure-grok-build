@@ -279,6 +279,30 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+fn append_response_includes(body: &mut serde_json::Value, extra_includes: &[String]) {
+    if extra_includes.is_empty() {
+        return;
+    }
+    let Some(body) = body.as_object_mut() else {
+        return;
+    };
+    let include = body.entry("include").or_insert(serde_json::Value::Null);
+    if include.is_null() {
+        *include = serde_json::Value::Array(Vec::new());
+    }
+    let Some(include) = include.as_array_mut() else {
+        return;
+    };
+    for value in extra_includes {
+        if !include
+            .iter()
+            .any(|existing| existing.as_str() == Some(value.as_str()))
+        {
+            include.push(serde_json::Value::String(value.clone()));
+        }
+    }
+}
+
 /// Resolve `env_http_headers` (`header -> env var`) into `headers` via `getenv`, skipping unset/blank/invalid entries and trimming values.
 fn apply_env_http_headers(
     env_http_headers: &IndexMap<String, String>,
@@ -353,6 +377,7 @@ struct ClientDefaults {
     api_backend: ApiBackend,
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
+    extra_response_includes: Vec<String>,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
 }
 
@@ -673,6 +698,7 @@ impl SamplingClient {
             api_backend: config.api_backend,
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
+            extra_response_includes: config.extra_response_includes,
             doom_loop_recovery: config.doom_loop_recovery,
         };
 
@@ -1228,6 +1254,7 @@ impl SamplingClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
         })?;
+        append_response_includes(&mut request_body, &self.defaults.extra_response_includes);
         // async-openai's ReasoningTextContent struct omits the `type`
         // discriminator that the Responses API requires on input. Patch
         // it in post-serialize. This is the last surviving piece of the
@@ -1375,6 +1402,7 @@ impl SamplingClient {
                 request_body["tools"] = serde_json::Value::Array(extra_tool_entries);
             }
         }
+        append_response_includes(&mut request_body, &self.defaults.extra_response_includes);
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
@@ -1389,9 +1417,9 @@ impl SamplingClient {
         let mut http_request = grok_headers
             .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        if doom_loop.is_some() {
-            // Presence opts in; the server ignores the value.
-            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+        if let Some(policy) = self.defaults.doom_loop_recovery {
+            http_request =
+                http_request.header(DOOM_LOOP_CHECK_HEADER, policy.window_tokens.to_string());
         }
         let http_request = http_request.json(&request_body);
 
@@ -2102,7 +2130,10 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, body::Bytes, routing::post};
     use indexmap::IndexMap;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
     use xai_grok_sampling_types::ApiErrorCode;
     use xai_grok_sampling_types::types::ChatRequestMessage;
 
@@ -2166,6 +2197,7 @@ mod tests {
             api_backend: ApiBackend::ChatCompletions,
             auth_scheme: AuthScheme::Bearer,
             extra_headers: IndexMap::new(),
+            extra_response_includes: Vec::new(),
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: 8192,
@@ -2252,6 +2284,126 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+    }
+
+    async fn capture_response_body(streaming: bool) -> serde_json::Value {
+        let (body_tx, body_rx) = oneshot::channel();
+        let body_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(body_tx)));
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |body: Bytes| {
+                let body_tx = body_tx.clone();
+                async move {
+                    let _ = body_tx.lock().unwrap().take().unwrap().send(body);
+                    if streaming {
+                        axum::response::Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(axum::body::Body::from("data: [DONE]\n\n"))
+                            .unwrap()
+                    } else {
+                        axum::response::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(r#"{"id":"resp","object":"response","created_at":0,"model":"test-model","status":"completed","output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}"#))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = SamplingClient::new(SamplerConfig {
+            base_url: format!("http://{addr}/v1"),
+            api_backend: ApiBackend::Responses,
+            extra_response_includes: vec!["no_inline_citations".to_owned()],
+            ..minimal_config()
+        })
+        .unwrap();
+        let mut request = rs::CreateResponse {
+            input: rs::InputParam::Text("hi".to_owned()),
+            include: Some(vec![rs::IncludeEnum::ReasoningEncryptedContent]),
+            tools: Some(vec![rs::Tool::WebSearch(rs::WebSearchTool::default())]),
+            ..Default::default()
+        };
+        let mut wrapper = CreateResponseWrapper::new(request.clone());
+        wrapper.extra_tool_entries = vec![serde_json::json!({"type": "x_search"})];
+        if streaming {
+            let (_stream, _model_metadata, _doom_loop_collector) = client
+                .create_response_stream(wrapper)
+                .await
+                .expect("streaming request should succeed");
+        } else {
+            request.tools = None;
+            client
+                .create_response(CreateResponseWrapper::new(request))
+                .await
+                .expect("unary request should succeed");
+        }
+        let body = body_rx.await.unwrap();
+        server.abort();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn response_call_sites_emit_final_includes_and_stream_fields() {
+        let unary = capture_response_body(false).await;
+        assert_eq!(
+            serde_json::json!(["reasoning.encrypted_content", "no_inline_citations"]),
+            unary["include"],
+        );
+
+        let stream = capture_response_body(true).await;
+        assert_eq!(
+            serde_json::json!(["reasoning.encrypted_content", "no_inline_citations"]),
+            stream["include"],
+        );
+        assert_eq!(Some(true), stream["stream"].as_bool());
+        assert!(
+            stream["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["type"] == "x_search")
+        );
+    }
+
+    #[test]
+    fn append_response_includes_preserves_typed_values_and_deduplicates() {
+        let typed = [
+            "reasoning.encrypted_content",
+            "web_search_call.action.sources",
+        ];
+        let mut body = serde_json::json!({ "include": typed });
+        append_response_includes(
+            &mut body,
+            &[
+                "no_inline_citations".to_owned(),
+                "no_inline_citations".to_owned(),
+            ],
+        );
+        assert_eq!(
+            serde_json::json!([
+                "reasoning.encrypted_content",
+                "web_search_call.action.sources",
+                "no_inline_citations",
+            ]),
+            body["include"],
+        );
+
+        let mut unchanged = serde_json::json!({ "include": typed });
+        let expected = unchanged.clone();
+        append_response_includes(&mut unchanged, &[]);
+        assert_eq!(expected, unchanged);
+
+        for mut body in [
+            serde_json::json!({}),
+            serde_json::json!({ "include": null }),
+        ] {
+            append_response_includes(&mut body, &["no_inline_citations".to_owned()]);
+            assert_eq!(serde_json::json!(["no_inline_citations"]), body["include"]);
+        }
     }
 
     #[test]

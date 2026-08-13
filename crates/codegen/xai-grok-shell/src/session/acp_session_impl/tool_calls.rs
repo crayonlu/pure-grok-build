@@ -406,6 +406,10 @@ impl SessionActor {
         deferred_followups: &mut Vec<ConversationItem>,
         final_result: &mut Option<ToolLoop>,
     ) -> Result<(), acp::Error> {
+        if self.permissions.is_auto_mode() {
+            let conversation = self.chat_state_handle.get_conversation().await;
+            super::refresh_classifier_transcript(&self.permissions, &conversation);
+        }
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
             if final_result.is_some() {
@@ -465,7 +469,7 @@ impl SessionActor {
                             }
                             other => format!("{other:?}"),
                         };
-                        self.emit_event(xai_file_utils::events::Event::McpToolCallCompleted {
+                        self.emit_event(xai_grok_session_events::Event::McpToolCallCompleted {
                             server_name: server.to_string(),
                             tool_name: tool.to_string(),
                             call_id: format!(
@@ -1188,13 +1192,6 @@ impl SessionActor {
                 !self.session_info.id.0.is_empty(),
                 "permission reverse-request must carry a non-empty sessionId (design §5.4)"
             );
-            if self.permissions.is_auto_mode() {
-                let conv = self.chat_state_handle.get_conversation().await;
-                let turns = super::build_classifier_turns(&conv, super::CLASSIFIER_REFRESH_TURNS);
-                if !turns.is_empty() {
-                    self.permissions.set_classifier_transcript(turns);
-                }
-            }
             let path_context = Some(xai_grok_workspace::permission::types::RequestPathContext {
                 real_cwd: std::path::PathBuf::from(self.session_info.cwd.as_str()),
                 display_cwd: self
@@ -1228,16 +1225,16 @@ impl SessionActor {
                 &call.function.name,
                 match &decision {
                     Decision::Allow | Decision::Ask => {
-                        xai_file_utils::events::types::PermissionDecision::Allow
+                        xai_grok_session_events::types::PermissionDecision::Allow
                     }
                     Decision::Reject(_) | Decision::PolicyDeny(_) => {
-                        xai_file_utils::events::types::PermissionDecision::Deny
+                        xai_grok_session_events::types::PermissionDecision::Deny
                     }
                     Decision::Cancelled => {
-                        xai_file_utils::events::types::PermissionDecision::Cancelled
+                        xai_grok_session_events::types::PermissionDecision::Cancelled
                     }
                     Decision::FollowupMessage(_) => {
-                        xai_file_utils::events::types::PermissionDecision::Followup
+                        xai_grok_session_events::types::PermissionDecision::Followup
                     }
                 },
                 perm_start,
@@ -2484,14 +2481,14 @@ impl SessionActor {
                 std::mem::take(&mut norm_result.dropped),
                 is_cursor_for_tool_result,
             ) {
-                deferred_followups.push(ConversationItem::user(notice));
+                deferred_followups.push(ConversationItem::system_reminder(notice));
                 self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
                     .await;
             }
             for norm in norm_result.images {
                 let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
                 let mut image_msg =
-                    ConversationItem::user("[Image extracted from tool result above]");
+                    ConversationItem::system_reminder("[Image extracted from tool result above]");
                 image_msg.add_image(url);
                 deferred_followups.push(image_msg);
             }
@@ -2696,11 +2693,18 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Completed {
-                response, metrics, ..
+                request_id,
+                response,
+                metrics,
             } => {
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
+                let session = Arc::clone(self);
+                let rid = request_id.clone();
+                tokio::task::spawn_local(async move {
+                    session.apply_pending_image_strip(&rid).await;
+                });
                 if let Some(policy) = self.doom_loop_recovery {
                     let triggers = policy.confident_triggers(&response.doom_loop_signals);
                     if !triggers.is_empty() {
@@ -2734,6 +2738,14 @@ impl SessionActor {
             }
             SamplingEvent::ModelMetadata { metadata, .. } => {
                 self.handle_model_metadata_update(metadata).await;
+            }
+            SamplingEvent::ImagesStripped {
+                request_id,
+                stripped_urls,
+                reason,
+            } => {
+                self.handle_images_stripped(request_id, stripped_urls, reason)
+                    .await;
             }
             SamplingEvent::Retrying {
                 request_id,
@@ -2784,6 +2796,7 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
+                self.drop_pending_image_strip(&request_id);
                 xai_grok_telemetry::unified_log::error(
                     "shell.turn.inference_failed",
                     Some(self.session_info.id.0.as_ref()),

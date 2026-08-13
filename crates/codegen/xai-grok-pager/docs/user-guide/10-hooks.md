@@ -245,8 +245,10 @@ For `PreToolUse` hooks, write JSON to **stdout**:
 | Exit Code | Meaning |
 |-----------|---------|
 | `0` | Success / allow (for blocking hooks) |
-| `2` | Explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`) |
-| Other | Fail-open — the failure is recorded but nothing is blocked. For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of exit code. For `Stop`/`SubagentStop`, a valid decision JSON on stdout wins over the exit code (matching Claude Code); the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as the feedback. |
+| `2` | Explicit deny (`PreToolUse`) or block-stop with stderr as feedback (`Stop`/`SubagentStop`). For `PreToolUse`, the first stderr line (capped) becomes the deny reason when the JSON carries none; `Stop`/`SubagentStop` feed the full stderr to the model. |
+| Other | Fail-open — the failure is recorded (as `exit code N: <first stderr line>`) but nothing is blocked. For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of exit code. For `Stop`/`SubagentStop`, a valid decision JSON on stdout wins over the exit code; the exit code decides only when stdout has no usable JSON, in which case exit 2 blocks with stderr as the feedback. |
+
+Write human-readable diagnostics to **stderr**: it is the hook's feedback channel. On failures the first stderr line appears in the scrollback entry and logs instead of a bare exit code.
 
 ### Stop Decision Control
 

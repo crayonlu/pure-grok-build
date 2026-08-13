@@ -2978,7 +2978,7 @@ mod tests {
         assert!(
             matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "the meta-less spawn starts with a provisional foreground wait"
         );
@@ -3003,7 +3003,7 @@ mod tests {
         assert!(
             !matches!(
                 agent.resolve_turn_activity(),
-                Some(TurnActivity::Waiting(WaitingReason::Subagent))
+                Some(TurnActivity::Waiting(WaitingReason::Subagent { .. }))
             ),
             "an omitted run_in_background field means background: the provisional \
              foreground wait must clear"
