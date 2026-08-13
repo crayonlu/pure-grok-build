@@ -2246,6 +2246,7 @@ impl MvpAgent {
             .and_then(|provider| provider.provider_profile().cloned())
             .or_else(|| cfg.capabilities.image.clone());
         if profile.is_none()
+            && cfg.image_gen.is_none()
             && matches!(
                 capability,
                 xai_grok_overlay_api::CapabilityAvailability::Disabled
