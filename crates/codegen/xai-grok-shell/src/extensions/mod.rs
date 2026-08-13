@@ -44,6 +44,29 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 pub type ExtResult = Result<acp::ExtResponse, acp::Error>;
+
+/// Reject an upstream-owned auxiliary service when the distribution overlay
+/// has not explicitly enabled it. Keeping this check at the extension seam
+/// lets the host retain the wire-compatible handlers without allowing an Open
+/// deployment to accidentally send BYOK/session credentials to xAI services.
+pub(crate) fn require_overlay_service(
+    agent: &crate::agent::MvpAgent,
+    kind: xai_grok_overlay_api::ServiceKind,
+    method: &str,
+) -> Result<(), acp::Error> {
+    if agent.cfg.borrow().overlay_runtime.allows_explicit(kind) {
+        return Ok(());
+    }
+    tracing::debug!(%method, ?kind, "extension disabled by overlay policy");
+    let guidance = if matches!(kind, xai_grok_overlay_api::ServiceKind::Auth) {
+        "use an API key or select xai_compat"
+    } else {
+        "select xai_compat or configure a provider-neutral service"
+    };
+    Err(acp::Error::method_not_found()
+        .data(format!("{method} is unavailable in Open mode; {guidance}")))
+}
+
 pub(crate) fn parse_params<T: DeserializeOwned>(args: &acp::ExtRequest) -> Result<T, acp::Error> {
     parse_params_str(args.params.get())
 }

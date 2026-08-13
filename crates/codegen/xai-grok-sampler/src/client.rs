@@ -44,6 +44,8 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
@@ -600,6 +602,18 @@ impl SamplingClient {
             |var| std::env::var(var).ok(),
             &mut headers,
         );
+
+        // Native Anthropic Messages endpoints require this header. Keep it as
+        // a protocol default here so direct SamplerConfig users remain
+        // interoperable; an explicit extra/env header remains authoritative.
+        if matches!(config.api_backend, ApiBackend::Messages)
+            && !headers.contains_key(ANTHROPIC_VERSION_HEADER)
+        {
+            headers.insert(
+                HeaderName::from_static(ANTHROPIC_VERSION_HEADER),
+                HeaderValue::from_static(ANTHROPIC_VERSION),
+            );
+        }
 
         // Add x-grok-client-version header for version gating at the proxy.
         if let Some(client_version) = config.client_version.as_ref()
@@ -2200,6 +2214,7 @@ mod tests {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
@@ -2561,6 +2576,41 @@ mod tests {
                 .default_headers
                 .get(HeaderName::from_static("x-api-key"))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn messages_adds_default_anthropic_version_and_allows_override() {
+        let cfg = SamplerConfig {
+            api_key: Some("anthropic-key-abc123".to_string()),
+            api_backend: ApiBackend::Messages,
+            auth_scheme: AuthScheme::XApiKey,
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        assert_eq!(
+            client
+                .default_headers
+                .get(ANTHROPIC_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(ANTHROPIC_VERSION)
+        );
+
+        let mut overridden = minimal_config();
+        overridden.api_key = Some("anthropic-key-abc123".to_string());
+        overridden.api_backend = ApiBackend::Messages;
+        overridden.auth_scheme = AuthScheme::XApiKey;
+        overridden.extra_headers.insert(
+            ANTHROPIC_VERSION_HEADER.to_string(),
+            "2024-10-22".to_string(),
+        );
+        let client = SamplingClient::new(overridden).expect("client should build");
+        assert_eq!(
+            client
+                .default_headers
+                .get(ANTHROPIC_VERSION_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2024-10-22")
         );
     }
 

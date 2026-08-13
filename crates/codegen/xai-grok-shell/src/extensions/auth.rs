@@ -7,12 +7,20 @@
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
-use super::{ExtResult, parse_params, to_raw_response};
+use super::{ExtResult, parse_params, require_overlay_service, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::session::ExtMethodResult;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    if requires_first_party_auth(args.method.as_ref()) {
+        require_overlay_service(
+            agent,
+            xai_grok_overlay_api::ServiceKind::Auth,
+            args.method.as_ref(),
+        )?;
+    }
+
     match args.method.as_ref() {
         "x.ai/auth/getBearerToken" => handle_get_bearer_token(agent).await,
         "x.ai/getApiKey" => handle_get_api_key(),
@@ -25,6 +33,18 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/auth/check_subscription" => handle_check_subscription(agent).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+/// Methods that can start an xAI OAuth flow or query the first-party
+/// subscription service. API-key storage, bearer-token export, logout and
+/// auth-info remain available in Open mode because they are local/BYOK
+/// compatibility seams and do not initiate a first-party request by
+/// themselves.
+fn requires_first_party_auth(method: &str) -> bool {
+    matches!(
+        method,
+        "x.ai/auth/get_url" | "x.ai/auth/submit_code" | "x.ai/auth/check_subscription"
+    )
 }
 
 /// Stop an in-flight interactive login (device poll / loopback wait).
@@ -252,4 +272,34 @@ fn handle_info(agent: &MvpAgent) -> ExtResult {
             .map(|a| a.coding_data_retention_opt_out)
             .unwrap_or_else(crate::auth::default_coding_data_retention_opt_out),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_first_party_auth;
+
+    #[test]
+    fn gates_first_party_auth_methods() {
+        for method in [
+            "x.ai/auth/get_url",
+            "x.ai/auth/submit_code",
+            "x.ai/auth/check_subscription",
+        ] {
+            assert!(requires_first_party_auth(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn keeps_local_and_byok_auth_methods_available() {
+        for method in [
+            "x.ai/getApiKey",
+            "x.ai/setApiKey",
+            "x.ai/auth/getBearerToken",
+            "x.ai/auth/cancel",
+            "x.ai/auth/logout",
+            "x.ai/auth/info",
+        ] {
+            assert!(!requires_first_party_auth(method), "{method}");
+        }
+    }
 }

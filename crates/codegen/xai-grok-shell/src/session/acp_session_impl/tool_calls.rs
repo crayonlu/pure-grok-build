@@ -611,11 +611,21 @@ impl SessionActor {
                 }
             })
             .collect();
-        tokio::task::yield_now().await;
-        let mut dispatch_stream = futures::stream::FuturesUnordered::new();
-        for fut in dispatch_futures {
-            dispatch_stream.push(fut);
+        // Models flagged `supports_parallel_tool_calls = false` must run their
+        // tool calls one at a time, in model-emitted order. We still drive them
+        // through the same channel/post-processing pipeline; only the fan-out
+        // strategy changes (FuturesUnordered vs sequential await).
+        let parallel = self
+            .models_manager
+            .model_supports_parallel_tool_calls(&self.current_model_id().await);
+        if !parallel {
+            tracing::debug!(
+                session_id = %self.session_info.id.0,
+                batch_size = dispatch_futures.len(),
+                "model does not support parallel tool calls; executing sequentially"
+            );
         }
+        tokio::task::yield_now().await;
         let mut approved_slots: Vec<Option<PreparedToolCall>> =
             approved.into_iter().map(Some).collect();
         let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -625,9 +635,22 @@ impl SessionActor {
         )>();
         let drainer = tokio::spawn(
             async move {
-                while let Some(item) = dispatch_stream.next().await {
-                    if dispatch_tx.send(item).is_err() {
-                        break;
+                if parallel {
+                    let mut dispatch_stream = futures::stream::FuturesUnordered::new();
+                    for fut in dispatch_futures {
+                        dispatch_stream.push(fut);
+                    }
+                    while let Some(item) = dispatch_stream.next().await {
+                        if dispatch_tx.send(item).is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    for fut in dispatch_futures {
+                        let item = fut.await;
+                        if dispatch_tx.send(item).is_err() {
+                            break;
+                        }
                     }
                 }
             }
@@ -2318,6 +2341,7 @@ impl SessionActor {
             result.prompt_text
         };
         let mut inline_images: Vec<ContentPart> = Vec::new();
+        let model_supports_vision = self.supports_vision.get();
         let extraction = if !self.is_cursor_harness()
             && !matches!(
                 result.output,
@@ -2347,49 +2371,75 @@ impl SessionActor {
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
-            match inline_attach_verdict(&image_content.data) {
-                InlineAttachVerdict::TooSmall => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: too small for vision models]"
-                    );
-                }
-                InlineAttachVerdict::Unreadable => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: invalid or unreadable image data]"
-                    );
-                }
-                InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                    prompt_text = format!("Read image file: {path}");
+            if !model_supports_vision {
+                use base64::Engine as _;
+                let raw_size = base64::engine::general_purpose::STANDARD
+                    .decode(&image_content.data)
+                    .map(|b| b.len())
+                    .unwrap_or(0);
+                prompt_text = format!(
+                    "[Image file {path} ({mime}, {size} bytes) was read but not embedded: \
+                     the active model does not support vision. The file exists on disk; \
+                     use a vision-capable model or a text-extraction tool to inspect it.]",
+                    mime = image_content.mime_type,
+                    size = raw_size,
+                );
+            } else {
+                use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
+                match inline_attach_verdict(&image_content.data) {
+                    InlineAttachVerdict::TooSmall => {
+                        prompt_text = format!(
+                            "[Image from {path} was not attached: too small for vision models]"
+                        );
+                    }
+                    InlineAttachVerdict::Unreadable => {
+                        prompt_text = format!(
+                            "[Image from {path} was not attached: invalid or unreadable image data]"
+                        );
+                    }
+                    InlineAttachVerdict::Attach => {
+                        let url = format!(
+                            "data:{};base64,{}",
+                            image_content.mime_type, image_content.data
+                        );
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                        prompt_text = format!("Read image file: {path}");
+                    }
                 }
             }
         }
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
-            for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
-            }
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            prompt_text = format!(
-                "Read PDF file: {path} ({} pages rendered, {} total)",
-                pdf.pages.len(),
-                pdf.total_pages,
-            );
+            if !model_supports_vision {
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages rendered as images, {} total). \
+                     Image pages were not embedded because the active model does not support \
+                     vision. Re-read the file with output format \"text\" to obtain its \
+                     textual content.",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                );
+            } else {
+                for page in &pdf.pages {
+                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                }
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                );
+            }
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2402,7 +2452,7 @@ impl SessionActor {
         };
         self.chat_state_handle.push_tool_result(tool_chat);
         let mut deferred_followups = Vec::new();
-        if !extracted_images.is_empty() {
+        if model_supports_vision && !extracted_images.is_empty() {
             let count = extracted_images.len();
             tracing::info!(
                 session_id = %self.session_info.id,

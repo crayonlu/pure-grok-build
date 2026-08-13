@@ -30,54 +30,60 @@ pub enum UpdateRunMode {
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
-/// An empty or `"stable"` channel means stable — the installers' default
-/// (`CHANNEL="${GROK_CHANNEL:-stable}"` in install.sh).
-fn is_stable_channel(channel: &str) -> bool {
-    channel.is_empty() || channel == "stable"
-}
 
 /// Manual-install one-liner for this platform's bootstrap installer.
 ///
-/// On Unix the variable must prefix `bash` (which runs install.sh), not
-/// `curl`: in `VAR=x curl … | bash` the assignment applies to `curl` only
-/// and install.sh would fall back to stable.
-fn manual_install_cmd(channel: &str) -> String {
-    // Only interpolate a well-formed channel ([A-Za-z0-9._-]) into the
-    // shell one-liner; anything else falls back to stable (a working
-    // installer beats a broken quoted command).
-    let channel = channel.trim();
-    let safe = !channel.is_empty()
-        && channel
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    if channel == "enterprise" {
-        // Enterprise has its own bootstrap script; it needs no channel env.
-        return if cfg!(windows) {
-            "irm https://x.ai/cli/enterprise-install.ps1 | iex".to_string()
-        } else {
-            "curl -fsSL https://x.ai/cli/enterprise-install.sh | bash".to_string()
-        };
-    }
-    if is_stable_channel(channel) || !safe {
-        return if cfg!(windows) {
-            "irm https://x.ai/cli/install.ps1 | iex".to_string()
-        } else {
-            "curl -fsSL https://x.ai/cli/install.sh | bash".to_string()
-        };
+/// In Open mode, honors the configured `[overlay.update_source]` instead of
+/// hardcoding the first-party x.ai installer; in compatibility modes it
+/// returns the upstream bootstrap one-liner.
+fn manual_install_cmd() -> String {
+    let runtime = xai_grok_overlay::load_runtime().ok();
+    let open_mode = runtime
+        .as_ref()
+        .is_none_or(|runtime| runtime.policy().mode.is_open());
+    if open_mode {
+        if let Some(source) = runtime.as_ref().and_then(|runtime| runtime.update_source()) {
+            return match source.kind.as_str() {
+                "github_release" => format!(
+                    "gh release download --repo {} --pattern 'grok-*'",
+                    source.location
+                ),
+                "base_url" => format!(
+                    "Download a matching binary from the configured update source: {}",
+                    source.location
+                ),
+                _ => "Configure a supported [overlay.update_source] before updating.".to_owned(),
+            };
+        }
+        return "No update source is configured for Open mode. Set [overlay.update_source] or GROK_CLI_BASE_URL/GROK_UPDATE_REPO.".to_owned();
     }
     if cfg!(windows) {
-        format!("$env:GROK_CHANNEL='{channel}'; irm https://x.ai/cli/install.ps1 | iex")
+        "irm https://x.ai/cli/install.ps1 | iex".to_owned()
     } else {
-        format!("curl -fsSL https://x.ai/cli/install.sh | GROK_CHANNEL='{channel}' bash")
+        "curl -fsSL https://x.ai/cli/install.sh | bash".to_owned()
     }
 }
 
 /// Build a reinstall hint for a known installer type.
-fn reinstall_hint(installer: &str, channel: &str) -> String {
+fn reinstall_hint(installer: &str) -> String {
     match installer {
-        "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
-        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
-        _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
+        "npm"
+            if !xai_grok_overlay::load_runtime()
+                .ok()
+                .is_some_and(|runtime| runtime.policy().mode.is_open()) =>
+        {
+            "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string()
+        }
+        "gh-release" => {
+            if let Some(repo) = crate::version::effective_release_repo() {
+                format!(
+                    "Please reinstall via GitHub Releases:\n  gh release download --repo {repo} --pattern 'grok-*' --output grok && chmod +x grok"
+                )
+            } else {
+                format!("Please reinstall via:\n  {}", manual_install_cmd())
+            }
+        }
+        _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
 
@@ -234,7 +240,15 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
 
 pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let installer = get_installer().await.map(|value| value.to_string());
-    let current_version = get_installed_grok_version();
+    // The running binary embeds the upstream semver (for example 0.2.121),
+    // but managed fork installs are versioned by the subscription source
+    // (for example 2026.8.7).  Compare against the versioned install on disk
+    // whenever the installer owns that layout; otherwise fall back to the
+    // compiled-in version used by npm/dev installs.
+    let current_version = installer
+        .as_deref()
+        .and_then(disk_version_for_installer)
+        .unwrap_or_else(get_installed_grok_version);
     let current_config = config::load_config().await;
     let auto_update = current_config.cli.auto_update;
     let channel = update_config.channel.clone();
@@ -930,6 +944,11 @@ pub async fn run_install_script(
     update_config: &UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<()> {
+    if !crate::version::update_source_configured_for(installer) {
+        anyhow::bail!(
+            "no update source is configured for `{installer}` in Open mode; configure [overlay.update_source] or the matching GROK_* override"
+        );
+    }
     // What's on disk is being replaced, not this (possibly stale) process's
     // version; npm has no trustworthy disk version, so it falls back.
     let from_version =
@@ -976,7 +995,7 @@ pub async fn run_install_script(
         anyhow::anyhow!(
             "Auto-update failed: {:#}\n\n{}",
             e,
-            reinstall_hint(installer, &update_config.channel)
+            reinstall_hint(installer)
         )
     })
 }
@@ -1372,9 +1391,8 @@ async fn download_cli_artifact_from_gcs(
 
 /// Returns the version that was actually activated.
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<String> {
-    let bases = crate::version::cli_base_urls();
-    let base_refs: Vec<&str> = bases.iter().map(String::as_str).collect();
-    install_internal_from_bases(target, update_config, &base_refs).await
+    let bases = crate::version::effective_cli_base_urls();
+    install_internal_from_bases(target, update_config, &bases).await
 }
 
 /// Try the base-dependent install phase ([`download_verified_from_base`]:
@@ -1392,14 +1410,14 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
 /// failures are not base-dependent, so they abort the install instead of
 /// triggering a pointless re-download from the next base.
 #[doc(hidden)]
-pub async fn install_internal_from_bases(
+pub async fn install_internal_from_bases<S: AsRef<str>>(
     target: Option<&str>,
     update_config: &UpdateConfig,
-    bases: &[&str],
+    bases: &[S],
 ) -> Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
     for (i, base) in bases.iter().enumerate() {
-        match download_verified_from_base(target, update_config, base).await {
+        match download_verified_from_base(target, update_config, base.as_ref()).await {
             Ok(download) => {
                 return activate_verified_download(&download)
                     .await
@@ -1417,7 +1435,7 @@ pub async fn install_internal_from_bases(
                 if i + 1 < bases.len() {
                     tracing::warn!(
                         "install via {} failed ({:#}); trying next base URL",
-                        base,
+                        base.as_ref(),
                         e
                     );
                 }
@@ -1545,7 +1563,7 @@ pub async fn install_internal_from_base(
 }
 
 /// A downloaded and smoke-tested binary in `~/.grok/downloads/`, not yet
-/// activated as the managed `grok`/`agent`.
+/// activated as the managed `grok` entry point.
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
@@ -1579,7 +1597,11 @@ async fn download_verified_from_base(
     let download_dir = grok_home.join("downloads");
     tokio::fs::create_dir_all(&download_dir).await?;
 
-    let binary_name = format!("grok-{}-{}", version, platform);
+    // A same-day rebuild may use a semver build-metadata suffix in its release
+    // tag (`v2026.8.6+<sha>`) while the binary asset keeps the date-only name.
+    // Keep the tag and asset names independent so force builds remain usable.
+    let asset_version = version.split('+').next().unwrap_or(&version);
+    let binary_name = format!("grok-{}-{}", asset_version, platform);
     let binary_path = download_dir.join(&binary_name);
 
     eprintln!("  Downloading grok v{} ({})...", version, platform);
@@ -1610,7 +1632,8 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
     let bin_dir = grok_home.join("bin");
     tokio::fs::create_dir_all(&bin_dir).await?;
 
-    // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
+    // Atomically replace ~/.grok/bin/grok with the downloaded binary. Any
+    // legacy `agent` alias is removed by the swap helper.
     let link_path = swap_managed_bin_links(&download.binary_path, &bin_dir).await?;
 
     remove_stale_pager(&bin_dir).await;
@@ -1703,36 +1726,32 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
     target.to_path_buf()
 }
 
-/// Swap `~/.grok/bin/{grok,agent}` to point at `binary_path`. Returns the
-/// `grok` link path (for [`regenerate_completions`]).
+/// Swap `~/.grok/bin/grok` to point at `binary_path`. Returns the `grok` link
+/// path (for [`regenerate_completions`]).
 ///
-/// `grok` and `agent` are first-class entry points that the bootstrap
-/// installers (`install.sh`, `install.ps1`, `install-enterprise.sh`)
-/// maintain in lockstep, and so must the updater — otherwise `grok update`
-/// leaves `agent` pinned at the previous version.
+/// Older installers created an `agent` alias next to `grok`. The fork no
+/// longer exposes that alias; after a successful swap, the helper removes a
+/// legacy managed alias without touching unrelated user files.
 ///
 /// Unix: atomic symlink swap with relative target (survives Docker
 /// bind-mounts of `~/.grok/`). Windows: [`windows_replace_exe`].
 ///
-/// **All-or-nothing.** Each link's prior state is captured (Unix: prior
-/// symlink target; Windows: `.rollback.bak`; or `Absent` marker via
-/// `symlink_metadata`) before the swap, and any earlier successful swaps
-/// are rolled back if a later one fails — including *removing* a link that
-/// didn't exist before. Restore failures go to `tracing::warn!`; the swap
-/// error itself propagates unwrapped so the caller's `reinstall_hint` wrap
-/// stays the user-visible message.
+/// **All-or-nothing.** The prior `grok` state is captured (Unix: prior
+/// symlink target; Windows: `.rollback.bak`; or `Absent` via
+/// `symlink_metadata`) before the swap. If activation fails, the prior state
+/// is restored, including *removing* a link that did not exist before.
+/// Restore failures go to `tracing::warn!`; the swap error itself propagates
+/// unwrapped so the caller's `reinstall_hint` wrap stays the user-visible
+/// message.
 async fn swap_managed_bin_links(
     binary_path: &std::path::Path,
     bin_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
     let grok_name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    let agent_name = if cfg!(windows) { "agent.exe" } else { "agent" };
     let grok_link = bin_dir.join(grok_name);
-    let agent_link = bin_dir.join(agent_name);
-    let link_paths: [std::path::PathBuf; 2] = [grok_link.clone(), agent_link];
+    let link_paths: [std::path::PathBuf; 1] = [grok_link.clone()];
 
-    // Capture every link up-front so a 2nd-link capture failure can't
-    // strand the 1st mid-swap.
+    // Capture the prior grok state before mutating the active entry point.
     let mut captured: Vec<LinkRollback> = Vec::with_capacity(link_paths.len());
     for path in &link_paths {
         match LinkRollback::capture(path).await {
@@ -1798,6 +1817,7 @@ async fn swap_managed_bin_links(
     for cap in &captured {
         cap.cleanup().await;
     }
+    remove_legacy_agent_entrypoint(bin_dir).await;
     Ok(grok_link)
 }
 
@@ -2243,102 +2263,147 @@ fn installer_manages_bin_entrypoints(installer: &str) -> bool {
     matches!(installer, "internal" | "gh-release")
 }
 
-#[cfg_attr(not(any(unix, windows)), allow(clippy::unused_async))]
 async fn heal_managed_install(installer: &str) {
     if !installer_manages_bin_entrypoints(installer) {
         return;
     }
 
-    #[cfg(any(unix, windows))]
-    {
-        let bin_dir = grok_home().join("bin");
+    let bin_dir = grok_home().join("bin");
+    remove_legacy_agent_entrypoint(&bin_dir).await;
+}
 
-        #[cfg(unix)]
-        reconcile_agent_to_grok(&bin_dir).await;
+#[cfg(unix)]
+async fn remove_legacy_agent_entrypoint(bin_dir: &std::path::Path) {
+    remove_legacy_agent_system_links(bin_dir).await;
 
-        #[cfg(windows)]
-        reconcile_agent_exe_to_grok(&bin_dir).await;
+    let agent_link = bin_dir.join("agent");
+
+    // On Unix the old alias was a symlink. Leave a regular file alone: it may
+    // be a user-owned executable that happens to be named `agent`.
+    let Ok(metadata) = tokio::fs::symlink_metadata(&agent_link).await else {
+        return;
+    };
+    if !metadata.file_type().is_symlink() {
+        return;
+    }
+
+    // Only remove aliases that resolve to the managed grok binary or to this
+    // install's downloads directory. This avoids deleting an unrelated
+    // symlink a user created in ~/.grok/bin.
+    let same_as_grok = match (
+        tokio::fs::canonicalize(bin_dir.join("grok")).await,
+        tokio::fs::canonicalize(&agent_link).await,
+    ) {
+        (Ok(grok_target), Ok(agent_target)) => grok_target == agent_target,
+        _ => false,
+    };
+    let in_managed_downloads = if let Some(parent) = bin_dir.parent() {
+        match (
+            tokio::fs::canonicalize(&agent_link).await,
+            tokio::fs::canonicalize(parent.join("downloads")).await,
+        ) {
+            (Ok(agent_target), Ok(downloads)) => agent_target.starts_with(downloads),
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if !same_as_grok && !in_managed_downloads {
+        return;
+    }
+
+    match tokio::fs::remove_file(&agent_link).await {
+        Ok(()) => tracing::info!("removed legacy ~/.grok/bin/agent alias"),
+        Err(e) => tracing::warn!("failed to remove legacy agent alias: {e:#}"),
     }
 }
 
 #[cfg(unix)]
-async fn reconcile_agent_to_grok(bin_dir: &std::path::Path) {
-    let grok_link = bin_dir.join("grok");
-    let agent_link = bin_dir.join("agent");
+async fn remove_legacy_agent_system_links(bin_dir: &std::path::Path) {
+    #[allow(deprecated)]
+    let user_home = std::env::home_dir().unwrap_or_default();
+    let candidates = [
+        user_home.join(".local/bin/agent"),
+        std::path::PathBuf::from("/usr/local/bin/agent"),
+    ];
+    let expected = bin_dir.join("agent");
 
-    let Ok(grok_target) = tokio::fs::read_link(&grok_link).await else {
-        return;
-    };
-    if tokio::fs::metadata(&grok_link).await.is_err() {
-        return;
-    }
-    if let Ok(agent_target) = tokio::fs::read_link(&agent_link).await
-        && agent_target == grok_target
-    {
-        return;
-    }
-    match atomic_symlink_swap(&grok_target, &agent_link).await {
-        Ok(()) => tracing::info!(
-            grok_target = %grok_target.display(),
-            "reconciled agent bin symlink to grok target"
-        ),
-        Err(e) => tracing::warn!("failed to reconcile agent bin symlink: {e:#}"),
+    for candidate in candidates {
+        let Ok(metadata) = tokio::fs::symlink_metadata(&candidate).await else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(target) = tokio::fs::read_link(&candidate).await else {
+            continue;
+        };
+        let target_display = target.to_string_lossy();
+        let managed_target = if target.is_absolute() {
+            target == expected
+        } else {
+            candidate
+                .parent()
+                .map(|parent| parent.join(&target) == expected)
+                .unwrap_or(false)
+        } || target_display.ends_with("/.grok/bin/agent");
+        if !managed_target {
+            continue;
+        }
+
+        match tokio::fs::remove_file(&candidate).await {
+            Ok(()) => {
+                tracing::info!(path = %candidate.display(), "removed legacy system agent alias")
+            }
+            Err(e) => {
+                tracing::debug!(path = %candidate.display(), "failed to remove legacy system agent alias: {e:#}")
+            }
+        }
     }
 }
 
 #[cfg(windows)]
-async fn reconcile_agent_exe_to_grok(bin_dir: &std::path::Path) {
-    let grok_exe = bin_dir.join("grok.exe");
+async fn remove_legacy_agent_entrypoint(bin_dir: &std::path::Path) {
     let agent_exe = bin_dir.join("agent.exe");
 
-    if tokio::fs::metadata(&grok_exe).await.is_err() {
+    // Windows installers historically copied the executable instead of
+    // creating a symlink. The managed bin directory is owned by the CLI, so
+    // remove the legacy copy whenever it is present; leave directories and
+    // other unexpected filesystem objects untouched.
+    let Ok(metadata) = tokio::fs::symlink_metadata(&agent_exe).await else {
+        return;
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
         return;
     }
-    match agent_exe_differs(&grok_exe, &agent_exe).await {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(e) => {
-            tracing::debug!("agent.exe reconcile: compare failed: {e:#}");
-            return;
-        }
-    }
-    match windows_replace_exe(&grok_exe, &agent_exe).await {
-        Ok(()) => tracing::info!("reconciled agent.exe to grok.exe"),
-        Err(e) => tracing::warn!("failed to reconcile agent.exe to grok.exe: {e:#}"),
+
+    match tokio::fs::remove_file(&agent_exe).await {
+        Ok(()) => tracing::info!("removed legacy ~/.grok/bin/agent.exe alias"),
+        Err(e) => tracing::warn!("failed to remove legacy agent.exe alias: {e:#}"),
     }
 }
 
-#[cfg(windows)]
-async fn agent_exe_differs(
-    grok: &std::path::Path,
-    agent: &std::path::Path,
-) -> std::io::Result<bool> {
-    use tokio::io::{AsyncReadExt, BufReader};
-    let grok_len = tokio::fs::metadata(grok).await?.len();
-    match tokio::fs::metadata(agent).await {
-        Ok(m) if m.len() != grok_len => return Ok(true),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(e) => return Err(e),
-    }
-    let mut rg = BufReader::new(tokio::fs::File::open(grok).await?);
-    let mut ra = BufReader::new(tokio::fs::File::open(agent).await?);
-    let mut bg = [0u8; 64 * 1024];
-    let mut ba = [0u8; 64 * 1024];
-    loop {
-        let n = rg.read(&mut bg).await?;
-        if n == 0 {
-            return Ok(false);
-        }
-        ra.read_exact(&mut ba[..n]).await?;
-        if bg[..n] != ba[..n] {
-            return Ok(true);
-        }
-    }
-}
+#[cfg(not(any(unix, windows)))]
+async fn remove_legacy_agent_entrypoint(_bin_dir: &std::path::Path) {}
 
 /// Download a single asset from a GitHub release via `gh release download`.
 async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -> Result<()> {
+    gh_release_download_from_repo(
+        tag,
+        pattern,
+        dest,
+        &crate::version::effective_release_repo()
+            .unwrap_or_else(|| crate::version::GH_RELEASE_REPO.to_owned()),
+    )
+    .await
+}
+
+async fn gh_release_download_from_repo(
+    tag: &str,
+    pattern: &str,
+    dest: &std::path::Path,
+    repo: &str,
+) -> Result<()> {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -2353,7 +2418,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
         "download",
         tag,
         "--repo",
-        crate::version::GH_RELEASE_REPO,
+        repo,
         "--pattern",
         pattern,
         "--output",
@@ -2375,7 +2440,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
             "gh release download failed for {} tag {} from {}: {}",
             pattern,
             tag,
-            crate::version::GH_RELEASE_REPO,
+            repo,
             stderr.trim()
         );
     }
@@ -2420,7 +2485,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         tokio::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).await?;
     }
 
-    // Atomic swap of ~/.grok/bin/{grok,agent} -> downloaded binary.
+    // Atomically replace ~/.grok/bin/grok with the downloaded binary. The
+    // swap helper also removes the legacy `agent` alias.
     swap_managed_bin_links(&binary_path, &bin_dir).await?;
 
     // Update grok-latest -> versioned binary so any existing symlinks that route
@@ -2435,12 +2501,12 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
         }
     }
 
-    // Also update /usr/local/bin/{grok,agent} if either points directly into
+    // Also update /usr/local/bin/grok if it points directly into
     // ~/.grok/downloads/ (legacy layout — skips the grok-latest indirection).
     // Permission errors ignored.
     #[cfg(unix)]
-    for name in ["grok", "agent"] {
-        let system_link = std::path::PathBuf::from(format!("/usr/local/bin/{name}"));
+    {
+        let system_link = std::path::PathBuf::from("/usr/local/bin/grok");
         if let Ok(existing_target) = tokio::fs::read_link(&system_link).await {
             let target_str = existing_target.to_string_lossy();
             if target_str.contains(".grok/downloads/") && !target_str.ends_with("grok-latest") {

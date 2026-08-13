@@ -235,120 +235,6 @@ fn test_installer_manages_bin_entrypoints_gate() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn test_reconcile_agent_repoints_diverged_agent() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-    std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
-
-    std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-        .unwrap();
-    std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
-        .unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert_eq!(
-        std::fs::read_link(bin.join("agent")).unwrap(),
-        std::path::PathBuf::from("../downloads/grok-0.2.101-macos-aarch64"),
-    );
-    assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
-    assert!(downloads.join("grok-0.1.199-macos-aarch64").exists());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_reconcile_agent_heals_legacy_unversioned_agent() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-    std::fs::write(downloads.join("grok-macos-aarch64"), "legacy").unwrap();
-
-    std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-        .unwrap();
-    std::os::unix::fs::symlink("../downloads/grok-macos-aarch64", bin.join("agent")).unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert_eq!(
-        std::fs::read_link(bin.join("agent")).unwrap(),
-        std::path::PathBuf::from("../downloads/grok-0.2.101-macos-aarch64"),
-    );
-    assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_reconcile_agent_creates_missing_agent() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-    std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-        .unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert!(bin.join("agent").is_symlink());
-    assert_eq!(std::fs::read_to_string(bin.join("agent")).unwrap(), "new");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_reconcile_agent_noop_when_consistent() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
-    let target = "../downloads/grok-0.2.101-macos-aarch64";
-    std::os::unix::fs::symlink(target, bin.join("grok")).unwrap();
-    std::os::unix::fs::symlink(target, bin.join("agent")).unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert_eq!(
-        std::fs::read_link(bin.join("agent")).unwrap(),
-        std::path::PathBuf::from(target),
-    );
-    let leftovers = std::fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().contains(".tmp-link"))
-        .count();
-    assert_eq!(leftovers, 0, "no temp links from a no-op reconcile");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_reconcile_agent_skips_when_grok_dangling() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::os::unix::fs::symlink("../downloads/grok-0.2.101-macos-aarch64", bin.join("grok"))
-        .unwrap();
-    std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
-    std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
-        .unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert_eq!(
-        std::fs::read_link(bin.join("agent")).unwrap(),
-        std::path::PathBuf::from("../downloads/grok-0.1.199-macos-aarch64"),
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn test_reconcile_agent_skips_when_grok_not_symlink() {
-    let (_dir, bin, downloads) = managed_layout();
-    std::fs::write(bin.join("grok"), "copy-binary").unwrap();
-    std::fs::write(downloads.join("grok-0.1.199-macos-aarch64"), "old").unwrap();
-    std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
-        .unwrap();
-
-    reconcile_agent_to_grok(&bin).await;
-
-    assert_eq!(
-        std::fs::read_link(bin.join("agent")).unwrap(),
-        std::path::PathBuf::from("../downloads/grok-0.1.199-macos-aarch64"),
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn test_sweep_stale_tmp_links_removes_stale_keeps_fresh_and_active() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("binary-v1");
@@ -979,117 +865,101 @@ async fn test_cleanup_old_downloads_mixed_stable_and_alpha() {
         "stable 0.1.148 deleted"
     );
 }
-
 // ──────────────────────────────────────────────────────────────────────
 // reinstall_hint
 // ──────────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_reinstall_hint_npm_mentions_npm_command() {
-    let hint = reinstall_hint("npm", "stable");
-    assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
-    assert!(
-        hint.contains("@xai-official/grok"),
-        "should name the package: {hint}"
-    );
+    let hint = reinstall_hint("npm");
+    if xai_grok_overlay::load_runtime()
+        .ok()
+        .is_some_and(|runtime| runtime.policy().mode.is_open())
+    {
+        assert!(
+            hint.contains("No update source")
+                || hint.contains("configured update source")
+                || hint.contains("gh release download")
+                || hint.contains("https://"),
+            "Open mode must not suggest the first-party npm package: {hint}"
+        );
+        assert!(
+            !hint.contains("@xai-official/grok"),
+            "Open mode must not suggest the first-party npm package: {hint}"
+        );
+    } else {
+        assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
+        assert!(
+            hint.contains("@xai-official/grok"),
+            "should name the package: {hint}"
+        );
+    }
 }
 
 #[test]
 fn test_reinstall_hint_gh_release_mentions_gh_command() {
-    let hint = reinstall_hint("gh-release", "stable");
+    let hint = reinstall_hint("gh-release");
     assert!(
-        hint.contains("gh release download"),
-        "should suggest gh release download: {hint}"
+        hint.contains("gh release download")
+            || hint.contains("No update source")
+            || hint.contains("configured update source"),
+        "should suggest an explicit release source: {hint}"
     );
-    assert!(
-        hint.contains("xai-org-shared/grok-build"),
-        "should name the repo: {hint}"
-    );
+    if xai_grok_overlay::load_runtime()
+        .ok()
+        .is_some_and(|runtime| runtime.policy().mode.is_open())
+    {
+        assert!(
+            !hint.contains("xai-org-shared/grok-build"),
+            "Open mode must not name the first-party repo: {hint}"
+        );
+    }
 }
 
 #[test]
 fn test_reinstall_hint_internal_mentions_platform_installer() {
-    let hint = reinstall_hint("internal", "stable");
-    if cfg!(windows) {
-        assert!(hint.contains("irm"), "should suggest irm install: {hint}");
+    let hint = reinstall_hint("internal");
+    let open_mode = xai_grok_overlay::load_runtime()
+        .ok()
+        .is_some_and(|runtime| runtime.policy().mode.is_open());
+    if open_mode {
         assert!(
-            hint.contains("install.ps1"),
-            "should reference install.ps1: {hint}"
+            !hint.contains("x.ai"),
+            "Open mode must not use xAI installer: {hint}"
         );
         assert!(
             !hint.contains("GROK_CHANNEL"),
             "stable must not set channel: {hint}"
         );
     } else {
-        assert!(hint.contains("curl"), "should suggest curl install: {hint}");
-        assert!(
-            hint.contains("install.sh"),
-            "should reference install.sh: {hint}"
-        );
-        assert!(
-            !hint.contains("GROK_CHANNEL"),
-            "stable must not set channel: {hint}"
-        );
-    }
-}
-
-#[test]
-fn test_reinstall_hint_internal_alpha_sets_channel() {
-    let hint = reinstall_hint("internal", "alpha");
-    if cfg!(windows) {
-        assert!(
-            hint.contains("$env:GROK_CHANNEL='alpha'"),
-            "alpha should set GROK_CHANNEL: {hint}"
-        );
-    } else {
-        assert!(
-            hint.contains("| GROK_CHANNEL='alpha' bash"),
-            "alpha must set GROK_CHANNEL on bash (the process running \
-             install.sh), not curl: {hint}"
-        );
-    }
-}
-
-#[test]
-fn test_reinstall_hint_enterprise_uses_enterprise_script() {
-    // Enterprise ships via its own bootstrap script (channel hardcoded
-    // there), never install.sh + GROK_CHANNEL.
-    let hint = reinstall_hint("internal", "enterprise");
-    assert!(
-        hint.contains("/enterprise-install."),
-        "enterprise must use the published enterprise-install script: {hint}"
-    );
-    assert!(
-        !hint.contains("GROK_CHANNEL"),
-        "enterprise script needs no channel env: {hint}"
-    );
-}
-
-#[test]
-fn test_reinstall_hint_malformed_channel_falls_back_to_stable() {
-    // Free-text config channels never reach the shell one-liner unless
-    // they are plain [A-Za-z0-9._-] tokens.
-    for bad in ["al pha", "x'; rm -rf ~;'", "a\"b", ""] {
-        let hint = reinstall_hint("internal", bad);
-        assert!(
-            !hint.contains("GROK_CHANNEL"),
-            "malformed channel {bad:?} must fall back to stable: {hint}"
-        );
+        if cfg!(windows) {
+            assert!(hint.contains("irm"), "should suggest irm install: {hint}");
+            assert!(
+                hint.contains("install.ps1"),
+                "should reference install.ps1: {hint}"
+            );
+        } else {
+            assert!(hint.contains("curl"), "should suggest curl install: {hint}");
+            assert!(
+                hint.contains("install.sh"),
+                "should reference install.sh: {hint}"
+            );
+        }
     }
 }
 
 #[test]
 fn test_reinstall_hint_unknown_falls_back_to_internal() {
     // Unknown installer falls back to the same hint as "internal".
-    let unknown = reinstall_hint("homebrew", "stable");
-    let internal = reinstall_hint("internal", "stable");
+    let unknown = reinstall_hint("homebrew");
+    let internal = reinstall_hint("internal");
     assert_eq!(unknown, internal);
 }
 
 #[test]
 fn test_reinstall_hint_empty_falls_back_to_internal() {
-    let hint = reinstall_hint("", "stable");
-    assert_eq!(hint, reinstall_hint("internal", "stable"));
+    let hint = reinstall_hint("");
+    assert_eq!(hint, reinstall_hint("internal"));
 }
 
 #[test]
@@ -2557,4 +2427,37 @@ async fn test_windows_replace_exe_sweeps_accumulated_asides() {
         agent_old.exists(),
         "other executables' leftovers must be untouched"
     );
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn test_remove_legacy_agent_preserves_unrelated_regular_file() {
+    let (_dir, bin, downloads) = managed_layout();
+    std::fs::write(downloads.join("grok-0.2.101-macos-aarch64"), "new").unwrap();
+    std::fs::write(bin.join("agent"), "user tool").unwrap();
+
+    remove_legacy_agent_entrypoint(&bin).await;
+
+    assert_eq!(
+        std::fs::read_to_string(bin.join("agent")).unwrap(),
+        "user tool"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_swap_managed_bin_links_removes_legacy_agent() {
+    let (_dir, bin, downloads) = managed_layout();
+    let old = downloads.join("grok-0.1.199-macos-aarch64");
+    let new = downloads.join("grok-0.2.101-macos-aarch64");
+    std::fs::write(&old, "old").unwrap();
+    std::fs::write(&new, "new").unwrap();
+    std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("grok"))
+        .unwrap();
+    std::os::unix::fs::symlink("../downloads/grok-0.1.199-macos-aarch64", bin.join("agent"))
+        .unwrap();
+
+    swap_managed_bin_links(&new, &bin).await.unwrap();
+
+    assert!(!bin.join("agent").exists());
+    assert_eq!(std::fs::read_to_string(bin.join("grok")).unwrap(), "new");
 }

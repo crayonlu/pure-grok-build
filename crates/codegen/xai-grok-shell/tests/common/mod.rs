@@ -293,8 +293,7 @@ pub mod leader {
 }
 
 /// Create a sampling client configured for a mock server. Shared by the
-/// integration tests so the ~30-field `SamplerConfig` literal lives in one
-/// place (`SamplerConfig` has no `Default`).
+/// integration tests so the `SamplerConfig` literal lives in one place.
 #[allow(dead_code)]
 pub fn create_test_client(base_url: &str, api_backend: ApiBackend) -> Client {
     create_test_client_with_extra_headers(base_url, api_backend, &[])
@@ -352,6 +351,7 @@ pub fn test_sampler_config(
         attribution_callback: None,
         bearer_resolver: None,
         supports_backend_search: false,
+        supports_vision: true,
         compactions_remaining: None,
         compaction_at_tokens: None,
         doom_loop_recovery: None,
