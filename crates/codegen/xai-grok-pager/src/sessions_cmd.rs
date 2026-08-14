@@ -42,7 +42,11 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
     // for these setups), any cached credential will be used. Otherwise we still
     // proceed so the SessionRegistryClient can use the deployment_key when
     // talking to the custom proxy.
-    let auth = try_ensure_fresh_auth(&agent_config.grok_com_config).await;
+    let auth = if agent_config.overlay_runtime.allows_session_auth() {
+        try_ensure_fresh_auth(&agent_config.grok_com_config).await
+    } else {
+        None
+    };
 
     let auth_manager = std::sync::Arc::new(AuthManager::new(
         &grok_home(),

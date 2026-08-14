@@ -176,6 +176,7 @@ pub(crate) async fn spawn_session_actor(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -393,6 +394,8 @@ pub(crate) async fn spawn_session_actor(
     };
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
+    } else if let Some(profile) = web_search_profile {
+        xai_grok_tools::implementations::WebSearchConfig::Profiled { profile }
     } else if let Some(cfg) = web_search_sampling_config {
         if let Some(api_key) = cfg.api_key {
             xai_grok_tools::implementations::WebSearchConfig::Enabled {
@@ -416,8 +419,49 @@ pub(crate) async fn spawn_session_actor(
         tracing::warn!("web_search disabled: configured model could not be resolved");
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     };
-    let embed_base_url = sampling_config.base_url.clone();
-    let embed_api_key = sampling_config.api_key.clone();
+    // Resolve embedding once at session startup.  The same runtime is stored
+    // in the backend params used by tool search, initial injection,
+    // compaction recovery, and background reindex.  In Open mode the resolver
+    // must not silently inherit the chat endpoint or a session credential.
+    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(
+            %error,
+            "overlay config could not be loaded; using fail-closed Open defaults"
+        );
+        xai_grok_overlay_api::OverlayRuntime::open()
+    });
+    let resolved_embedding_runtime = memory_config.as_ref().and_then(|memory| {
+        let runtime = crate::session::memory::resolve_embedding_runtime(
+            Some(&memory.embedding),
+            &sampling_config,
+            &credentials,
+        )?;
+        if overlay_runtime.policy().mode == xai_grok_overlay_api::OverlayMode::Open
+            && !crate::session::memory::embedding_config_allowed_in_open(
+                &memory.embedding,
+                &runtime.base_url,
+            )
+        {
+            tracing::warn!(
+                endpoint = %runtime.base_url,
+                "memory embeddings: Open mode requires an explicit non-xAI endpoint; using FTS-only"
+            );
+            return None;
+        }
+        Some(runtime)
+    });
+    let embedding_config = resolved_embedding_runtime.as_ref().and_then(|_| {
+        memory_config
+            .as_ref()
+            .map(|memory| memory.embedding.clone())
+    });
+    let embed_base_url = resolved_embedding_runtime
+        .as_ref()
+        .map(|runtime| runtime.base_url.clone())
+        .unwrap_or_default();
+    let embed_api_key = resolved_embedding_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.api_key.clone());
     let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
         || crate::config::PruningConfig {
             enabled: false,
@@ -739,14 +783,19 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-        let embed_credentials = crate::auth::credential_provider::embedding_session_credentials(
-            &embed_base_url,
-            auth_manager.as_ref(),
-            api_key_provider.clone(),
-        );
+        let embed_credentials = if resolved_embedding_runtime.is_some() {
+            crate::auth::credential_provider::embedding_session_credentials(
+                &embed_base_url,
+                auth_manager.as_ref(),
+                api_key_provider.clone(),
+            )
+        } else {
+            crate::session::memory::EndpointScopedCredentials::none()
+        };
         let params = crate::session::memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
-            embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
+            embedding_runtime: resolved_embedding_runtime.clone(),
+            embed_config: embedding_config.clone(),
             embed_base_url: embed_base_url.clone(),
             embed_api_key: embed_api_key.clone(),
             search_config: memory_config
@@ -808,6 +857,9 @@ pub(crate) async fn spawn_session_actor(
         );
         None
     };
+    // The session actor takes ownership of these params; retain a clone for
+    // the background reindex task below so both paths share one runtime.
+    let reindex_params = memory_backend_params_for_session.clone();
     let context_window_tokens = context_window_override
         .map(|c| c.get())
         .unwrap_or(sampling_config.context_window);
@@ -1430,8 +1482,13 @@ pub(crate) async fn spawn_session_actor(
     };
     let mut effective_config = crate::config::load_effective_config()
         .ok()
+        .map(|raw| xai_grok_overlay::without_overlay(&raw))
         .and_then(|raw| crate::agent::config::Config::new_from_toml_cfg(&raw).ok())
         .unwrap_or_default();
+    // Keep the session-local effective config on the same distribution
+    // policy as the composition-root agent.  `Config::new_from_toml_cfg`
+    // intentionally remains upstream-compatible for library callers.
+    effective_config.overlay_runtime = overlay_runtime.clone();
     effective_config.remote_settings = remote_settings.clone();
     let goal_classifier_max_runs = effective_config.resolve_goal_classifier_max_runs().value;
     let goal_strategist_every = effective_config
@@ -1491,6 +1548,7 @@ pub(crate) async fn spawn_session_actor(
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,
         supports_backend_search: std::cell::Cell::new(sampling_config.supports_backend_search),
+        supports_vision: std::cell::Cell::new(sampling_config.supports_vision),
         tool_overrides: std::cell::RefCell::new(None),
         resolved_tool_overrides: resolved_tool_overrides.clone(),
         compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
@@ -1804,13 +1862,11 @@ pub(crate) async fn spawn_session_actor(
         let index_config = memory_config
             .as_ref()
             .map_or_else(Default::default, |mc| mc.index.clone());
-        let embed_config = memory_config
+        let embed_dims = resolved_embedding_runtime
             .as_ref()
-            .map(|mc| mc.embedding.clone())
-            .unwrap_or_default();
-        let embed_dims = embed_config.dimensions;
-        let sampling_base_url = embed_base_url.clone();
-        let sampling_api_key = embed_api_key.clone();
+            .map(|runtime| runtime.dimensions)
+            .or_else(|| embedding_config.as_ref().map(|config| config.dimensions))
+            .unwrap_or(1024);
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         tokio::task::spawn_local(async move {
@@ -1837,18 +1893,10 @@ pub(crate) async fn spawn_session_actor(
                     files = files.len(),
                     "MEMORY_REINDEX: background reindex complete"
                 );
-                let embedded_count = if let Some(api_key) = sampling_api_key {
-                    if let Some(provider) =
-                        crate::session::memory::embedding::ApiEmbeddingProvider::from_session(
-                            &embed_config,
-                            sampling_base_url,
-                            api_key,
-                        )
-                    {
-                        crate::session::memory::embed_missing_chunks(&index, &provider).await
-                    } else {
-                        0
-                    }
+                let embedded_count = if let Some(params) = reindex_params.as_ref()
+                    && let Some(provider) = params.make_embedding_provider().await
+                {
+                    crate::session::memory::embed_missing_chunks(&index, &provider).await
                 } else {
                     0
                 };
@@ -2154,6 +2202,7 @@ pub(crate) async fn spawn_session_on_thread(
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
+    web_search_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -2328,6 +2377,7 @@ pub(crate) async fn spawn_session_on_thread(
                         inference_idle_timeout_secs,
                         max_retries,
                         web_search_sampling_config,
+                        web_search_profile,
                         web_fetch_config,
                         image_gen_config,
                         video_gen_config,
