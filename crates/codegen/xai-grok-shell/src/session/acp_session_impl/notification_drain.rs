@@ -345,6 +345,9 @@ impl SessionActor {
         // before the user-message chunk can race in.
         self.broadcast_queue_changed_promoting(&state, running_display);
 
+        // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
+        // `running_task` is set on the next line.
+        self.turn_report.start_next_turn();
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             prompt_id,
@@ -516,14 +519,27 @@ impl SessionActor {
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
+    ///
+    /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`]: after an
+    /// interrupt the session really is idle, and that is the ping a host waits for.
     pub(super) async fn emit_session_idle_if_idle(&self) {
-        {
+        let suppressed = {
             let state = self.state.lock().await;
-            if !is_session_idle_for_injection(&state) {
+            if state_is_busy(&state) {
                 return;
             }
+            state.notifications_suppressed
+        };
+        // Reconciliation writes subagent records, so it stays behind the suppression check, and
+        // it runs in a child session, which the notification below does not.
+        if !suppressed {
+            self.reconcile_live_orphaned_subagents().await;
         }
-        self.reconcile_live_orphaned_subagents().await;
+        // Like the session-end `Stop`: a subagent settling is not the session settling.
+        // `SessionEnd` itself still fires for a child, carrying `subagentType`.
+        if self.startup_hints.is_subagent {
+            return;
+        }
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
                 .on_session_idle(&xai_agent_lifecycle::SessionIdleInput)
@@ -927,7 +943,7 @@ mod live_orphan_hook_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn emit_session_idle_skips_reconcile_when_not_idle() {
+    async fn emit_session_idle_skips_reconcile_while_suppressed() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {

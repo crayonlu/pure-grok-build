@@ -612,6 +612,8 @@ pub struct Requirements {
     pub write_file: Constrained<bool>,
     /// Voice dictation (STT). Pin via requirements/managed `[features] voice_mode`.
     pub voice_mode: Constrained<bool>,
+    /// The session search index. Pin via requirements/managed `[features] session_search`.
+    pub session_search: Constrained<bool>,
     pub sandbox_auto_allow_bash: Constrained<bool>,
     pub sandbox_profile: Constrained<String>,
     pub respect_gitignore: Constrained<bool>,
@@ -1852,6 +1854,11 @@ const NON_SERDE_CONFIG_PATHS: &[&str] = &[
     crate::util::config::REMOTE_FETCH_CONFIG_PATH,
     crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH,
 ];
+/// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups.
+fn is_non_serde_config_path(path: &str) -> bool {
+    NON_SERDE_CONFIG_PATHS.contains(&path)
+        || crate::util::config::WEB_SEARCH_DOMAIN_CONFIG_PATHS.contains(&path)
+}
 /// Parse `[auth_provider.<name>]` tables leniently: a malformed entry warns
 /// (surfaced by `grok inspect`) and is skipped, so it fails closed for the
 /// models referencing it instead of failing the whole config.
@@ -1964,7 +1971,7 @@ impl Config {
                     let top_level = path.split('.').next().unwrap_or(path);
                     user_table.contains_key(top_level)
                 })
-                .filter(|path| !NON_SERDE_CONFIG_PATHS.contains(&path.as_str()))
+                .filter(|path| !is_non_serde_config_path(path))
                 .collect(),
             None => Vec::new(),
         };
@@ -2582,6 +2589,18 @@ impl Config {
         let ff = self.remote_settings.as_ref().and_then(|s| s.session_recap);
         BoolFlag::env("GROK_SESSION_RECAP")
             .config(self.features.session_recap)
+            .feature_flag(ff)
+            .default(true)
+            .resolve()
+    }
+    /// Session search index. Default ON. Turn off with a `requirements.toml` or MDM pin, the
+    /// `GROK_SESSION_SEARCH` env var, the `[features] session_search` config key, or remote
+    /// settings, in that order. Only a pin outranks the environment.
+    pub(crate) fn resolve_session_search(&self) -> Resolved<bool> {
+        let ff = self.remote_settings.as_ref().and_then(|s| s.session_search);
+        BoolFlag::env("GROK_SESSION_SEARCH")
+            .requirement(self.requirements.session_search.pinned())
+            .config(self.features.session_search)
             .feature_flag(ff)
             .default(true)
             .resolve()
@@ -4647,6 +4666,10 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_recap: Option<bool>,
+    /// Full-text index of past sessions, behind `/load` deep search. `None` = defer to remote
+    /// settings / env / default (`true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_search: Option<bool>,
     /// Per-turn dashboard summary generated at turn end.
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

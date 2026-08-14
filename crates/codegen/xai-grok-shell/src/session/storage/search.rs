@@ -1,5 +1,5 @@
 //! Binds the `xai-grok-session-search` index to this crate's JSONL session
-//! store: a process-wide manager plus the two entry points the rest of the
+//! store: a process-wide manager plus the entry points the rest of the
 //! shell calls.
 //!
 //! Everything below the seam (the SQLite FTS5 cache, the cross-process
@@ -30,6 +30,7 @@ pub static SEARCH_INDEX_MANAGER: LazyLock<SearchIndexManager> = LazyLock::new(||
             Box::new(JsonlSessionSource(JsonlStorageAdapter::with_root(root)))
         },
         super::search_content::collect_all_indexable_content_single_pass,
+        super::search_gate::is_index_enabled,
     )
 });
 
@@ -79,6 +80,11 @@ impl SessionSource for JsonlSessionSource {
 pub fn notify_session_updated(session_id: &str, cwd: &str) {
     let root = crate::util::grok_home::grok_home();
     SEARCH_INDEX_MANAGER.enqueue(root, session_id.to_string(), cwd.to_string());
+}
+
+/// Remove one session from an index built earlier, whether or not this process still indexes.
+pub(crate) async fn evict_session(root_dir: &Path, session_id: &str) {
+    xai_grok_session_search::evict_session(root_dir, session_id).await;
 }
 
 /// Execute a session search query against the shared index.

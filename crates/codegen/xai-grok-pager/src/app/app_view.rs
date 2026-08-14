@@ -886,8 +886,8 @@ pub struct AppView {
     pub welcome_changelog_cta_rect: Option<ratatui::layout::Rect>,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
     pub auth_show_raw_url: bool,
-    /// Whether mouse capture is currently disabled for raw URL mode.
-    pub auth_mouse_disabled: bool,
+    /// We turned capture off for native select and owe a restore on leave.
+    pub native_select_hold: bool,
     /// Fetched session list for the session picker (None = not yet fetched).
     pub session_picker_entries: Option<Vec<SessionPickerEntry>>,
     /// Whether the session list is currently being fetched.
@@ -1508,7 +1508,7 @@ impl AppView {
             welcome_on_upgrade_cta: false,
             welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
-            auth_mouse_disabled: false,
+            native_select_hold: false,
             session_picker_entries: None,
             session_picker_loading: false,
             session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -4375,6 +4375,36 @@ impl AppView {
         }
         Some(InputOutcome::Changed)
     }
+    /// Release capture while a native-select surface is on screen so the terminal owns
+    /// drag-select. Restore only if we took the hold: a user who already had
+    /// `/toggle-mouse-reporting` off must stay off.
+    fn sync_native_selection_mouse(&mut self) {
+        if self.screen_mode.is_minimal() {
+            return;
+        }
+        let want_off = self.auth_show_raw_url
+            && matches!(self.active_view, ActiveView::Welcome)
+            && matches!(self.auth_state, AuthState::Authenticating { .. });
+        let capture_on = super::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire);
+        if want_off && capture_on {
+            self.native_select_hold = true;
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
+            });
+            #[cfg(windows)]
+            super::win_native_selection::enable_native_selection();
+            super::MOUSE_CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Release);
+        } else if !want_off && self.native_select_hold {
+            self.native_select_hold = false;
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
+            });
+            super::MOUSE_CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Release);
+            for agent in self.agents.values_mut() {
+                agent.set_sticky_toast_recursive(None);
+            }
+        }
+    }
     /// Render the current view to the terminal.
     ///
     /// Delegates to [`crate::render::draw::draw_frame`] which handles the
@@ -4409,28 +4439,7 @@ impl AppView {
                 });
             }
         }
-        let want_mouse_off = self.auth_show_raw_url
-            && !self.screen_mode.is_minimal()
-            && matches!(self.active_view, ActiveView::Welcome)
-            && matches!(self.auth_state, AuthState::Authenticating { .. });
-        if want_mouse_off && !self.auth_mouse_disabled {
-            self.auth_mouse_disabled = true;
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
-            });
-            #[cfg(windows)]
-            super::win_native_selection::enable_native_selection();
-            super::MOUSE_CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Release);
-        } else if !want_mouse_off && self.auth_mouse_disabled {
-            self.auth_mouse_disabled = false;
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
-            });
-            super::MOUSE_CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Release);
-            for agent in self.agents.values_mut() {
-                agent.set_sticky_toast_recursive(None);
-            }
-        }
+        self.sync_native_selection_mouse();
         self.maybe_trigger_small_screen_tip();
         self.maybe_trigger_ssh_wrap_tip();
         let compact = self.appearance.prompt.compact;

@@ -3537,6 +3537,62 @@ fn resolve_feedback_defaults_to_true_when_unset() {
 }
 #[test]
 #[serial]
+fn resolve_session_search_precedence() {
+    use xai_grok_test_support::EnvGuard;
+    fn resolved(apply: fn(&mut Config)) -> (bool, ConfigSource) {
+        let mut cfg = Config::default();
+        apply(&mut cfg);
+        let gate = cfg.resolve_session_search();
+        (gate.value, gate.source)
+    }
+    fn remote_off(cfg: &mut Config) {
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            session_search: Some(false),
+            ..Default::default()
+        });
+    }
+    {
+        let _env = EnvGuard::unset("GROK_SESSION_SEARCH");
+        assert_eq!(resolved(|_| {}), (true, ConfigSource::Default));
+        assert_eq!(resolved(remote_off), (false, ConfigSource::Remote));
+        assert_eq!(
+            resolved(|cfg| {
+                remote_off(cfg);
+                cfg.features.session_search = Some(true);
+            }),
+            (true, ConfigSource::Config),
+            "config.toml beats remote settings",
+        );
+    }
+    {
+        let _env = EnvGuard::set("GROK_SESSION_SEARCH", "0");
+        assert_eq!(
+            resolved(|cfg| cfg.features.session_search = Some(true)),
+            (false, ConfigSource::Env),
+            "env beats config.toml",
+        );
+    }
+    {
+        let _env = EnvGuard::set("GROK_SESSION_SEARCH", "1");
+        assert_eq!(
+            resolved(|cfg| cfg.features.session_search = Some(false)),
+            (true, ConfigSource::Env),
+            "env beats config.toml in both directions",
+        );
+        assert_eq!(
+            resolved(|cfg| {
+                cfg.features.session_search = Some(false);
+                cfg.requirements
+                    .session_search
+                    .pin(false, crate::config::RequirementSource::Unknown);
+            }),
+            (false, ConfigSource::Requirement),
+            "a requirements pin beats env, so a tenant cannot switch it back on",
+        );
+    }
+}
+#[test]
+#[serial]
 fn resolve_session_recap_defaults_to_true_when_unset() {
     unsafe { std::env::remove_var("GROK_SESSION_RECAP") };
     let cfg = Config::default();
@@ -5150,6 +5206,33 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         unused.iter().any(|k| k == "features.not_a_real_feature"),
         "real typos still surface: {unused:?}"
     );
+}
+/// `[toolset.web_search]`'s domain keys are read from the raw layers, not from
+/// `ShellToolsetConfig::web_search` (a `SamplerConfig`), so the scan must not
+/// call the documented settings typos.
+#[test]
+fn web_search_domain_keys_are_not_reported_unused() {
+    for key in ["allowed_domains", "excluded_domains"] {
+        let unused = unused_keys_from_toml(&format!(
+            r#"
+                [toolset.web_search]
+                {key} = ["docs.x.ai"]
+                not_a_real_key = true
+            "#
+        ));
+        assert!(
+            !unused
+                .iter()
+                .any(|k| k == &format!("toolset.web_search.{key}")),
+            "toolset.web_search.{key} must not be treated as a typo: {unused:?}"
+        );
+        assert!(
+            unused
+                .iter()
+                .any(|k| k == "toolset.web_search.not_a_real_key"),
+            "real typos in the same section still surface: {unused:?}"
+        );
+    }
 }
 #[test]
 fn config_warns_on_field_typos() {

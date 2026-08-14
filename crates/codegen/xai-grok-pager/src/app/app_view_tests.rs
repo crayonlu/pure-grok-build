@@ -236,7 +236,7 @@ pub(crate) fn test_app() -> AppView {
         welcome_on_upgrade_cta: false,
         welcome_changelog_cta_rect: None,
         auth_show_raw_url: false,
-        auth_mouse_disabled: false,
+        native_select_hold: false,
         session_picker_entries: None,
         session_picker_loading: false,
         session_picker_state: crate::views::picker::PickerState::with_mode(

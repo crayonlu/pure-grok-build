@@ -1606,7 +1606,7 @@ impl AgentView {
             }
         }
 
-        // UsageInfo: chrome (close / tab clicks / footer copy), then wheel scroll.
+        // UsageInfo: chrome first (tabs / close / footer stay clickable), then drag / wheel.
         if let Some(ActiveModal::UsageInfo { state }) = &mut self.active_modal {
             use crate::views::usage_modal::{
                 self, COPY_ALL_SESSION_INFO_SHORTCUT, COPY_SESSION_ID_SHORTCUT, UsageModalOutcome,
@@ -1623,8 +1623,8 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::ShortcutActivated(id) => {
-                    // The pointer is on the footer, not a value row.
-                    state.hovered_copy_line = None;
+                    // Footer click: drop gesture + hover.
+                    state.clear_text_drag();
                     if id == COPY_SESSION_ID_SHORTCUT {
                         self.copy_usage_modal_session_id();
                     } else if id == COPY_ALL_SESSION_INFO_SHORTCUT {
@@ -1639,10 +1639,29 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::Handled => {
-                    // Chrome consumed the event (cursor on a tab / close /
-                    // footer, or a no-op tab click). The pointer is no longer
-                    // over a value row, so drop any stale hover highlight.
-                    state.hovered_copy_line = None;
+                    match mouse.kind {
+                        // Same rule as content: bare Moved with an active drag is a
+                        // lost Up. Pending press is left alone for click-to-copy.
+                        MouseEventKind::Moved => {
+                            if state.has_active_drag() {
+                                return match state.finish_lost_drag() {
+                                    UsageModalOutcome::CopyText(text) => {
+                                        self.copy_usage_modal_text(&text);
+                                        InputOutcome::Changed
+                                    }
+                                    _ => {
+                                        state.hovered_copy_line = None;
+                                        InputOutcome::Changed
+                                    }
+                                };
+                            }
+                            state.hovered_copy_line = None;
+                        }
+                        // Same-tab click and other chrome Downs: drop gesture + hover.
+                        _ => {
+                            state.clear_text_drag();
+                        }
+                    }
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::Unhandled => {
@@ -1745,8 +1764,8 @@ impl AgentView {
         self.show_toast(delivery.toast_message().as_ref());
     }
 
-    /// Copy an arbitrary Session-info value row (Model Hash, Turn, etc.) and
-    /// toast the delivery outcome. Mirrors [`Self::copy_usage_modal_session_id`].
+    /// Copy Session-info text (`y` / footer "copy all") and toast the
+    /// delivery outcome. Mirrors [`Self::copy_usage_modal_session_id`].
     fn copy_usage_modal_text(&mut self, text: &str) {
         let delivery = crate::clipboard::copy_text_or_file(text);
         self.show_toast(delivery.toast_message().as_ref());

@@ -387,6 +387,11 @@ pub(crate) async fn spawn_session_actor(
             (0, Vec::new(), Vec::new())
         };
     let primary_model_id = sampling_config.model.clone();
+    let web_search_domains = if disable_web_search {
+        None
+    } else {
+        crate::util::config::resolve_web_search_domains_from_disk()
+    };
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(profile) = web_search_profile {
@@ -399,6 +404,12 @@ pub(crate) async fn spawn_session_actor(
                 model: cfg.model,
                 extra_headers: cfg.extra_headers,
                 alpha_test_key: credentials.alpha_test_key.clone(),
+                allowed_domains: web_search_domains
+                    .as_ref()
+                    .and_then(|o| o.allowed_domains.clone()),
+                excluded_domains: web_search_domains
+                    .as_ref()
+                    .and_then(|o| o.excluded_domains.clone()),
             }
         } else {
             tracing::warn!("web_search disabled: resolved config has no API key");
@@ -908,6 +919,7 @@ pub(crate) async fn spawn_session_actor(
             .map(|s| s.workspace_memory_file().to_string_lossy().into_owned()),
         memory_backend: memory_backend_for_spec,
         web_search_config: web_search_config.clone(),
+        web_search_domains,
         backend_search: backend_tools_enabled,
         web_fetch_config: web_fetch_config.clone(),
         image_gen_config: image_gen_config.clone(),
@@ -1699,6 +1711,9 @@ pub(crate) async fn spawn_session_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(built_hook_registry),
+        turn_report: Default::default(),
+        turn_abort: Default::default(),
+        turn_end_tx: Default::default(),
         client_hooks: std::cell::RefCell::new(client_hooks),
         hook_resolved_workspace_root: resolved_workspace_root,
         vcs_kind: {

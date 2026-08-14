@@ -392,7 +392,7 @@ impl SessionActor {
                 self.chat_state_handle.push_user_message(chat);
             }
         }
-        self.drain_pending_interjections().await;
+        self.drain_interjections_at_safe_point().await;
         self.flush_pending_skill_reminders().await;
         if let Some(final_result) = final_result {
             return Ok(final_result);
@@ -611,21 +611,11 @@ impl SessionActor {
                 }
             })
             .collect();
-        // Models flagged `supports_parallel_tool_calls = false` must run their
-        // tool calls one at a time, in model-emitted order. We still drive them
-        // through the same channel/post-processing pipeline; only the fan-out
-        // strategy changes (FuturesUnordered vs sequential await).
-        let parallel = self
-            .models_manager
-            .model_supports_parallel_tool_calls(&self.current_model_id().await);
-        if !parallel {
-            tracing::debug!(
-                session_id = %self.session_info.id.0,
-                batch_size = dispatch_futures.len(),
-                "model does not support parallel tool calls; executing sequentially"
-            );
-        }
         tokio::task::yield_now().await;
+        let mut dispatch_stream = futures::stream::FuturesUnordered::new();
+        for fut in dispatch_futures {
+            dispatch_stream.push(fut);
+        }
         let mut approved_slots: Vec<Option<PreparedToolCall>> =
             approved.into_iter().map(Some).collect();
         let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -635,22 +625,9 @@ impl SessionActor {
         )>();
         let drainer = tokio::spawn(
             async move {
-                if parallel {
-                    let mut dispatch_stream = futures::stream::FuturesUnordered::new();
-                    for fut in dispatch_futures {
-                        dispatch_stream.push(fut);
-                    }
-                    while let Some(item) = dispatch_stream.next().await {
-                        if dispatch_tx.send(item).is_err() {
-                            break;
-                        }
-                    }
-                } else {
-                    for fut in dispatch_futures {
-                        let item = fut.await;
-                        if dispatch_tx.send(item).is_err() {
-                            break;
-                        }
+                while let Some(item) = dispatch_stream.next().await {
+                    if dispatch_tx.send(item).is_err() {
+                        break;
                     }
                 }
             }
@@ -695,7 +672,7 @@ impl SessionActor {
                         .unwrap_or_else(|| prepared.tool_name.clone());
                     let drained = DrainedToolSuccess::new(tool_result);
                     post_tool_use_result = self
-                        .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUse)
+                        .may_have_hooks_for(xai_grok_hooks::event::HookEventName::PostToolUse)
                         .then(|| {
                             serde_json::to_value(drained.output())
                                 .unwrap_or(serde_json::Value::Null)
@@ -733,9 +710,9 @@ impl SessionActor {
                         )
                         .await;
                     deferred_followups.extend(err_followups);
-                    if self
-                        .hook_event_active(xai_grok_hooks::event::HookEventName::PostToolUseFailure)
-                    {
+                    if self.may_have_hooks_for(
+                        xai_grok_hooks::event::HookEventName::PostToolUseFailure,
+                    ) {
                         let raw_input: serde_json::Value =
                             serde_json::from_str(&prepared.raw_arguments)
                                 .unwrap_or(serde_json::Value::Null);
@@ -1006,13 +983,11 @@ impl SessionActor {
                 }
             }
         };
-        let tool_input = match self
-            .agent
-            .borrow()
-            .tool_bridge()
+        let parsed = self
+            .tool_bridge_handle()
             .try_parse(&call.function.name, raw_input.clone())
-            .await
-        {
+            .await;
+        let mut tool_input = match parsed {
             Ok(input) => input,
             Err(err) => {
                 self.handle_tool_parse_error(
@@ -1027,57 +1002,25 @@ impl SessionActor {
                 return Ok(Err(ToolLoop::ToolParsingError));
             }
         };
-        let access_kind = AccessKind::from(&tool_input);
-        let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
-        if plan_gate != PlanEditGate::Allow {
-            tracing::info_span!(
-                "tool.decision",
-                tool_name = %call.function.name,
-                tool_use_id = %call.id,
-                decision = "deny",
-                source = "plan_mode",
-                wait_ms = 0_i64,
-            )
-            .in_scope(|| {});
-            let msg = self.plan_mode_edit_rejected_message().await;
-            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
-                .await?;
-            return Ok(Err(ToolLoop::Continue));
-        }
-        let tool_call_display = self
-            .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
-            .await;
         let _recovered_raw_input = if concatenated_json_count > 0 {
             Some(raw_input.clone())
         } else {
             None
         };
-        let dispatch_target_name = tool_input.dispatch_target_name();
-        let resolved_tool_name = dispatch_target_name
+        let mut dispatch_target_name = tool_input.dispatch_target_name();
+        let mut resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
-        let mut hook_updated_input: Option<serde_json::Map<String, serde_json::Value>> = None;
-        if self.hook_event_active(xai_grok_hooks::event::HookEventName::PreToolUse) {
-            let (hook_tool_input, hook_tool_input_truncated) =
-                xai_grok_hooks::event::truncate_payload(raw_input.clone());
-            let envelope = self.make_hook_envelope(
-                xai_grok_hooks::event::HookEventName::PreToolUse,
-                None,
-                xai_grok_hooks::event::HookPayload::PreToolUse {
-                    tool_name: resolved_tool_name.clone(),
-                    tool_use_id: call.id.clone(),
-                    tool_input: hook_tool_input,
-                    tool_input_truncated: hook_tool_input_truncated,
-                    subagent_type: self.subagent_type_label(),
-                },
-            );
+        let mut raw_arguments = call.function.arguments.clone();
+        if self.may_have_hooks_for(xai_grok_hooks::event::HookEventName::PreToolUse) {
+            let mut envelope =
+                self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
             let hook_registry_snapshot = self.hook_registry.borrow().clone();
             if let Some(registry) = hook_registry_snapshot {
                 let ctx = self.hook_run_ctx();
                 let pre_result =
                     xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
                         .await;
-                hook_updated_input = pre_result.updated_input.clone();
                 self.send_hook_execution(
                     "pre_tool_use",
                     Some(&resolved_tool_name),
@@ -1104,6 +1047,35 @@ impl SessionActor {
                         )
                         .await?));
                 }
+                if let Some(rewrite) = pre_result.updated_input {
+                    let updated = rewrite.input;
+                    let updated_args = updated.to_string();
+                    let parsed = self
+                        .tool_bridge_handle()
+                        .try_parse(&call.function.name, updated.clone())
+                        .await;
+                    tool_input = match parsed {
+                        Ok(input) => input,
+                        Err(err) => {
+                            let msg = format!(
+                                "PreToolUse hook '{}' returned an invalid updatedInput: {err}",
+                                rewrite.hook_name
+                            );
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
+                                .await?;
+                            return Ok(Err(ToolLoop::ToolParsingError));
+                        }
+                    };
+                    dispatch_target_name = tool_input.dispatch_target_name();
+                    resolved_tool_name = dispatch_target_name
+                        .clone()
+                        .unwrap_or_else(|| call.function.name.clone());
+                    raw_arguments = updated_args;
+                    raw_input = updated;
+                    concatenated_json_count = 0;
+                    envelope =
+                        self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
+                }
             }
             if let Some(denied) = self
                 .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
@@ -1112,34 +1084,26 @@ impl SessionActor {
                 return Ok(Err(denied));
             }
         }
-        // --- Apply hook-requested input rewrites (Claude Code `updatedInput`) ---
-        // A `PreToolUse` hook can shallow-merge `hookSpecificOutput.updatedInput`
-        // into the tool call's input (e.g. RTK prefixing a bash command). Re-parse
-        // so access control and execution observe the rewritten input.
-        let mut tool_input = tool_input;
-        let mut access_kind = access_kind;
-        if let Some(updated) = hook_updated_input {
-            let merged = match raw_input.clone() {
-                serde_json::Value::Object(mut obj) => {
-                    for (k, v) in updated {
-                        obj.insert(k, v);
-                    }
-                    serde_json::Value::Object(obj)
-                }
-                _ => serde_json::Value::Object(updated),
-            };
-            if let Ok(new_input) = self
-                .agent
-                .borrow()
-                .tool_bridge()
-                .try_parse(&call.function.name, merged.clone())
-                .await
-            {
-                tool_input = new_input;
-                access_kind = AccessKind::from(&tool_input);
-                raw_input = merged;
-            }
+        let access_kind = AccessKind::from(&tool_input);
+        let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
+        if plan_gate != PlanEditGate::Allow {
+            tracing::info_span!(
+                "tool.decision",
+                tool_name = %call.function.name,
+                tool_use_id = %call.id,
+                decision = "deny",
+                source = "plan_mode",
+                wait_ms = 0_i64,
+            )
+            .in_scope(|| {});
+            let msg = self.plan_mode_edit_rejected_message().await;
+            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
         }
+        let tool_call_display = self
+            .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
+            .await;
         let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
             self.plan_mode
                 .lock()
@@ -1499,7 +1463,7 @@ impl SessionActor {
             call_id: call.id.clone(),
             tool_call_id,
             tool_name: call.function.name.clone(),
-            raw_arguments: call.function.arguments.clone(),
+            raw_arguments,
             parsed_args: raw_input.clone(),
             model_id: model_id_str,
             concatenated_json_count,
@@ -2078,6 +2042,26 @@ impl SessionActor {
             trigger: xai_grok_telemetry::events::SkillTrigger::SkillMdRead,
         });
     }
+    fn make_pre_tool_use_envelope(
+        &self,
+        resolved_tool_name: &str,
+        call_id: &str,
+        input: &serde_json::Value,
+    ) -> xai_grok_hooks::event::HookEventEnvelope {
+        let (tool_input, tool_input_truncated) =
+            xai_grok_hooks::event::truncate_payload(input.clone());
+        self.make_hook_envelope(
+            xai_grok_hooks::event::HookEventName::PreToolUse,
+            None,
+            xai_grok_hooks::event::HookPayload::PreToolUse {
+                tool_name: resolved_tool_name.to_string(),
+                tool_use_id: call_id.to_string(),
+                tool_input,
+                tool_input_truncated,
+                subagent_type: self.subagent_type_label(),
+            },
+        )
+    }
     async fn handle_tool_parse_error(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2371,7 +2355,6 @@ impl SessionActor {
             result.prompt_text
         };
         let mut inline_images: Vec<ContentPart> = Vec::new();
-        let model_supports_vision = self.supports_vision.get();
         let extraction = if !self.is_cursor_harness()
             && !matches!(
                 result.output,
@@ -2401,75 +2384,49 @@ impl SessionActor {
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            if !model_supports_vision {
-                use base64::Engine as _;
-                let raw_size = base64::engine::general_purpose::STANDARD
-                    .decode(&image_content.data)
-                    .map(|b| b.len())
-                    .unwrap_or(0);
-                prompt_text = format!(
-                    "[Image file {path} ({mime}, {size} bytes) was read but not embedded: \
-                     the active model does not support vision. The file exists on disk; \
-                     use a vision-capable model or a text-extraction tool to inspect it.]",
-                    mime = image_content.mime_type,
-                    size = raw_size,
-                );
-            } else {
-                use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
-                match inline_attach_verdict(&image_content.data) {
-                    InlineAttachVerdict::TooSmall => {
-                        prompt_text = format!(
-                            "[Image from {path} was not attached: too small for vision models]"
-                        );
-                    }
-                    InlineAttachVerdict::Unreadable => {
-                        prompt_text = format!(
-                            "[Image from {path} was not attached: invalid or unreadable image data]"
-                        );
-                    }
-                    InlineAttachVerdict::Attach => {
-                        let url = format!(
-                            "data:{};base64,{}",
-                            image_content.mime_type, image_content.data
-                        );
-                        inline_images.push(ContentPart::Image {
-                            url: std::sync::Arc::<str>::from(url),
-                        });
-                        prompt_text = format!("Read image file: {path}");
-                    }
+            use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
+            match inline_attach_verdict(&image_content.data) {
+                InlineAttachVerdict::TooSmall => {
+                    prompt_text = format!(
+                        "[Image from {path} was not attached: too small for vision models]"
+                    );
+                }
+                InlineAttachVerdict::Unreadable => {
+                    prompt_text = format!(
+                        "[Image from {path} was not attached: invalid or unreadable image data]"
+                    );
+                }
+                InlineAttachVerdict::Attach => {
+                    let url = format!(
+                        "data:{};base64,{}",
+                        image_content.mime_type, image_content.data
+                    );
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                    prompt_text = format!("Read image file: {path}");
                 }
             }
         }
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
+            for page in &pdf.pages {
+                let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                inline_images.push(ContentPart::Image {
+                    url: std::sync::Arc::<str>::from(url),
+                });
+            }
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            if !model_supports_vision {
-                prompt_text = format!(
-                    "Read PDF file: {path} ({} pages rendered as images, {} total). \
-                     Image pages were not embedded because the active model does not support \
-                     vision. Re-read the file with output format \"text\" to obtain its \
-                     textual content.",
-                    pdf.pages.len(),
-                    pdf.total_pages,
-                );
-            } else {
-                for page in &pdf.pages {
-                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                }
-                prompt_text = format!(
-                    "Read PDF file: {path} ({} pages rendered, {} total)",
-                    pdf.pages.len(),
-                    pdf.total_pages,
-                );
-            }
+            prompt_text = format!(
+                "Read PDF file: {path} ({} pages rendered, {} total)",
+                pdf.pages.len(),
+                pdf.total_pages,
+            );
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2482,7 +2439,7 @@ impl SessionActor {
         };
         self.chat_state_handle.push_tool_result(tool_chat);
         let mut deferred_followups = Vec::new();
-        if model_supports_vision && !extracted_images.is_empty() {
+        if !extracted_images.is_empty() {
             let count = extracted_images.len();
             tracing::info!(
                 session_id = %self.session_info.id,

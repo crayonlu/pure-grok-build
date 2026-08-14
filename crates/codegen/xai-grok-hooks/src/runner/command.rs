@@ -509,26 +509,16 @@ fn parse_blocking_result(
     elapsed: Duration,
 ) -> (HookRunnerResult, Duration) {
     let json_decision = if !stdout.trim().is_empty() {
-        serde_json::from_str::<GateHookJson>(stdout.trim()).ok()
+        serde_json::from_str::<GateHookJson>(stdout.trim())
+            .ok()
+            .filter(GateHookJson::is_gate_document)
     } else {
         None
     };
 
     if let Some(output) = json_decision {
-        let (hook_decision, updated_input) =
-            match gate_json_to_decision(output, hook_name, stderr_first_line(stderr).as_deref()) {
-                Ok(pair) => pair,
-                // Unknown decision value: failure so typos surface, carrying the
-                // stderr line like every other failure on this path.
-                Err(err) => {
-                    return (
-                        HookRunnerResult::Failed(append_stderr_line(&err, stderr)),
-                        elapsed,
-                    );
-                }
-            };
-        match hook_decision {
-            HookDecision::Deny { reason, hook_name } => {
+        match gate_json_to_decision(&output, hook_name, stderr_first_line(stderr).as_deref()) {
+            Ok(HookDecision::Deny { reason, hook_name }) => {
                 // A JSON deny is honored on any exit code (fail-safe).
                 if exit_code != GATE_EXIT_CODE && exit_code != 0 {
                     tracing::warn!(
@@ -537,15 +527,9 @@ fn parse_blocking_result(
                         "JSON decision is 'deny' but exit code is not 0 or 2 — using JSON decision"
                     );
                 }
-                return (
-                    HookRunnerResult::Decision {
-                        decision: HookDecision::Deny { reason, hook_name },
-                        updated_input,
-                    },
-                    elapsed,
-                );
+                return (HookRunnerResult::Deny { reason, hook_name }, elapsed);
             }
-            HookDecision::Allow => {
+            Ok(HookDecision::Allow) => {
                 if exit_code == GATE_EXIT_CODE {
                     // Exit 2 wins over a JSON allow (stdout is not
                     // processed on exit 2); the exit-code ladder below
@@ -556,37 +540,40 @@ fn parse_blocking_result(
                     );
                 } else {
                     return (
-                        HookRunnerResult::Decision {
-                            decision: HookDecision::Allow,
-                            updated_input,
+                        HookRunnerResult::Allow {
+                            updated_input: output.updated_input(hook_name),
                         },
                         elapsed,
                     );
                 }
+            }
+            // Unknown decision value: failure so typos surface, carrying the
+            // stderr line like every other failure on this path.
+            Err(err) => {
+                return (
+                    HookRunnerResult::Failed(append_stderr_line(&err, stderr)),
+                    elapsed,
+                );
             }
         }
     }
 
     match exit_code {
         0 => (
-            HookRunnerResult::Decision {
-                decision: HookDecision::Allow,
+            HookRunnerResult::Allow {
                 updated_input: None,
             },
             elapsed,
         ),
         GATE_EXIT_CODE => (
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny {
-                    // On exit 2 stderr is the deny feedback channel. First line
-                    // only: a deny reason is a one-line audit/UI string (stop
-                    // blocks keep full stderr — see `parse_stop_result`).
-                    reason: stderr_first_line(stderr).unwrap_or_else(|| {
-                        format!("denied by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
-                    }),
-                    hook_name: hook_name.to_string(),
-                },
-                updated_input: None,
+            HookRunnerResult::Deny {
+                // On exit 2 stderr is the deny feedback channel. First line
+                // only: a deny reason is a one-line audit/UI string (stop
+                // blocks keep full stderr — see `parse_stop_result`).
+                reason: stderr_first_line(stderr).unwrap_or_else(|| {
+                    format!("denied by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
+                }),
+                hook_name: hook_name.to_string(),
             },
             elapsed,
         ),
@@ -708,13 +695,7 @@ mod tests {
     fn parse_json_decision() {
         let (allow, _) =
             parse_blocking_result(r#"{"decision":"allow"}"#, "", 0, "test", Duration::ZERO);
-        assert!(matches!(
-            allow,
-            HookRunnerResult::Decision {
-                decision: HookDecision::Allow,
-                updated_input: None,
-            }
-        ));
+        assert!(matches!(allow, HookRunnerResult::Allow { .. }));
 
         let (deny, _) = parse_blocking_result(
             r#"{"decision":"deny","reason":"bad command"}"#,
@@ -724,10 +705,7 @@ mod tests {
             Duration::ZERO,
         );
         match deny {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { reason, .. },
-                ..
-            } => {
+            HookRunnerResult::Deny { reason, .. } => {
                 assert_eq!(reason, "bad command");
             }
             other => panic!("expected Deny, got {other:?}"),
@@ -736,10 +714,7 @@ mod tests {
         let (deny_no_reason, _) =
             parse_blocking_result(r#"{"decision":"deny"}"#, "", 2, "my-hook", Duration::ZERO);
         match deny_no_reason {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { reason, .. },
-                ..
-            } => {
+            HookRunnerResult::Deny { reason, .. } => {
                 assert!(reason.contains("my-hook"));
             }
             other => panic!("expected Deny, got {other:?}"),
@@ -751,31 +726,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_updated_input() {
+        let (allow, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"updatedInput":{"command":"echo hi"}}}"#,
+            "",
+            0,
+            "test",
+            Duration::ZERO,
+        );
+        match allow {
+            HookRunnerResult::Allow {
+                updated_input: Some(input),
+            } => assert_eq!(input["command"], "echo hi"),
+            other => panic!("expected Allow with updatedInput, got {other:?}"),
+        }
+
+        let (deny, _) = parse_blocking_result(
+            r#"{"decision":"deny","hookSpecificOutput":{"updatedInput":{"command":"x"}}}"#,
+            "",
+            0,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(deny, HookRunnerResult::Deny { .. }));
+
+        let (allow_no_rewrite, _) = parse_blocking_result(
+            r#"{"hookSpecificOutput":{"updatedInput":"nope"}}"#,
+            "",
+            0,
+            "test",
+            Duration::ZERO,
+        );
+        assert!(matches!(
+            allow_no_rewrite,
+            HookRunnerResult::Allow {
+                updated_input: None
+            }
+        ));
+    }
+
+    #[test]
     fn fallback_to_exit_code() {
         for (stdout, code, expect_allow) in
             [("", 0, true), ("not json at all", 0, true), ("", 2, false)]
         {
             let (result, _) = parse_blocking_result(stdout, "", code, "test", Duration::ZERO);
             if expect_allow {
-                assert!(matches!(
-                    result,
-                    HookRunnerResult::Decision {
-                        decision: HookDecision::Allow,
-                        updated_input: None,
-                    }
-                ));
+                assert!(matches!(result, HookRunnerResult::Allow { .. }));
             } else {
-                assert!(matches!(
-                    result,
-                    HookRunnerResult::Decision {
-                        decision: HookDecision::Deny { .. },
-                        ..
-                    }
-                ));
+                assert!(matches!(result, HookRunnerResult::Deny { .. }));
             }
         }
         let (fail, _) = parse_blocking_result("", "", 1, "test", Duration::ZERO);
         assert!(matches!(fail, HookRunnerResult::Failed(_)));
+    }
+
+    #[test]
+    fn non_gate_json_falls_through_to_exit_code() {
+        let (fail, _) =
+            parse_blocking_result(r#"{"detail":"not found"}"#, "", 1, "test", Duration::ZERO);
+        assert!(matches!(fail, HookRunnerResult::Failed(_)));
+
+        let (allow, _) = parse_blocking_result(r#"{"detail":"ok"}"#, "", 0, "test", Duration::ZERO);
+        assert!(matches!(allow, HookRunnerResult::Allow { .. }));
     }
 
     /// Failure results and exit-2 deny reasons carry the hook's first stderr
@@ -784,10 +797,7 @@ mod tests {
     #[test]
     fn blocking_result_surfaces_stderr() {
         let deny_reason = |result: HookRunnerResult| match result {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { reason, .. },
-                ..
-            } => reason,
+            HookRunnerResult::Deny { reason, .. } => reason,
             other => panic!("expected Deny, got {other:?}"),
         };
 
@@ -832,10 +842,7 @@ mod tests {
 
         let (deny, _) = parse_blocking_result("", &long, 2, "test", Duration::ZERO);
         match deny {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { reason, .. },
-                ..
-            } => {
+            HookRunnerResult::Deny { reason, .. } => {
                 assert!(reason.chars().count() <= MAX_STDERR_LINE_CHARS + 1);
             }
             other => panic!("expected Deny, got {other:?}"),
@@ -852,68 +859,20 @@ mod tests {
     #[test]
     fn blank_json_reason_falls_back() {
         let blank = || GateHookJson {
-            decision: "deny".to_string(),
+            decision: Some("deny".to_string()),
             reason: Some("  ".to_string()),
-            ..Default::default()
+            hook_specific_output: None,
         };
         let with_fallback =
-            gate_json_to_decision(blank(), "h", Some("quota exceeded")).expect("valid decision");
-        assert!(matches!(
-            with_fallback,
-            (HookDecision::Deny { ref reason, .. }, _) if reason == "quota exceeded"
-        ));
-
-        let without_fallback = gate_json_to_decision(blank(), "h", None).expect("valid decision");
-        assert!(matches!(
-            without_fallback,
-            (HookDecision::Deny { ref reason, .. }, _) if reason == "denied by hook 'h'"
-        ));
-    }
-
-    /// A `hookSpecificOutput.updatedInput` map is surfaced alongside the allow
-    /// decision so the caller can rewrite the tool call's input (Claude Code
-    /// protocol, used e.g. by RTK to prefix a bash command).
-    #[test]
-    fn updated_input_is_parsed_and_carried() {
-        let (result, _) = parse_blocking_result(
-            r#"{"decision":"allow","hookSpecificOutput":{"updatedInput":{"command":"rtk cargo build"}}}"#,
-            "",
-            0,
-            "rtk",
-            Duration::from_millis(1),
+            gate_json_to_decision(&blank(), "h", Some("quota exceeded")).expect("valid decision");
+        assert!(
+            matches!(with_fallback, HookDecision::Deny { ref reason, .. } if reason == "quota exceeded")
         );
-        match result {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Allow,
-                updated_input,
-            } => {
-                let map = updated_input.expect("updatedInput must be present");
-                assert_eq!(
-                    map.get("command").and_then(|v| v.as_str()),
-                    Some("rtk cargo build")
-                );
-            }
-            other => panic!("expected Allow decision with updatedInput, got {other:?}"),
-        }
-    }
 
-    /// A deny decision still carries any `updatedInput`; the caller ignores it.
-    #[test]
-    fn updated_input_with_deny_is_carried_but_ignored() {
-        let (result, _) = parse_blocking_result(
-            r#"{"decision":"deny","reason":"blocked","hookSpecificOutput":{"updatedInput":{"command":"rtk cargo build"}}}"#,
-            "",
-            0,
-            "rtk",
-            Duration::from_millis(1),
+        let without_fallback = gate_json_to_decision(&blank(), "h", None).expect("valid decision");
+        assert!(
+            matches!(without_fallback, HookDecision::Deny { ref reason, .. } if reason == "denied by hook 'h'")
         );
-        match result {
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { .. },
-                updated_input,
-            } => assert!(updated_input.is_some()),
-            other => panic!("expected Deny decision, got {other:?}"),
-        }
     }
 
     /// Unknown JSON decision values fail with the stderr line attached, like
@@ -961,23 +920,11 @@ mod tests {
             "test",
             Duration::ZERO,
         );
-        assert!(matches!(
-            deny,
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { .. },
-                ..
-            }
-        ));
+        assert!(matches!(deny, HookRunnerResult::Deny { .. }));
 
         let (blocked, _) =
             parse_blocking_result(r#"{"decision":"allow"}"#, "", 2, "test", Duration::ZERO);
-        assert!(matches!(
-            blocked,
-            HookRunnerResult::Decision {
-                decision: HookDecision::Deny { .. },
-                ..
-            }
-        ));
+        assert!(matches!(blocked, HookRunnerResult::Deny { .. }));
     }
 
     fn stop_outcome(result: HookRunnerResult) -> StopHookOutcome {
@@ -1337,13 +1284,7 @@ mod tests {
         let (result, _duration) = run_command_hook(&spec, &envelope, &ctx, GateKind::Tool).await;
 
         assert!(
-            matches!(
-                result,
-                HookRunnerResult::Decision {
-                    decision: HookDecision::Allow,
-                    updated_input: None,
-                }
-            ),
+            matches!(result, HookRunnerResult::Allow { .. }),
             "blocking hook should return Allow, got {:?}",
             result
         );

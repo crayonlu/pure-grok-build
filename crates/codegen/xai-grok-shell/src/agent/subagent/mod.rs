@@ -15,8 +15,7 @@ use crate::agent::models::resolve_catalog_key;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
     self, SessionCommand, SessionHandle, SessionThread,
-    commands::{PromptCompletionKind, PromptTurnResult as SubagentPromptTurnResult},
-    fs_watch::FsWatchCapabilities,
+    commands::PromptTurnResult as SubagentPromptTurnResult, fs_watch::FsWatchCapabilities,
     info::Info as SessionInfo,
 };
 use crate::terminal::AsyncTerminalRunner;
@@ -45,6 +44,7 @@ use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_tools::types::tool::ToolKind;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
+mod attempt_runner;
 mod handle_request;
 pub(crate) use handle_request::run_shell_child;
 /// How the child session's initial context was bootstrapped.
@@ -467,6 +467,7 @@ impl ChildControl for ShellChildRuntime {
                 .send(SessionCommand::Cancel(crate::session::CancelOptions {
                     cancel_subagents: true,
                     kill_background_tasks: true,
+                    trigger: Some(crate::session::CancelTrigger::Shutdown),
                     ..Default::default()
                 }));
         let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown(
@@ -1835,13 +1836,12 @@ async fn await_subagent_turn_or_cancellation(
         turn_result = prompt_rx => SubagentWaitOutcome::TurnResult(Box::new(turn_result)),
     }
 }
-/// Fallback for cancelled/errored paths where TurnDeltaSnapshot is unavailable.
 async fn signals_snapshot_counts(child_handle: &SessionHandle) -> (u32, u32) {
     child_handle
         .signals_handle
         .snapshot()
         .await
-        .map(|s| (s.tool_call_count, s.turn_count))
+        .map(|snapshot| (snapshot.tool_call_count, snapshot.turn_count))
         .unwrap_or((0, 0))
 }
 fn cancellation_error_message(

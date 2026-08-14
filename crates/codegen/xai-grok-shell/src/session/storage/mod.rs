@@ -21,6 +21,7 @@ mod replay;
 mod replay_tests;
 pub mod search;
 mod search_content;
+pub(crate) mod search_gate;
 pub(crate) mod summary_write;
 
 /// The session search index moved to its own crate; re-exported here so
