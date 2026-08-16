@@ -191,7 +191,11 @@ impl MvpAgent {
             .is_some_and(|a| a.is_managed_mcp_eligible())
     }
     fn can_fetch_managed_mcp_gateway_tools(&self) -> bool {
-        self.cfg.borrow().managed_mcp_gateway_tools_enabled
+        self.cfg
+            .borrow()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+            && self.cfg.borrow().managed_mcp_gateway_tools_enabled
             && self.has_managed_mcp_auth()
     }
     pub(crate) async fn get_managed_mcp_gateway_tool_catalog(
@@ -489,6 +493,14 @@ impl MvpAgent {
     fn feedback_credentials(
         &self,
     ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_explicit(xai_grok_overlay_api::ServiceKind::Feedback)
+        {
+            return None;
+        }
         if !self.has_proxy_credentials() {
             return None;
         }
@@ -506,6 +518,13 @@ impl MvpAgent {
     pub(super) fn ensure_telemetry_client(&self) {
         crate::auth::credential_provider::sync_external_otel_identity();
         let cfg = self.cfg.borrow();
+        if !cfg
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::Telemetry)
+        {
+            tracing::debug!("telemetry client disabled by overlay policy");
+            return;
+        }
         let mode = cfg.resolve_telemetry_mode().value;
         if !mode.is_disabled() {
             let Some(auth) = self
@@ -583,6 +602,14 @@ impl MvpAgent {
     pub(crate) fn session_registry_client(
         &self,
     ) -> Option<crate::agent::session_registry_client::SessionRegistryClient> {
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_explicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
+        {
+            return None;
+        }
         let cfg = self.build_registry_config()?;
         Some(
             crate::agent::session_registry_client::SessionRegistryClient::new(
@@ -597,6 +624,14 @@ impl MvpAgent {
     pub(crate) fn conversations_client(
         &self,
     ) -> Option<crate::remote::ConversationsClient> {
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_explicit(xai_grok_overlay_api::ServiceKind::Subscription)
+        {
+            return None;
+        }
         if !crate::session::unified_list::conversations_lane_active() {
             return None;
         }
@@ -634,7 +669,11 @@ impl MvpAgent {
     }
     /// Telemetry enabled and not ZDR. Same gate as session `telemetry_enabled`.
     pub(crate) fn product_analytics_enabled(&self) -> bool {
-        self.cfg.borrow().is_telemetry_enabled()
+        self.cfg
+            .borrow()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::Telemetry)
+            && self.cfg.borrow().is_telemetry_enabled()
             && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team())
     }
     /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the
@@ -644,7 +683,12 @@ impl MvpAgent {
     pub(super) fn sync_collection_config_gate(&self) {
         self.trace_upload_live
             .store(
-                self.cfg.borrow().is_trace_upload_enabled(),
+                self.cfg.borrow().is_trace_upload_enabled()
+                    && self
+                        .cfg
+                        .borrow()
+                        .overlay_runtime
+                        .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload),
                 std::sync::atomic::Ordering::Relaxed,
             );
     }
@@ -670,6 +714,11 @@ impl MvpAgent {
     /// `true` when the agent runs in writeback storage mode.
     pub(crate) fn is_writeback_storage(&self) -> bool {
         matches!(self.storage_mode.get(), StorageMode::Writeback)
+            && self
+                .cfg
+                .borrow()
+                .overlay_runtime
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
     }
     /// Resolved cli-chat-proxy base for session features (via
     /// `proxy_url`). Not for the deployment-config fetch.
@@ -1490,6 +1539,9 @@ impl MvpAgent {
                 .auth_manager
                 .current_or_expired()
                 .is_some_and(|a| a.is_xai_auth());
+            if cfg.overlay_runtime.policy().mode.is_open() {
+                return;
+            }
             StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_xai_auth)
         };
         if resolved_mode == self.storage_mode.get() {
@@ -2189,6 +2241,105 @@ impl MvpAgent {
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        let cfg = self.cfg.borrow();
+        let capability = cfg
+            .overlay_runtime
+            .capability(xai_grok_overlay_api::Capability::ImageGeneration);
+        // A capability profile owns its endpoint and credential. It must not
+        // inherit the chat model's key or xAI URL.
+        let profile = capability
+            .provider()
+            .and_then(|provider| provider.provider_profile().cloned())
+            .or_else(|| cfg.capabilities.image.clone());
+        if profile.is_none()
+            && cfg.image_gen.is_none()
+            && matches!(
+                capability,
+                xai_grok_overlay_api::CapabilityAvailability::Disabled
+            )
+        {
+            return ImageGenConfig::Disabled;
+        }
+        if let Some(profile) = profile {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty())
+            else {
+                tracing::warn!("image capability profile disabled: base_url is required");
+                return ImageGenConfig::Disabled;
+            };
+            if cfg.overlay_runtime.policy().mode.is_open()
+                && crate::util::is_first_party_remote_url(&base_url)
+            {
+                tracing::warn!(base_url, "image capability profile rejected in open mode");
+                return ImageGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "image capability profile rejected by validation");
+                return ImageGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: profile.model.clone(),
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: None,
+                capability_profile: Some(profile),
+            };
+        }
+
+        // Legacy `[image_gen]` remains supported, but is independently keyed.
+        if let Some(provider) = cfg.image_gen.clone() {
+            let base_url = provider.base_url.trim().to_owned();
+            if base_url.is_empty() {
+                tracing::warn!("image_gen disabled: base_url is required");
+                return ImageGenConfig::Disabled;
+            }
+            if cfg.overlay_runtime.policy().mode.is_open()
+                && crate::util::is_first_party_remote_url(&base_url)
+            {
+                tracing::warn!(base_url, "image_gen rejected in open mode: xAI endpoint");
+                return ImageGenConfig::Disabled;
+            }
+            let Some(api_key) = provider.api_key.clone().or_else(|| {
+                provider.env_key.as_deref().and_then(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+            }) else {
+                tracing::warn!("image_gen disabled: no independent API key resolved");
+                return ImageGenConfig::Disabled;
+            };
+            let version = cfg
+                .client_version
+                .clone()
+                .unwrap_or_else(|| xai_grok_version::VERSION.to_string());
+            let mut headers = indexmap::IndexMap::new();
+            headers.insert("user-agent".to_owned(), format!("xai-grok-build/{version}"));
+            return ImageGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: headers,
+                image_gen_enabled: cfg.resolve_image_gen().value,
+                image_edit_enabled: cfg.resolve_image_edit().value,
+                model_override: None,
+                edit_model_override: None,
+                tier_restricted: false,
+                provider: Some(provider),
+                capability_profile: None,
+            };
+        }
+
+        if cfg.overlay_runtime.policy().mode.is_open() {
+            return ImageGenConfig::Disabled;
+        }
+        drop(cfg);
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
@@ -2218,6 +2369,8 @@ impl MvpAgent {
             model_override: cfg.resolve_image_gen_model_override(),
             edit_model_override: cfg.resolve_image_edit_model_override(),
             tier_restricted,
+            provider: None,
+            capability_profile: None,
         }
     }
     /// Build deploy-service config. The tool talks directly to the deployer service.
@@ -2233,6 +2386,54 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
         let cfg = self.cfg.borrow();
+        let capability = cfg
+            .overlay_runtime
+            .capability(xai_grok_overlay_api::Capability::VideoGeneration);
+        let profile = capability
+            .provider()
+            .and_then(|provider| provider.provider_profile().cloned())
+            .or_else(|| cfg.capabilities.video.clone());
+        if profile.is_none()
+            && matches!(
+                capability,
+                xai_grok_overlay_api::CapabilityAvailability::Disabled
+            )
+        {
+            return VideoGenConfig::Disabled;
+        }
+        if let Some(profile) = profile {
+            let Some(base_url) = profile.base_url.clone().filter(|url| !url.trim().is_empty())
+            else {
+                tracing::warn!("video capability profile disabled: base_url is required");
+                return VideoGenConfig::Disabled;
+            };
+            if cfg.overlay_runtime.policy().mode.is_open()
+                && crate::util::is_first_party_remote_url(&base_url)
+            {
+                tracing::warn!(base_url, "video capability profile rejected in open mode");
+                return VideoGenConfig::Disabled;
+            }
+            if let Err(error) = profile.validate() {
+                tracing::warn!(error = %error, "video capability profile rejected by validation");
+                return VideoGenConfig::Disabled;
+            }
+            let api_key = profile
+                .resolve_api_key(|name| std::env::var(name).ok())
+                .unwrap_or_default();
+            return VideoGenConfig::Enabled {
+                api_key,
+                base_url,
+                extra_headers: profile.extra_headers.clone(),
+                zdr_video_output_s3: None,
+                tier_restricted: false,
+                zdr_restricted: false,
+                capability_profile: Some(profile),
+            };
+        }
+        if cfg.overlay_runtime.policy().mode.is_open() {
+            tracing::debug!("video_gen disabled in open mode: no provider-neutral adapter configured");
+            return VideoGenConfig::Disabled;
+        }
         if !cfg.resolve_video_gen().value {
             return VideoGenConfig::Disabled;
         }
@@ -2271,9 +2472,19 @@ impl MvpAgent {
             zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
             tier_restricted,
             zdr_restricted,
+            capability_profile: None,
         }
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
+        if matches!(
+            self.cfg
+                .borrow()
+                .overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::WebSearch),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return None;
+        }
         let model_id = self.cfg.borrow().web_search_model.clone();
         let models = self.models_manager.models();
         let session = self.current_or_buffered_auth();
@@ -2295,6 +2506,36 @@ impl MvpAgent {
             &cfg.base_url,
         );
         Some(cfg)
+    }
+
+    /// Resolve a provider-neutral web-search profile. The profile owns its
+    /// endpoint and credentials and is passed directly to the tool client.
+    pub(super) fn prepare_web_search_profile(
+        &self,
+    ) -> Option<xai_grok_provider::CapabilityProviderConfig> {
+        let cfg = self.cfg.borrow();
+        let capability = cfg
+            .overlay_runtime
+            .capability(xai_grok_overlay_api::Capability::WebSearch);
+        let profile = capability
+            .provider()
+            .and_then(|provider| provider.provider_profile().cloned())
+            .or_else(|| cfg.capabilities.search.clone())?;
+        let base_url = profile.base_url.as_deref()?.trim();
+        if base_url.is_empty() {
+            return None;
+        }
+        if cfg.overlay_runtime.policy().mode.is_open()
+            && crate::util::is_first_party_remote_url(base_url)
+        {
+            tracing::warn!(base_url, "search profile rejected in open mode: xAI endpoint");
+            return None;
+        }
+        if let Err(error) = profile.validate() {
+            tracing::warn!(error = %error, "search profile rejected by validation");
+            return None;
+        }
+        Some(profile)
     }
     /// Returns `Err` with a user-facing message on invalid config; the caller at
     /// the process boundary prints it and exits.
@@ -2325,6 +2566,13 @@ impl MvpAgent {
     ) -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig {
         use xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig;
         let cfg = self.cfg.borrow();
+        if matches!(
+            cfg.overlay_runtime
+                .capability(xai_grok_overlay_api::Capability::WebFetch),
+            xai_grok_overlay_api::CapabilityAvailability::Disabled
+        ) {
+            return WebFetchConfig::Disabled;
+        }
         if cfg.disable_web_search {
             return WebFetchConfig::Disabled;
         }
@@ -2372,10 +2620,13 @@ impl MvpAgent {
         let default_auto_mode = cfg.default_auto_mode;
         let tui_mode = cfg.mode == crate::agent::config::AgentMode::Tui;
         let relay_config_enabled = crate::util::config::load_relay_sync_enabled_sync();
+        let relay_allowed = cfg
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay);
         let has_xai_auth = auth_manager
             .current_or_expired()
             .is_some_and(|a| a.is_xai_auth());
-        let relay_sync_enabled = tui_mode && relay_config_enabled && has_xai_auth;
+        let relay_sync_enabled = tui_mode && relay_config_enabled && relay_allowed && has_xai_auth;
         let config_root = crate::config::load_effective_config().ok();
         let empty_config = toml::Value::Table(toml::map::Map::new());
         let raw = config_root.as_ref().unwrap_or(&empty_config);
@@ -2397,6 +2648,8 @@ impl MvpAgent {
         );
         if relay_sync_enabled {
             tracing::info!("[grok] Relay sync: ENABLED");
+        } else if tui_mode && relay_config_enabled && !relay_allowed {
+            tracing::info!("[grok] Relay sync: DISABLED (blocked by overlay policy)");
         } else if tui_mode && relay_config_enabled && !has_xai_auth {
             tracing::info!("[grok] Relay sync: DISABLED (no auth - run 'grok login' first)");
         } else if tui_mode && !relay_config_enabled {
@@ -2455,7 +2708,12 @@ impl MvpAgent {
             default_yolo_mode,
             default_auto_mode,
             trace_upload_live: Arc::new(
-                std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
+                std::sync::atomic::AtomicBool::new(
+                    cfg.is_trace_upload_enabled()
+                        && cfg.overlay_runtime.allows_implicit(
+                            xai_grok_overlay_api::ServiceKind::TraceUpload,
+                        ),
+                ),
             ),
             memory_config: None,
             config_watcher_path_tx: None,
@@ -3019,6 +3277,15 @@ impl MvpAgent {
         if !self.relay_sync_enabled {
             return None;
         }
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay)
+        {
+            tracing::debug!("Relay sync blocked by overlay policy");
+            return None;
+        }
         let auth = self.auth_manager.current_or_expired()?;
         if auth.is_zdr_team() {
             tracing::debug!("ZDR team: skipping relay sync");
@@ -3168,6 +3435,11 @@ impl MvpAgent {
     ) -> Option<crate::session::repo_changes::UploadMethod> {
         if self.is_data_collection_disabled()
             || !self.cfg.borrow().is_trace_upload_enabled()
+            || !self
+                .cfg
+                .borrow()
+                .overlay_runtime
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
         {
             return None;
         }
@@ -3187,7 +3459,11 @@ impl MvpAgent {
     ) -> Option<crate::auth::DiagnosticUploader> {
         self.sync_collection_config_gate();
         let cfg = self.cfg.borrow();
-        if !cfg.is_trace_upload_enabled() {
+        if !cfg.is_trace_upload_enabled()
+            || !cfg
+                .overlay_runtime
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
+        {
             return None;
         }
         let proxy_base_url = cfg.endpoints.resolve_trace_upload_url();
@@ -3248,6 +3524,14 @@ impl MvpAgent {
             );
             return (None, TraceUploadReason::ZdrTeam);
         }
+        if !self
+            .cfg
+            .borrow()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
+        {
+            return (None, TraceUploadReason::FeatureOff);
+        }
         if self.cfg.borrow().remote_settings.is_none()
             && let Ok(auth) = self.auth_manager.auth().await
         {
@@ -3255,7 +3539,11 @@ impl MvpAgent {
         }
         let (direct_method, has_deployment_key, endpoints) = {
             let cfg = self.cfg.borrow();
-            if !cfg.is_trace_upload_enabled() {
+            if !cfg.is_trace_upload_enabled()
+                || !cfg
+                    .overlay_runtime
+                    .allows_implicit(xai_grok_overlay_api::ServiceKind::TraceUpload)
+            {
                 return (None, TraceUploadReason::FeatureOff);
             }
             (
@@ -4416,6 +4704,7 @@ impl MvpAgent {
             .and_then(|entry| entry.info.max_retries);
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let web_search_sampling_config = self.prepare_web_search_sampling_config();
+        let web_search_profile = self.prepare_web_search_profile();
         let image_gen_config = self.prepare_image_gen_config();
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
@@ -4669,6 +4958,7 @@ impl MvpAgent {
                     inference_idle_timeout_secs,
                     model_max_retries,
                     web_search_sampling_config,
+                    web_search_profile,
                     web_fetch_config,
                     image_gen_config,
                     video_gen_config,

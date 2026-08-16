@@ -1,3 +1,4 @@
 /target
+.firecrawl/
 **/*.rs.bk
 .DS_Store

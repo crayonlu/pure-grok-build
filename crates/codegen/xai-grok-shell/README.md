@@ -1820,6 +1820,10 @@ temperature = 0.7                     # Sampling temperature (0.0-2.0)
 top_p = 0.95                          # Nucleus sampling parameter
 max_completion_tokens = 8192          # Max tokens per response
 context_window = 256000               # Total context window in tokens (for auto-compact)
+api_backend = "chat_completions"      # chat_completions | responses | messages
+query_params = { api-version = "2026-07-22" } # Optional URL query parameters
+env_http_headers = { "X-Tenant" = "TENANT_TOKEN" } # Header -> env var
+supports_vision = true                 # Set false for text-only models
 ```
 
 **Credential resolution order:** `api_key` → `env_key` → cached `auth_provider` token (terminal: a cache miss resolves to no credential, never the session token) → session token → `XAI_API_KEY`. See [Per-Model Auth Providers](#per-model-auth-providers).
@@ -1864,6 +1868,43 @@ api_key = "sk-custom"
 > api_backend = "responses"            # required — web search uses the Responses API
 > # base_url, api_key, env_key optional — defaults to cli-chat-proxy
 > ```
+
+For provider-neutral web search, configure the search capability explicitly. The
+`firecrawl` profile uses the Firecrawl Search API and keeps the web-search
+credential separate from the chat model:
+
+```toml
+[capabilities.search]
+protocol = "generic_http"
+base_url = "https://api.firecrawl.dev/v1"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+
+[capabilities.search.operations.search.response]
+items = "/data"
+url = "/url"
+title = "/title"
+content = "/description"
+
+[capabilities.search.auth]
+location = "header"
+name = "Authorization"
+prefix = "Bearer "
+```
+
+Open mode rejects implicit xAI/CLI-proxy capability endpoints. Use an explicit
+non-xAI endpoint (or select `xai_compat` when you intentionally need the
+legacy xAI integration).
 
 ### Examples
 
@@ -2185,8 +2226,34 @@ Key options under `[memory]` in `~/.grok/config.toml`:
 | `search.min_score` | `0.35` | Minimum relevance score threshold for explicit memory search and recovery paths |
 | `initial_injection.enabled` | `true` | Enable automatic first-turn memory injection |
 | `initial_injection.min_score` | `0.0` | Override score threshold for first-turn injection (`0.0` preserves historical no-filter behavior) |
+| `embedding.provider` | `"api"` | Embedding provider; `api` is implemented, while `local`/`auto` fall back to FTS-only with a warning |
+| `embedding.protocol` | `"openai_compatible"` | Request protocol: `openai_compatible`, `cohere_v2`, or `voyage` |
+| `embedding.base_url` | *(chat endpoint)* | Base URL for the embedding service; `/embeddings` is appended automatically |
 | `embedding.model` | *(unset)* | Embedding model for vector search; unset disables embeddings |
+| `embedding.env_key` | *(unset)* | Environment variable name(s) containing the embedding key (first set value wins) |
+| `embedding.auth_scheme` | `"bearer"` | Authentication header: `bearer` or `x_api_key` |
 | `embedding.dimensions` | `1024` | Embedding vector dimensions |
+
+Embedding settings are independent from the chat model. For example, PPIO can
+be used for memory while the session uses another provider:
+
+```toml
+[memory]
+enabled = true
+
+[memory.embedding]
+provider = "api"
+base_url = "https://api.ppio.com/openai/v1"
+model = "qwen/qwen3-embedding-8b"
+env_key = "PPIO_API_KEY"
+dimensions = 1024
+auth_scheme = "bearer"
+```
+
+An explicit `api_key` takes precedence over `env_key`; a configured embedding
+credential takes precedence over the chat credential. If no embedding model is
+set, memory remains FTS-only. Session/OAuth tokens are never forwarded to an
+untrusted custom embedding endpoint.
 
 ### Observability
 

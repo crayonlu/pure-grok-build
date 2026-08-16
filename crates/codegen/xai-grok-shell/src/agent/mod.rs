@@ -18,6 +18,8 @@ pub mod relay;
 pub(crate) mod restore_code;
 pub mod roster;
 pub mod server;
+/// Compatibility facade for the pre-overlay `[fork]` service policy API.
+pub mod service_policy;
 pub mod session_config;
 pub(crate) mod session_metrics;
 pub mod session_registry_client;

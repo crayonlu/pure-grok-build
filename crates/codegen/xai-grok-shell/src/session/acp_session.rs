@@ -705,6 +705,9 @@ pub(crate) struct SessionActor {
     /// `is_telemetry_enabled() && !is_zdr()` — ZDR teams always have this false.
     pub(crate) telemetry_enabled: bool,
     pub(crate) supports_backend_search: std::cell::Cell<bool>,
+    /// Whether the active model accepts image inputs. Kept in a cell so
+    /// model switches update image handling without rebuilding the actor.
+    pub(crate) supports_vision: std::cell::Cell<bool>,
     /// Per-turn override, set at promotion. Not persisted; a reload reverts to the definition seed.
     pub(crate) tool_overrides: std::cell::RefCell<Option<xai_grok_sampling_types::ToolOverrides>>,
     /// Configured cutoff a subagent inherits, read off the `SessionHandle` without an actor round-trip.

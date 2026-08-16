@@ -32,6 +32,7 @@ impl SessionActor {
             .set(auto_compact_threshold_percent);
         self.supports_backend_search
             .set(sampling_config.supports_backend_search);
+        self.supports_vision.set(sampling_config.supports_vision);
         self.compactions_remaining
             .set(sampling_config.compactions_remaining);
         self.compaction_at_tokens

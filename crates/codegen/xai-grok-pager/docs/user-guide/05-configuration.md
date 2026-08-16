@@ -110,6 +110,32 @@ respect_gitignore = false              # default: false; set true to make every 
 # max_parallel_video_gen_calls = 4
 ```
 
+### Provider-neutral overlay
+
+The fork keeps distribution policy in a separate `[overlay]` table so the
+upstream model/config schema stays merge-friendly. The default `open` mode is
+fail-closed: chat and auxiliary services use only explicitly configured
+provider profiles and no xAI session token is forwarded to a different host.
+Use `xai_compat` only when you intentionally need first-party xAI behavior;
+`upstream` preserves the upstream defaults.
+
+```toml
+[overlay]
+mode = "open"                         # open | upstream | xai_compat
+
+[overlay.update_source]
+kind = "github_release"               # or "base_url"
+location = "owner/repository"         # repo or artifact base URL
+channel = "stable"
+```
+
+The same update source can be supplied by `GROK_UPDATE_REPO` or
+`GROK_CLI_BASE_URL`. In `open` mode, one of these explicit sources is required
+for in-app updates; the build never silently falls back to an xAI download
+host. See [Custom Models](11-custom-models.md) for chat, image/video, and web
+search provider profiles, and [Cross-Session Memory](13-memory.md) for the
+independent embedding endpoint.
+
 #### Input mode
 
 `[ui] simple_mode` controls how you edit text in the **prompt** — the input editor. It has nothing to do with how you move around the scrollback; that's [`vim_mode`](#vim-mode).
@@ -274,6 +300,100 @@ To override a built-in model, use its name as the section key and set only the f
 api_key = "my-api-key"
 ```
 
+### Provider-neutral auxiliary capabilities
+
+The fork keeps chat-model settings separate from auxiliary services. Search,
+image/video generation, and embeddings can each point at a different
+OpenAI-compatible or generic HTTP provider. A capability profile owns its
+endpoint, model, authentication, request mapping, and response mapping; it
+never inherits the chat session token implicitly.
+
+For example, a Firecrawl-compatible search endpoint can be configured as:
+
+```toml
+[capabilities.search]
+protocol = "generic_http"
+base_url = "https://api.firecrawl.dev/v1"
+env_key = "FIRECRAWL_API_KEY"
+
+[capabilities.search.operations.search]
+method = "POST"
+path = "/search"
+
+[capabilities.search.operations.search.request]
+body = "json"
+
+[capabilities.search.operations.search.request.fields]
+query = "query"
+max_results = "limit"
+
+[capabilities.search.operations.search.response]
+items = "/data"
+url = "/url"
+title = "/title"
+content = "/description"
+
+[capabilities.search.auth]
+location = "header"
+name = "Authorization"
+prefix = "Bearer "
+```
+
+The profile is data-only and does not require a provider-specific code path.
+Use `auth.name = "X-API-Key"` with an empty `prefix` for providers that use
+that header. `env_key` may be a string or an ordered array; the first non-empty
+environment variable wins. `api_key`, when present, takes precedence over
+`env_key`.
+
+The same profile shape is available under `[capabilities.embedding]`,
+`[capabilities.image]`, and `[capabilities.video]`. For image/video providers,
+define `operations.generate` (and, for asynchronous video APIs,
+`operations.create`/`operations.poll`) with the provider's request and response
+paths. In Open mode, explicitly configured non-xAI HTTPS or loopback endpoints
+are allowed; xAI and CLI-proxy endpoints are rejected unless
+`[overlay].mode = "xai_compat"` is selected.
+
+Voice is currently implemented only as the xAI streaming-STT transport. It is
+available in `upstream` and explicit `xai_compat` modes; Open mode disables it
+until a provider-neutral voice driver exists, so no bearer is sent to
+`api.x.ai` by a provider-neutral build.
+
+### Independent memory embeddings
+
+Memory uses FTS5 when no embedding model is configured. It does not guess that
+the chat model is an embedding model. To enable vector search against a
+separate service, configure only `[memory.embedding]`:
+
+```toml
+[memory]
+enabled = true
+
+[memory.embedding]
+provider = "api"                         # currently implemented provider
+protocol = "openai_compatible"           # or cohere_v2 / voyage
+base_url = "https://api.ppio.com/openai/v1"
+model = "qwen/qwen3-embedding-8b"
+env_key = ["EMBEDDING_API_KEY", "OPENAI_API_KEY"]
+dimensions = 1024
+auth_scheme = "bearer"                   # bearer or x_api_key
+
+[memory.embedding.extra_headers]
+X-Custom-Header = "value"
+```
+
+Requests are sent to `{base_url}/embeddings` for OpenAI-compatible services
+(or the protocol's configured path), with the configured `model`, `input`, and
+`dimensions`. The explicit `api_key` wins over `env_key`; when neither is set,
+a static BYOK key from the primary model may be reused. Session/OAuth tokens
+are never forwarded to a different embedding endpoint, so that case falls
+back to FTS-only with a warning. Search, first-turn injection, compaction
+recovery, and background reindex all use the same resolved endpoint and model.
+
+If `model` is omitted, vector search remains disabled and no request is made.
+`provider = "local"` and `provider = "auto"` are accepted for compatibility,
+but currently warn and also remain FTS-only. The default vector dimension is
+`1024`; set it to the dimension returned by your provider.
+
 ### MCP servers
 
 Configure external tool integrations over the Model Context Protocol.
@@ -324,8 +444,11 @@ enabled = true                        # auto-inject memory on first turn
 min_score = 0.9                       # score threshold for first-turn injection
 
 [memory.embedding]
-# model is unset by default, so retrieval uses full-text search only
-dimensions = 1024                     # vector dimensions
+provider = "api"
+base_url = "https://api.ppio.com/openai/v1"
+model = "qwen/qwen3-embedding-8b"     # omit to keep FTS-only mode
+env_key = "EMBEDDING_API_KEY"
+dimensions = 1024                      # vector dimensions
 ```
 
 ### Subagents
