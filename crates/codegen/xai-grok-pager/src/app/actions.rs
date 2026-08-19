@@ -1626,7 +1626,7 @@ pub enum Effect {
         version: i32,
         acked: bool,
     },
-    /// Until a handler exists this always fails, and the local marker is what stops the re-prompt.
+    /// Files the acceptance server side; the local marker is what stops the re-prompt if it fails.
     RecordConsentUpstream { notice_id: String, version: i32 },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },

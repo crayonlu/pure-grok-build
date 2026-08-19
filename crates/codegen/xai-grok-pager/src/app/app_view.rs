@@ -3815,6 +3815,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
         if *ctx.prompt_focused {
+            let had_highlight = ctx.prompt.textarea.selection_range().is_some();
             match ctx.prompt.handle_key(key) {
                 crate::views::prompt_widget::PromptEvent::Edited => {
                     return InputOutcome::Changed;
@@ -3822,6 +3823,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 crate::views::prompt_widget::PromptEvent::Ignored => {
                     if key!(Esc).matches(key) {
                         *ctx.prompt_focused = false;
+                        return InputOutcome::Changed;
+                    }
+                    if had_highlight && ctx.prompt.textarea.selection_range().is_none() {
                         return InputOutcome::Changed;
                     }
                 }

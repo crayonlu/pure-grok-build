@@ -949,14 +949,35 @@ impl SessionActor {
                     self.goal_tracker.lock().status(),
                 );
                 if goal_active {
-                    let decision = if self.goal_runs_on_workflow_engine() {
-                        self.run_goal_round_end().await
+                    if self.has_runnable_queued_user_row().await {
+                        xai_grok_telemetry::unified_log::info(
+                            "shell.goal.yielded_to_queued_input",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({ "prompt_id": prompt_id })),
+                        );
+                        tracing::info!(
+                            "goal turn: yielding to queued user prompts; continuation re-arms \
+                             at turn end"
+                        );
+                        break round;
+                    }
+                    if crate::session::PromptOrigin::from_prompt_id(prompt_id).is_synthetic()
+                        || !self.has_pending_goal_continuation().await
+                    {
+                        let decision = if self.goal_runs_on_workflow_engine() {
+                            self.run_goal_round_end().await
+                        } else {
+                            self.run_goal_round_end_legacy().await
+                        };
+                        if let GoalRoundDecision::Continue(directive) = decision {
+                            self.inject_goal_continuation_message(directive).await;
+                            continue;
+                        }
                     } else {
-                        self.run_goal_round_end_legacy().await
-                    };
-                    if let GoalRoundDecision::Continue(directive) = decision {
-                        self.inject_goal_continuation_message(directive).await;
-                        continue;
+                        tracing::info!(
+                            "goal turn: user prompt runs standalone; a queued continuation \
+                             resumes the goal"
+                        );
                     }
                 }
                 match self

@@ -2497,6 +2497,9 @@ impl acp::Agent for MvpAgent {
             "x.ai/privacy/setCodingDataRetention" => {
                 crate::extensions::privacy::handle(self, &args).await
             }
+            "x.ai/consent/record" => {
+                crate::extensions::consent::handle(self, &args).await
+            }
             "x.ai/rollout/survey" => {
                 crate::extensions::rollout::handle(self, &args).await
             }
