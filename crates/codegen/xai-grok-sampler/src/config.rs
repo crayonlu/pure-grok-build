@@ -114,6 +114,12 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub supports_backend_search: bool,
 
+    /// Whether the active model accepts image inputs (multimodal/vision).
+    /// Defaults to `true` so existing model entries remain multimodal unless
+    /// explicitly marked as text-only.
+    #[serde(default = "default_true")]
+    pub supports_vision: bool,
+
     /// Per-model config for the `x-compactions-remaining` header; `None` disables it.
     #[serde(default)]
     pub compactions_remaining: Option<CompactionsRemaining>,
@@ -167,12 +173,17 @@ impl Default for SamplerConfig {
             attribution_callback: None,
             bearer_resolver: None,
             supports_backend_search: false,
+            supports_vision: true,
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].

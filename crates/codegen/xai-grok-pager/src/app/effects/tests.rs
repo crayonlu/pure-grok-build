@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use crate::views::rewind::RewindMode;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 /// The invalid-params server detail survives `attach_prompt_usage`
 /// wrapping `error.data` as `{message, promptUsage}`.
@@ -2635,10 +2636,21 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
 }
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
+    let params = rewind_execute_params("sess-1", 3, RewindMode::ConversationOnly);
     assert_eq!(params["sessionId"], "sess-1");
     assert_eq!(params["targetPromptIndex"], 3);
     assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
+}
+
+#[test]
+fn rewind_execute_params_sends_all_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::All);
+    assert_eq!(params["mode"], "all");
+}
+
+#[test]
+fn rewind_execute_params_sends_files_only_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::FilesOnly);
+    assert_eq!(params["mode"], "files_only");
 }

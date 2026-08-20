@@ -1135,8 +1135,15 @@ async fn restore_session_from_remote(
             session_id
         ),
     );
-    let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
+    let host_config = xai_grok_overlay::without_overlay(&raw_config);
+    let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&host_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
+    });
+    let mut agent_config = agent_config;
+    agent_config.overlay_runtime = overlay_runtime;
     use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
     use xai_grok_shell::auth::{AuthManager, ensure_authenticated_or_noninteractive};
     use xai_grok_shell::session::restore::{RestoreSessionOpts, restore_session_with_storage};

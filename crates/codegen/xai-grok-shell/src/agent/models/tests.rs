@@ -997,6 +997,51 @@ fn config_menu_only_model_derives_support_and_default() {
 }
 
 #[test]
+fn supports_parallel_tool_calls_defaults_true_and_applies_override() {
+    let mut cfg = config::Config::default();
+    cfg.config_models.insert(
+        "sequential".to_string(),
+        config::ConfigModelOverride {
+            supports_parallel_tool_calls: Some(false),
+            ..Default::default()
+        },
+    );
+    cfg.config_models.insert(
+        "parallel".to_string(),
+        config::ConfigModelOverride::default(),
+    );
+
+    let catalog = resolve_model_catalog(&cfg, None);
+
+    // Default is true (parallel allowed) when the field is left unset.
+    assert!(
+        catalog["parallel"].info.supports_parallel_tool_calls,
+        "supports_parallel_tool_calls must default to true"
+    );
+    // The override is applied.
+    assert!(
+        !catalog["sequential"].info.supports_parallel_tool_calls,
+        "supports_parallel_tool_calls override must apply"
+    );
+
+    let tmp = std::env::temp_dir().join("grok-test-models-parallel-tool-calls");
+    let auth_manager = Arc::new(AuthManager::new(&tmp, GrokComConfig::default()));
+    let mgr = ModelsManager::new(
+        None,
+        catalog,
+        acp::ModelId::new("sequential"),
+        auth_manager,
+        cfg,
+    );
+
+    // Catalog lookup reflects the override.
+    assert!(!mgr.model_supports_parallel_tool_calls("sequential"));
+    assert!(mgr.model_supports_parallel_tool_calls("parallel"));
+    // Unknown models default to true (historical behavior).
+    assert!(mgr.model_supports_parallel_tool_calls("not-in-catalog"));
+}
+
+#[test]
 fn cli_reasoning_effort_override_only_stamps_supporting_models() {
     use indexmap::IndexMap;
 
@@ -2046,6 +2091,8 @@ fn make_entry_config_with_id(
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: true,
+        supports_parallel_tool_calls: true,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,

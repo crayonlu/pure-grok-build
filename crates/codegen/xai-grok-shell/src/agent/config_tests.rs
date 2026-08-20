@@ -1063,6 +1063,8 @@ fn test_model_entry(
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -2137,6 +2139,8 @@ fn model_info_from_config_propagates_use_concise() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2297,6 +2301,8 @@ fn model_info_from_config_propagates_agent_type() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2749,6 +2755,8 @@ fn inference_idle_timeout_propagates_to_model_info() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -6723,6 +6731,8 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7523,4 +7533,36 @@ fn a_status_line_the_parser_could_not_read_in_full_reaches_grok_inspect() {
         1
     );
     assert_eq!(cfg.ui.theme.as_deref(), Some("kanagawa"));
+}
+
+#[test]
+fn host_config_does_not_resolve_overlay_namespace() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+        [overlay]
+        mode = "open"
+        "#,
+    )
+    .expect("overlay config should parse");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+}
+
+#[test]
+fn overlay_defaults_to_upstream_without_overlay_table() {
+    let raw_config = toml::Value::Table(Default::default());
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+    assert_eq!(
+        cfg.overlay_runtime.auth_policy(),
+        xai_grok_overlay_api::AuthPolicy::Inherited
+    );
 }
