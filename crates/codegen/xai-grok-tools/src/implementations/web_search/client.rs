@@ -101,11 +101,17 @@ impl WebSearchClient {
                     ));
                 }
             };
-        let http = xai_grok_extra_ca::with_extra_root_certificates(match default_headers {
-            Some(headers) => reqwest::Client::builder().default_headers(headers),
-            None => reqwest::Client::builder(),
-        })
-        .build()
+        let http = match &default_headers {
+            Some(headers) => crate::util::shared_http::cached_client(
+                crate::util::shared_http::cache_key("web_search", headers),
+                || {
+                    xai_grok_extra_ca::build_reqwest_client(|builder| {
+                        builder.default_headers(headers.clone())
+                    })
+                },
+            ),
+            None => xai_grok_extra_ca::build_reqwest_client(|builder| builder),
+        }
         .map_err(|e| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),

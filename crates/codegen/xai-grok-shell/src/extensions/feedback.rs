@@ -107,7 +107,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             // Parse the input -- try the full ClientFeedbackInput first,
             // then fall back to the simple FeedbackRequest (from /feedback slash command)
             // which only has {session_id, feedback_text} and no client_type.
-            let feedback_input: ClientFeedbackInput =
+            let mut feedback_input: ClientFeedbackInput =
                 match serde_json::from_str::<ClientFeedbackInput>(args.params.get()) {
                     Ok(input) => input,
                     Err(_) => {
@@ -127,6 +127,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                             client_version: None,
                             metadata: None,
                             terminal_info: None,
+                            images: vec![],
                         }
                     }
                 };
@@ -155,7 +156,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                     .map(|t| t.saturating_sub(1) as i64)
             });
 
-            let mut submission = feedback_input.to_submission(
+            let mut submission = feedback_input.take_submission(
                 model_id.clone(),
                 model_metadata.resolved_model_id,
                 model_metadata.model_fingerprint,

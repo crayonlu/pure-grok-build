@@ -3810,6 +3810,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "generator"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b854b0e584ead1a33f18b2fcad7cf7be18b3875c78816b753639aa501513ae"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "log",
+ "rustversion",
+ "windows-link 0.2.1",
+ "windows-result 0.4.1",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6052,6 +6067,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 dependencies = [
  "value-bag",
+]
+
+[[package]]
+name = "loom"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
+dependencies = [
+ "cfg-if",
+ "generator",
+ "scoped-tls",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -9211,6 +9239,12 @@ dependencies = [
  "serde_derive_internals",
  "syn 2.0.117",
 ]
+
+[[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "scopeguard"
@@ -13295,6 +13329,7 @@ dependencies = [
  "url",
  "xai-circuit-breaker",
  "xai-grok-auth",
+ "xai-grok-extra-ca",
  "xai-grok-version",
  "xai-test-utils",
  "zstd",
@@ -13514,10 +13549,14 @@ dependencies = [
 name = "xai-grok-extra-ca"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "rcgen",
  "reqwest 0.12.24",
  "rustls",
+ "rustls-native-certs",
  "tempfile",
  "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -13568,6 +13607,7 @@ dependencies = [
  "tracing",
  "url",
  "xai-grok-config",
+ "xai-grok-extra-ca",
  "xai-grok-tools",
 ]
 
@@ -13575,8 +13615,10 @@ dependencies = [
 name = "xai-grok-http"
 version = "0.1.0"
 dependencies = [
+ "rcgen",
  "reqwest 0.12.24",
  "reqwest-middleware 0.4.2",
+ "rustls",
  "serde_json",
  "tracing",
  "xai-grok-auth",
@@ -13747,7 +13789,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.6"
+version = "1.0.8"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -13780,7 +13822,6 @@ dependencies = [
  "rand 0.9.5",
  "ratatui",
  "regex",
- "rustls",
  "serde",
  "serde_json",
  "serial_test",
@@ -13814,6 +13855,7 @@ dependencies = [
  "xai-grok-agent",
  "xai-grok-announcements",
  "xai-grok-config",
+ "xai-grok-extra-ca",
  "xai-grok-foreign-sessions",
  "xai-grok-markdown",
  "xai-grok-mermaid",
@@ -13823,6 +13865,7 @@ dependencies = [
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
+ "xai-grok-provider",
  "xai-grok-sandbox",
  "xai-grok-shell",
  "xai-grok-status-line",
@@ -13843,7 +13886,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.6"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -13851,7 +13894,6 @@ dependencies = [
  "dunce",
  "libc",
  "obfstr",
- "rustls",
  "semver",
  "serde_json",
  "serial_test",
@@ -13861,15 +13903,13 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
- "toml",
  "tracing",
  "tracing-subscriber",
  "xai-acp-lib",
  "xai-crash-handler",
  "xai-grok-active-sessions",
  "xai-grok-config",
- "xai-grok-overlay",
- "xai-grok-overlay-api",
+ "xai-grok-extra-ca",
  "xai-grok-pager",
  "xai-grok-pager-minimal",
  "xai-grok-sandbox",
@@ -14177,7 +14217,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.6"
+version = "1.0.8"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -14216,6 +14256,7 @@ dependencies = [
  "jsonwebtoken",
  "kanal",
  "libc",
+ "loom",
  "moka",
  "nix 0.30.1",
  "notify",
@@ -14235,7 +14276,6 @@ dependencies = [
  "ring",
  "rsa",
  "rustls",
- "rustls-native-certs",
  "semver",
  "serde",
  "serde_ignored",
@@ -14348,6 +14388,7 @@ dependencies = [
  "windows 0.61.3",
  "xai-grok-config",
  "xai-grok-env",
+ "xai-grok-extra-ca",
  "xai-grok-shared",
  "xai-grok-version",
  "xai-tty-utils",
@@ -14451,8 +14492,10 @@ dependencies = [
  "xai-grok-sampler",
  "xai-grok-secrets",
  "xai-grok-session-events",
+ "xai-grok-version",
  "xai-mixpanel",
  "xai-token-estimation",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -14606,6 +14649,7 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+ "xai-grok-extra-ca",
  "xai-grok-overlay",
  "xai-grok-shell",
  "xai-grok-telemetry",
@@ -14615,7 +14659,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.6"
+version = "1.0.8"
 dependencies = [
  "semver",
 ]
@@ -14627,7 +14671,6 @@ dependencies = [
  "anyhow",
  "cpal",
  "futures-util",
- "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -14637,6 +14680,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "xai-grok-extra-ca",
  "xai-tty-utils",
 ]
 
@@ -14675,7 +14719,6 @@ dependencies = [
  "regex",
  "reqwest 0.12.24",
  "rustc-hash 2.1.1",
- "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -14711,6 +14754,7 @@ dependencies = [
  "xai-grok-config-types",
  "xai-grok-diag-server",
  "xai-grok-env",
+ "xai-grok-extra-ca",
  "xai-grok-hooks",
  "xai-grok-mcp",
  "xai-grok-paths",

@@ -47,6 +47,7 @@ mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 mod modals;
+pub(crate) mod mode_switch;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
@@ -132,6 +133,18 @@ pub fn set_minimal_show_switch_back_to_fullscreen_for_test(on: bool) {
 /// panic hook, which can't thread parameters) resets the style only when
 /// true: under inherit, `0 q` would clobber a shell-chosen style.
 pub(crate) static CURSOR_STYLE_FORCED: AtomicBool = AtomicBool::new(false);
+/// The screen the terminal is ACTUALLY on, for teardown paths that cannot
+/// thread parameters (panic hook, signal handler, post-loop restore); updated
+/// eagerly at every screen flip so mid-switch failures tear down correctly.
+static CURRENT_SCREEN_MODE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(ScreenMode::INITIAL_U8);
+pub(crate) fn set_current_screen_mode(mode: ScreenMode) {
+    CURRENT_SCREEN_MODE.store(mode.to_u8(), Ordering::Release);
+    signal_handler::set_mode(mode);
+}
+pub(crate) fn current_screen_mode() -> ScreenMode {
+    ScreenMode::from_u8(CURRENT_SCREEN_MODE.load(Ordering::Acquire))
+}
 /// Whether this process runs the minimal (scrollback-native) screen mode.
 /// Set once by [`apply_screen_mode_globals`] from the *effective* mode.
 ///
@@ -184,20 +197,6 @@ pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
 pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
-}
-/// Whether the distribution overlay exposes the built-in voice transport.
-///
-/// The current voice implementation is the xAI streaming STT protocol and
-/// forwards the session/API-key bearer through `xai_grok_voice`.  Open mode
-/// must therefore keep it unavailable until a provider-neutral voice driver
-/// exists; otherwise a provider-neutral build could still contact `api.x.ai`.
-/// Upstream and explicit `xai_compat` retain the native behavior.
-static VOICE_OVERLAY_ALLOWED: AtomicBool = AtomicBool::new(true);
-pub(crate) fn voice_overlay_allowed() -> bool {
-    VOICE_OVERLAY_ALLOWED.load(Ordering::Acquire)
-}
-pub(crate) fn set_voice_overlay_allowed(allowed: bool) {
-    VOICE_OVERLAY_ALLOWED.store(allowed, Ordering::Release);
 }
 /// Test helper for the process-global voice gate.
 pub fn set_voice_mode_enabled_for_test(on: bool) {
@@ -253,17 +252,6 @@ pub(crate) fn resolve_voice_mode_enabled(
 }
 /// Resolve from live policy + env + remote + API-key state.
 pub(crate) fn resolve_voice_mode_live(remote: Option<bool>, is_api_key: bool) -> bool {
-    resolve_voice_mode_with_overlay(remote, is_api_key, voice_overlay_allowed())
-}
-
-fn resolve_voice_mode_with_overlay(
-    remote: Option<bool>,
-    is_api_key: bool,
-    overlay_allowed: bool,
-) -> bool {
-    if !overlay_allowed {
-        return false;
-    }
     resolve_voice_mode_enabled(
         voice_mode_requirement_pin(),
         voice_mode_config_value(),
@@ -273,7 +261,7 @@ fn resolve_voice_mode_with_overlay(
 }
 #[cfg(test)]
 mod voice_gate_tests {
-    use super::{resolve_voice_mode_enabled, resolve_voice_mode_with_overlay};
+    use super::resolve_voice_mode_enabled;
     #[test]
     fn api_key_force_on_over_remote_kill_only() {
         assert!(resolve_voice_mode_enabled(None, None, Some(false), true));
@@ -293,11 +281,6 @@ mod voice_gate_tests {
             Some(false),
             true
         ));
-    }
-
-    #[test]
-    fn open_overlay_disables_xai_voice_transport() {
-        assert!(!resolve_voice_mode_with_overlay(None, true, false));
     }
 }
 /// Sticky banner shown while mouse reporting is off, telling the user how to
@@ -342,6 +325,21 @@ pub(crate) enum ScreenMode {
     Minimal,
 }
 impl ScreenMode {
+    const INITIAL_U8: u8 = 1;
+    pub(crate) fn to_u8(self) -> u8 {
+        match self {
+            Self::Fullscreen => 0,
+            Self::Inline => 1,
+            Self::Minimal => 2,
+        }
+    }
+    pub(crate) fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Fullscreen,
+            2 => Self::Minimal,
+            _ => Self::Inline,
+        }
+    }
     pub(crate) fn is_fullscreen(self) -> bool {
         matches!(self, Self::Fullscreen)
     }
@@ -370,6 +368,7 @@ impl ScreenMode {
 /// mode is safe and keeps the effective-mode source of truth singular.
 fn apply_screen_mode_globals(screen_mode: ScreenMode) {
     let minimal = screen_mode.is_minimal();
+    set_current_screen_mode(screen_mode);
     MINIMAL_MODE_ACTIVE.store(minimal, Ordering::Release);
     crate::terminal::image::set_inline_overlay_force_off(minimal);
     crate::views::modal_window::set_embedded(minimal);
@@ -386,6 +385,7 @@ fn engage_startup_theme(screen_mode: ScreenMode) {
     } else {
         let initial_theme = crate::theme::cache::resolve_initial_theme();
         crate::theme::cache::set(initial_theme);
+        mode_switch::mark_theme_resolved();
     }
 }
 /// Step 2 of the startup theme handshake: if a `--minimal` start was
@@ -396,6 +396,7 @@ fn finish_theme_after_probe(requested_minimal: bool, effective_mode: ScreenMode)
         let late_theme = crate::theme::cache::resolve_initial_theme_no_osc11();
         crate::theme::cache::set(late_theme);
         crate::theme::apply_cursor_color();
+        mode_switch::mark_theme_resolved();
         tracing::info!(?late_theme, "minimal downgrade: resolved regular theme");
     }
 }
@@ -656,52 +657,24 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let host_config = xai_grok_overlay::without_overlay(&raw_config);
-    let overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
-        xai_grok_overlay_api::OverlayRuntime::open()
-    });
-    // The pager's current voice client speaks the xAI streaming STT protocol
-    // and forwards the active bearer.  Keep that first-party route out of
-    // Open mode until a provider-neutral voice driver is implemented.
-    let voice_overlay_allowed = !overlay_runtime.policy().mode.is_open();
-    set_voice_overlay_allowed(voice_overlay_allowed);
-    if !voice_overlay_allowed {
-        tracing::info!(
-            "voice disabled in Open mode: no provider-neutral voice transport configured"
-        );
-    }
-    let agent_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&host_config)
-    {
-        Ok(c) => c,
+    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
+        &raw_config,
+    ) {
+        Ok(c) => c.grok_com_config,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config for startup prefetch, using defaults");
-            xai_grok_shell::agent::config::Config::default()
+            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
+            xai_grok_shell::auth::GrokComConfig::default()
         }
     };
-    let mut agent_config = agent_config;
-    agent_config.overlay_runtime = overlay_runtime.clone();
-    let grok_com_config = agent_config.grok_com_config.clone();
-    let allow_session_auth = agent_config.overlay_runtime.policy().allows_session_auth();
-    let refreshed_auth = if allow_session_auth {
-        tokio::time::timeout(
-            xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-            xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
-        )
-        .await
-        .unwrap_or(None)
-    } else {
-        None
-    };
+    let refreshed_auth = tokio::time::timeout(
+        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+        xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
+    )
+    .await
+    .unwrap_or(None);
     let early_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth_for_overlay(
-            Some(auth),
-            &overlay_runtime,
-        ),
-        None => xai_grok_shell::agent::models::start_early_prefetch_for_overlay(
-            Some(grok_com_config.clone()),
-            &overlay_runtime,
-        ),
+        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
+        None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -846,7 +819,7 @@ pub async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch(
+    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch_interactive(
         args.yolo,
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
@@ -911,10 +884,9 @@ pub async fn run(
         Ordering::Release,
     );
     let minimal = screen_mode.is_minimal();
-    connect_flags.status_line = status_line::draws_a_row(
-        screen_mode,
-        &event_loop::load_initial_ui_config().status_line,
-    );
+    connect_flags.status_line = event_loop::load_initial_ui_config()
+        .status_line
+        .reserves_a_row();
     let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
     let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
     tracing::info!(
@@ -1103,8 +1075,9 @@ pub async fn run(
         exit_timeout::hold_teardown_for_test();
     }
     crate::unified_log::flush_blocking().await;
-    let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
+    let restore_result = restore_terminal(terminal, writer_thread, current_screen_mode());
     drop(agent_guard);
+    xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
     xai_tty_utils::global_process_scope().kill_all();
     crate::app::status_line::metrics::global().report_health();
     if let Err(cleanup_error) = restore_result {
@@ -1508,7 +1481,8 @@ fn init_terminal(
             io::Result::Ok(())
         })?;
         MOUSE_CAPTURE_ENABLED.store(!want_minimal, Ordering::Release);
-        set_panic_hook(mode);
+        set_current_screen_mode(mode);
+        set_panic_hook();
         signal_handler::install(mode);
         let drain_timeout = if crate::terminal::terminal_context().vte_version.is_some() {
             std::time::Duration::from_millis(20)
@@ -1771,10 +1745,12 @@ fn terminal_title_string(title: &str) -> String {
         format!("{} - grok", truncated)
     }
 }
-fn set_panic_hook(mode: ScreenMode) {
+/// Reads [`current_screen_mode`] at panic time — never capture a mode here,
+/// or an in-process mode switch tears down the wrong screen.
+fn set_panic_hook() {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        emit_terminal_teardown_sequences(mode, None);
+        emit_terminal_teardown_sequences(current_screen_mode(), None);
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         xai_crash_handler::disable_terminal_escape_restore();

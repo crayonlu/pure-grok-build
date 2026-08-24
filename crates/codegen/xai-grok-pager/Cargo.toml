@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "1.0.6"
+version = "1.0.8"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -88,8 +88,6 @@ xai-ratatui-inline = { workspace = true }
 
 # Update
 xai-grok-update = { path = "../xai-grok-update" }
-xai-grok-overlay = { workspace = true }
-xai-grok-overlay-api = { workspace = true }
 
 # ACP
 agent-client-protocol = { workspace = true }
@@ -98,6 +96,9 @@ xai-file-utils = { path = "../xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-overlay = { workspace = true }
+xai-grok-overlay-api = { workspace = true }
+xai-grok-provider = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
 # backend instead, so cpal -> alsa-sys never reaches the static musl binary
@@ -188,16 +189,8 @@ xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # xai-grok-test-support depends on neither the pager nor the shell).
 xai-grok-test-support = { workspace = true, features = [] }
-# Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
-# spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
-# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
-# production lib deliberately dropped rustls (moved to xai-grok-pager-bin).
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+# Provider install for the in-process leader-cluster tests.
+xai-grok-extra-ca = { workspace = true }
 
 [[bench]]
 name = "render"
