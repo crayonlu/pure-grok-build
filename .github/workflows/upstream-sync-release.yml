@@ -542,12 +542,19 @@ jobs:
         run: |
           # The local sccache server occasionally dies mid-build on Windows
           # runners (compile fails with "connection forcibly closed", OS error
-          # 10054). Restart the server and retry so a transient crash does not
-          # sink the whole nightly release.
+          # 10054). Restart the server and retry; if the server keeps dying
+          # (crash loop), the final attempt drops sccache entirely so a
+          # transient infra fault cannot sink the nightly release.
           $ErrorActionPreference = 'Continue'
           $maxAttempts = 3
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            Write-Host "cargo build attempt $attempt of $maxAttempts"
+            if ($attempt -ge $maxAttempts) {
+              Write-Host "Final attempt: disabling sccache (RUSTC_WRAPPER) so the build cannot be blocked by a crashing cache server"
+              $env:RUSTC_WRAPPER = $null
+              sccache --stop-server 2>$null | Out-Null
+            } else {
+              Write-Host "cargo build attempt $attempt of $maxAttempts (sccache)"
+            }
             cargo build -p ${{ env.BINARY_PACKAGE }} --release --locked --target ${{ matrix.target }}
             $code = $LASTEXITCODE
             if ($code -eq 0) {
