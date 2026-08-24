@@ -523,6 +523,7 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            supports_vision: self.supports_vision.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
@@ -1427,7 +1428,8 @@ impl SessionActor {
         let raw_config = crate::config::load_effective_config()
             .map_err(|e| tracing::warn!(error = %e, "Failed to reload config"))
             .ok()?;
-        let config = crate::agent::config::Config::new_from_toml_cfg(&raw_config)
+        let host_config = xai_grok_overlay::without_overlay(&raw_config);
+        let config = crate::agent::config::Config::new_from_toml_cfg(&host_config)
             .map_err(|e| tracing::warn!(error = %e, "Failed to parse reloaded config.toml"))
             .ok()?;
         let config_model = config

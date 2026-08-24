@@ -1011,6 +1011,23 @@ pub async fn ensure_managed_policy_present(
     }
 }
 
+/// Overlay-aware composition-root wrapper. The existing managed-policy
+/// implementation remains untouched; provider-neutral distributions simply
+/// avoid entering it when implicit managed config is disabled.
+pub async fn ensure_managed_policy_present_for_overlay(
+    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
+    overlay: &xai_grok_overlay_api::OverlayRuntime,
+) {
+    if !overlay
+        .policy()
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+    {
+        tracing::debug!("managed policy refresh skipped by overlay policy");
+        return;
+    }
+    ensure_managed_policy_present(auth_manager).await;
+}
+
 /// Shown when a managed principal's enforced policy is missing/substituted and the refetch couldn't restore it.
 const MANAGED_POLICY_MISSING_MSG: &str = "Managed policy is required for this account but is \
 missing or could not be verified, and could not be restored from the server.\nThis check needs \

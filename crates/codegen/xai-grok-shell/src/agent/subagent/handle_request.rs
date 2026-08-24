@@ -1078,6 +1078,7 @@ pub(crate) async fn run_shell_child(
         None,
         ctx.resolve_subagent_rate_limit_max_attempts(&subagent_model_id),
         ctx.web_search_sampling_config.clone(),
+        None,
         ctx.web_fetch_config.clone(),
         ctx.image_gen_config.clone(),
         ctx.video_gen_config.clone(),
