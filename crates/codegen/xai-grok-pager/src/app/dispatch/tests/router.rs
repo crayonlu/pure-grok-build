@@ -565,7 +565,7 @@ fn mark_turn_finished_clears_start_and_stamps_active() {
     let agent = app.agents.get_mut(&id).unwrap();
     agent.turn_started_at = Some(std::time::Instant::now());
     agent.last_active_at = None;
-    agent.mark_turn_finished();
+    agent.mark_turn_finished(crate::app::cancel_latency::TurnEnd::Completed);
     assert!(
         agent.turn_started_at.is_none(),
         "turn_started_at must be cleared"

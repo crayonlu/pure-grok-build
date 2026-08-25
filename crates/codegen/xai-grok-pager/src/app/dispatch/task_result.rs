@@ -717,10 +717,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session.prompt_history_loading = false;
-                agent.session.prompt_history = prompts
+                let fetched: Vec<String> = prompts
                     .into_iter()
                     .map(|p| extract_skill_display_text(&p).unwrap_or(p))
                     .collect();
+                let local: std::collections::HashSet<String> = agent
+                    .session
+                    .prompt_history
+                    .iter()
+                    .flat_map(|p| {
+                        let t = p.trim();
+                        [t.to_owned(), t.strip_prefix("! ").unwrap_or(t).to_owned()]
+                    })
+                    .collect();
+                let local_entries = agent.session.prompt_history.len();
+                let fetched_entries = fetched.len();
+                agent
+                    .session
+                    .prompt_history
+                    .extend(fetched.into_iter().filter(|p| !local.contains(p.trim())));
+                agent
+                    .session
+                    .prompt_history
+                    .truncate(crate::app::agent::PROMPT_HISTORY_CAP);
+                tracing::info!(
+                    history.local_entries = local_entries,
+                    history.fetched_entries = fetched_entries,
+                    history.merged_entries = agent.session.prompt_history.len(),
+                    "history.fetch_merged"
+                );
                 if agent.prompt.history_search.is_active() {
                     let history = agent.combined_prompt_history();
                     agent.prompt.history_search.refresh_items(&history);

@@ -14264,9 +14264,7 @@ dependencies = [
  "nucleo",
  "obfstr",
  "parking_lot",
- "portable-pty",
  "pretty_assertions",
- "process-wrap",
  "prod-mc-cli-chat-proxy-types",
  "prost",
  "rand 0.9.5",
@@ -14282,7 +14280,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.10.9",
- "shlex",
  "similar",
  "siphasher",
  "strum 0.27.2",
@@ -14345,6 +14342,7 @@ dependencies = [
  "xai-grok-shared",
  "xai-grok-shell-base",
  "xai-grok-shell-session-support",
+ "xai-grok-shell-terminal",
  "xai-grok-status-line",
  "xai-grok-subagent-resolution",
  "xai-grok-telemetry",
@@ -14408,6 +14406,36 @@ dependencies = [
  "xai-file-utils",
  "xai-grok-http",
  "xai-grok-version",
+]
+
+[[package]]
+name = "xai-grok-shell-terminal"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "libc",
+ "portable-pty",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows 0.61.3",
+ "xai-acp-lib",
+ "xai-grok-config",
+ "xai-grok-paths",
+ "xai-grok-sandbox",
+ "xai-grok-tools",
+ "xai-grok-workspace",
+ "xai-tty-utils",
 ]
 
 [[package]]
@@ -14693,6 +14721,7 @@ dependencies = [
  "arc-swap",
  "async-stream",
  "async-trait",
+ "axum",
  "base64",
  "bstr",
  "chrono",
@@ -14716,6 +14745,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "prometheus",
+ "rand 0.9.5",
  "regex",
  "reqwest 0.12.24",
  "rustc-hash 2.1.1",

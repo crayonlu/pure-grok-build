@@ -461,6 +461,7 @@ dimensions = 1024                      # vector dimensions
 ```toml
 [subagents]
 enabled = true
+sampling_limit = 12                   # concurrent in-flight subagent sampling calls per process; defaults to max_concurrent (32) when unset (GROK_SUBAGENT_SAMPLING_LIMIT)
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types

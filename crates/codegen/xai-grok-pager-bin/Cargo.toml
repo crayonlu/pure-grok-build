@@ -58,6 +58,8 @@ xai-grok-extra-ca = { workspace = true }
 obfstr = { workspace = true }
 cryptify = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 # Default allocator on Unix; gated by the `jemalloc` feature (see main.rs

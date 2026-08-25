@@ -2743,6 +2743,9 @@ impl MvpAgent {
             subagent_presentation: RefCell::new(
                 crate::agent::subagent::SubagentPresentation::new(),
             ),
+            subagent_sampling_semaphore: Arc::new(
+                tokio::sync::Semaphore::new(cfg.subagents_sampling_limit),
+            ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             post_unblock_jwt_retry_in_flight: Arc::new(
@@ -5187,6 +5190,7 @@ impl MvpAgent {
                     max_turns,
                     None,
                     is_chat_kind,
+                    None,
                     None,
                 )
                 .await?

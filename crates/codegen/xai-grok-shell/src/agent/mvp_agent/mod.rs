@@ -893,6 +893,10 @@ pub struct MvpAgent {
     >,
     /// Shell-only presentation state; lifecycle lives in the channel actor.
     subagent_presentation: RefCell<crate::agent::subagent::SubagentPresentation>,
+    /// Shared subagent turn-sampling semaphore, cloned into every
+    /// `SubagentSpawnContext`. LEADER-SAFE(shared). See
+    /// [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    subagent_sampling_semaphore: Arc<tokio::sync::Semaphore>,
     /// Shared buffer for mid-turn monitor event notifications.
     /// Pushed by the `InjectNotification` handler when a turn is active and the
     /// notification has `Next` priority. Drained by the session turn loop

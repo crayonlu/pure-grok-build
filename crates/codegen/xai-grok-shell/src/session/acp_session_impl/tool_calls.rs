@@ -242,7 +242,9 @@ pub(super) fn plan_mode_edit_gate(
     if !tracker.is_active() {
         return PlanEditGate::Allow;
     }
-    let _ = tool_input;
+    if matches!(tool_input, ToolInput::Task(_)) {
+        return PlanEditGate::Allow;
+    }
     match access_kind {
         AccessKind::Edit(path) if !tracker.should_auto_approve_edit(Path::new(path)) => {
             PlanEditGate::RejectNonPlanFile
@@ -3268,6 +3270,29 @@ mod plan_mode_edit_gate_tests {
                 })
             ),
             PlanEditGate::RejectNonPlanFile
+        );
+    }
+    #[test]
+    fn task_not_gated_in_plan_mode() {
+        use xai_tool_types::TaskToolInput;
+        let t = active_tracker();
+        assert_eq!(
+            gate(
+                &t,
+                &ToolInput::Task(TaskToolInput {
+                    prompt: "p".into(),
+                    description: "d".into(),
+                    subagent_type: "general-purpose".into(),
+                    run_in_background: false,
+                    capability_mode: None,
+                    isolation: None,
+                    resume_from: None,
+                    cwd: None,
+                    model: None,
+                    task_id: None,
+                })
+            ),
+            PlanEditGate::Allow
         );
     }
     /// Non-edit tools are never gated — they flow to the normal permission

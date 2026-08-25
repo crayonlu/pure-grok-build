@@ -61,6 +61,7 @@ members = [
     "crates/codegen/xai-grok-shell",
     "crates/codegen/xai-grok-shell-base",
     "crates/codegen/xai-grok-shell-session-support",
+    "crates/codegen/xai-grok-shell-terminal",
     "crates/codegen/xai-grok-status-line",
     "crates/codegen/xai-grok-subagent-resolution",
     "crates/codegen/xai-grok-telemetry",
@@ -345,6 +346,7 @@ xai-grok-shared = { path = "crates/codegen/xai-grok-shared" }
 xai-grok-shell = { path = "crates/codegen/xai-grok-shell" }
 xai-grok-shell-base = { path = "crates/codegen/xai-grok-shell-base" }
 xai-grok-shell-session-support = { path = "crates/codegen/xai-grok-shell-session-support" }
+xai-grok-shell-terminal = { path = "crates/codegen/xai-grok-shell-terminal" }
 xai-grok-status-line = { path = "crates/codegen/xai-grok-status-line" }
 xai-grok-telemetry = { path = "crates/codegen/xai-grok-telemetry" }
 xai-grok-test-support = { path = "crates/codegen/xai-grok-test-support" }

@@ -1,7 +1,5 @@
 //! Top-level input routing for [`AgentView`]: `handle_input` fans events
 //! out to the active pane/overlay handlers; pane and input-mode setters.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use super::bracketed_paste_should_probe;
 #[cfg(test)]
 use super::paste::paste_key_tests;
 #[cfg(test)]

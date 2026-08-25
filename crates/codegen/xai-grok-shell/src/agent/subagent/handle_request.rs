@@ -1130,6 +1130,7 @@ pub(crate) async fn run_shell_child(
         },
         false,
         Some(spawn_timer.clone()),
+        Some(ctx.subagent_sampling_semaphore.clone()),
     )
     .await;
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_UP);

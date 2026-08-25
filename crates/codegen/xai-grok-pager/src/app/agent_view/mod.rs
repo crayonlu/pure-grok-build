@@ -126,6 +126,7 @@ pub(crate) struct InlineVideoState {
 use super::actions::Action;
 use super::agent::AgentSession;
 use super::app_view::InputOutcome;
+use super::cancel_latency::CancelLatency;
 use crate::scrollback::EntryId;
 use crate::scrollback::ScrollbackSearchState;
 use crate::scrollback::state::ScrollbackState;
@@ -949,8 +950,6 @@ pub struct AgentView {
     pub prompt_stash: Option<PromptStashEntry>,
     /// Set by the send that consumed the user's draft this dispatch; see `note_draft_consumed`.
     pub(crate) draft_consumed: bool,
-    /// Drafts a newer stash pushed out of the slot. Held apart from `session.prompt_history`, which a late `PromptHistoryLoaded` replaces wholesale.
-    pub prompt_stash_evicted: Vec<String>,
     /// Complete prompt stashed from a credit-limit-blocked turn. Used by
     /// `CreditLimitRecheckComplete` to retry the prompt after a tier
     /// upgrade instead of showing a stale upsell.
@@ -1646,6 +1645,7 @@ pub struct AgentView {
     /// event loop re-sends the idempotent cancel after
     /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
     pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
+    pub(crate) cancel_latency: Option<CancelLatency>,
     /// Send-now cancel expectation: the client-minted id of an explicit
     /// cancel-and-send this client dispatched into a running turn (send-now
     /// chord / `SendPromptNow`, or queue-row "Send now"). The running turn's

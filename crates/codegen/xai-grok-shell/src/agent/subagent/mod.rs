@@ -52,6 +52,11 @@ pub(crate) use spawn::{
 mod attempt_store;
 mod handle_request;
 pub(crate) use handle_request::run_shell_child;
+/// Clamp for a resolved sampling-limit override; `Semaphore::new` panics past
+/// `Semaphore::MAX_PERMITS`. See [`SubagentsConfig::resolve_sampling_limit`].
+///
+/// [`SubagentsConfig::resolve_sampling_limit`]: crate::config::SubagentsConfig::resolve_sampling_limit
+pub(crate) const MAX_SUBAGENT_SAMPLING_LIMIT: usize = 512;
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {
@@ -328,6 +333,9 @@ pub(crate) struct SubagentSpawnContext {
     /// auto-wake synthetic prompt is suppressed so an async completion wake
     /// doesn't derail the parent mid-`/goal`; surfaces 2/3 still drain it.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
+    /// The process tree's shared subagent turn-sampling semaphore. See
+    /// [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    pub subagent_sampling_semaphore: Arc<tokio::sync::Semaphore>,
 }
 const _: () = {
     const fn assert_send<T: Send>() {}

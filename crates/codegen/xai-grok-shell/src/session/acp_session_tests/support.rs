@@ -441,6 +441,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         turn_stream_drained: parking_lot::Mutex::new(None),
         pending_image_strip: parking_lot::Mutex::new(None),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
+        sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: crate::test_support::TEST_MODEL.to_owned(),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),

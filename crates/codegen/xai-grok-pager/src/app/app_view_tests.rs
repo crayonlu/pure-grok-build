@@ -3302,12 +3302,15 @@ fn idle_non_empty_double_esc_clears_prompt() {
     let effects = crate::app::dispatch::dispatch(Action::ClearPrompt, &mut app);
     assert!(effects.is_empty());
     assert!(app.agents[&id].prompt.textarea.text().is_empty());
+    assert!(
+        app.agents[&id].session.prompt_history.is_empty(),
+        "the cleared draft goes to the stash, never to the history"
+    );
     assert_eq!(
         app.agents[&id]
-            .session
-            .prompt_history
-            .first()
-            .map(String::as_str),
+            .prompt_stash
+            .as_ref()
+            .map(|entry| entry.prompt.text.as_str()),
         Some("draft to clear")
     );
 }
@@ -3809,6 +3812,7 @@ fn idle_scrollback_pane_esc_with_history_search_does_not_arm_rewind() {
         .push_block(crate::scrollback::block::RenderBlock::user_prompt(
             "earlier",
         ));
+    agent.session.prompt_history = vec!["earlier".into()];
     assert!(agent.prompt.textarea.text().is_empty());
     let history = agent.combined_prompt_history();
     let current_text = agent.prompt.text().to_string();

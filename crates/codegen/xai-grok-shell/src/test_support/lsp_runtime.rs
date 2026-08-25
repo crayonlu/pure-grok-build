@@ -144,5 +144,8 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         parent_terminal_backend: None,
         parent_notification_handle: None,
         parent_scheduler_handle: None,
+        subagent_sampling_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+        )),
     }
 }

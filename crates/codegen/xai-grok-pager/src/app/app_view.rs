@@ -4514,13 +4514,9 @@ impl AppView {
         }
     }
     /// Render the current view to the terminal.
-    ///
-    /// Delegates to [`crate::render::draw::draw_frame`] which handles the
-    /// low-level terminal interaction (bypassing ratatui's `try_draw`,
-    /// synchronized output, cursor blink preservation). See that module's
-    /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
         self.draw_inner(terminal);
+        xai_grok_telemetry::startup::record_first_frame();
         crate::memory_release::run_deferred_release();
     }
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
