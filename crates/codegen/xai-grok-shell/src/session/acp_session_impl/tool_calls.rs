@@ -2676,49 +2676,65 @@ impl SessionActor {
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
-            match inline_attach_verdict(&image_content.data) {
-                InlineAttachVerdict::TooSmall => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: too small for vision models]"
-                    );
-                }
-                InlineAttachVerdict::Unreadable => {
-                    prompt_text = format!(
-                        "[Image from {path} was not attached: invalid or unreadable image data]"
-                    );
-                }
-                InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
-                    prompt_text = format!("Read image file: {path}");
+            if !self.supports_vision.get() {
+                // No-vision model: never attach image bytes (the API rejects
+                // them with 400 "model features vision not support"). Report
+                // the read and point at the file instead.
+                prompt_text = format!(
+                    "Read image file: {path} (the active model does not support vision, so the image was not attached; inspect the file with a vision-capable model or a text-extraction tool if needed)"
+                );
+            } else {
+                use crate::session::image_normalize::{InlineAttachVerdict, inline_attach_verdict};
+                match inline_attach_verdict(&image_content.data) {
+                    InlineAttachVerdict::TooSmall => {
+                        prompt_text = format!(
+                            "[Image from {path} was not attached: too small for vision models]"
+                        );
+                    }
+                    InlineAttachVerdict::Unreadable => {
+                        prompt_text = format!(
+                            "[Image from {path} was not attached: invalid or unreadable image data]"
+                        );
+                    }
+                    InlineAttachVerdict::Attach => {
+                        let url = format!(
+                            "data:{};base64,{}",
+                            image_content.mime_type, image_content.data
+                        );
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                        prompt_text = format!("Read image file: {path}");
+                    }
                 }
             }
         }
         if !self.is_cursor_harness()
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
-            for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
-            }
             let path = tool_parsed_args
                 .get("target_file")
                 .or_else(|| tool_parsed_args.get("path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            prompt_text = format!(
-                "Read PDF file: {path} ({} pages rendered, {} total)",
-                pdf.pages.len(),
-                pdf.total_pages,
-            );
+            if self.supports_vision.get() {
+                for page in &pdf.pages {
+                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                }
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages rendered, {} total)",
+                    pdf.pages.len(),
+                    pdf.total_pages,
+                );
+            } else {
+                prompt_text = format!(
+                    "Read PDF file: {path} ({} pages; the active model does not support vision, so page images were not attached)",
+                    pdf.total_pages,
+                );
+            }
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2739,6 +2755,14 @@ impl SessionActor {
                 count,
                 "base64 images extracted from tool result",
             );
+            if !self.supports_vision.get() {
+                // No-vision model: never attach extracted image bytes (the
+                // API rejects them with 400). Report the drop instead.
+                deferred_followups.push(ConversationItem::system_reminder(format!(
+                    "[{count} image(s) extracted from the tool result were not attached: the active model does not support vision]"
+                )));
+                return Ok(deferred_followups);
+            }
             let acp_images: Vec<agent_client_protocol::ImageContent> = extracted_images
                 .into_iter()
                 .map(|img| agent_client_protocol::ImageContent::new(img.data, img.mime_type))

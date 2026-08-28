@@ -13527,6 +13527,7 @@ dependencies = [
  "xai-grok-announcements",
  "xai-grok-config",
  "xai-grok-mcp",
+ "xai-grok-provider",
 ]
 
 [[package]]
@@ -13633,6 +13634,7 @@ dependencies = [
  "tracing",
  "xai-grok-auth",
  "xai-grok-extra-ca",
+ "xai-grok-provider",
  "xai-grok-sampler",
  "xai-grok-telemetry",
  "xai-grok-version",
@@ -13724,6 +13726,7 @@ dependencies = [
  "filetime",
  "flate2",
  "git2",
+ "indexmap",
  "nix 0.30.1",
  "notify",
  "reqwest 0.12.24",
@@ -13736,9 +13739,12 @@ dependencies = [
  "tokio",
  "tracing",
  "windows 0.61.3",
+ "wiremock",
  "xai-grok-auth",
  "xai-grok-config-types",
  "xai-grok-http",
+ "xai-grok-provider",
+ "xai-grok-telemetry",
  "xai-grok-tools",
  "xai-grok-version",
  "xai-sqlite-journal",
@@ -13769,6 +13775,28 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "xai-grok-overlay"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
+ "url",
+ "xai-grok-config",
+ "xai-grok-overlay-api",
+ "xai-grok-provider",
+]
+
+[[package]]
+name = "xai-grok-overlay-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+ "xai-grok-provider",
 ]
 
 [[package]]
@@ -13844,10 +13872,13 @@ dependencies = [
  "xai-grok-foreign-sessions",
  "xai-grok-markdown",
  "xai-grok-mermaid",
+ "xai-grok-overlay",
+ "xai-grok-overlay-api",
  "xai-grok-pager-diff",
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
+ "xai-grok-provider",
  "xai-grok-sandbox",
  "xai-grok-shell",
  "xai-grok-status-line",
@@ -14039,6 +14070,21 @@ dependencies = [
  "xai-grok-config",
  "xai-hooks-plugins-types",
  "xai-tty-utils",
+]
+
+[[package]]
+name = "xai-grok-provider"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "indexmap",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -14297,8 +14343,11 @@ dependencies = [
  "xai-grok-mcp",
  "xai-grok-memory",
  "xai-grok-models",
+ "xai-grok-overlay",
+ "xai-grok-overlay-api",
  "xai-grok-paths",
  "xai-grok-plugin-marketplace",
+ "xai-grok-provider",
  "xai-grok-sampler",
  "xai-grok-sampling-types",
  "xai-grok-sandbox",
@@ -14528,6 +14577,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "command-fds",
  "crc32fast",
@@ -14591,6 +14641,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-env",
  "xai-grok-extra-ca",
+ "xai-grok-provider",
  "xai-grok-sandbox",
  "xai-grok-test-support",
  "xai-grok-tools-api",
@@ -14641,6 +14692,7 @@ dependencies = [
  "url",
  "wiremock",
  "xai-grok-extra-ca",
+ "xai-grok-overlay",
  "xai-grok-shell",
  "xai-grok-telemetry",
  "xai-grok-tools",

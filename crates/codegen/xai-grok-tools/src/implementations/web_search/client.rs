@@ -19,6 +19,7 @@ pub struct WebSearchClient {
     /// The model cannot un-set it by naming a blocked domain in its own
     /// `allowed_domains`. Mutually exclusive with `default_allowed_domains`.
     default_excluded_domains: Option<Vec<String>>,
+    profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Callers can wire this so a 401
     /// from the Responses API emits an `auth_401_attribution` event
@@ -33,54 +34,84 @@ impl WebSearchClient {
         config: &WebSearchConfig,
         api_key_provider: Option<SharedApiKeyProvider>,
     ) -> Result<Self, xai_tool_runtime::ToolError> {
-        let WebSearchConfig::Enabled {
-            api_key,
-            base_url,
-            model,
-            extra_headers,
-            alpha_test_key,
-            allowed_domains,
-            excluded_domains,
-        } = config
-        else {
-            return Err(xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                "Cannot create WebSearchClient from disabled config".to_string(),
-            ));
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                xai_tool_runtime::ToolError::execution(
-                    xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Invalid API key for header: {e}"),
-                )
-            })?,
-        );
-        for (key, value) in extra_headers {
-            let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
-                xai_tool_runtime::ToolError::execution(
-                    xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Invalid header name '{key}': {e}"),
-                )
-            })?;
-            let header_value = HeaderValue::from_str(value).map_err(|e| {
-                xai_tool_runtime::ToolError::execution(
-                    xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Invalid header value for '{key}': {e}"),
-                )
-            })?;
-            headers.insert(header_name, header_value);
+        let ((base_url, model), default_headers, profile, allowed_domains, excluded_domains) =
+            match config {
+                WebSearchConfig::Enabled {
+                    api_key,
+                    base_url,
+                    model,
+                    extra_headers,
+                    alpha_test_key,
+                    allowed_domains,
+                    excluded_domains,
+                } => {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    headers.insert(
+                        AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
+                            xai_tool_runtime::ToolError::execution(
+                                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                                format!("Invalid API key for header: {e}"),
+                            )
+                        })?,
+                    );
+                    for (key, value) in extra_headers {
+                        let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
+                            xai_tool_runtime::ToolError::execution(
+                                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                                format!("Invalid header name '{key}': {e}"),
+                            )
+                        })?;
+                        let header_value = HeaderValue::from_str(value).map_err(|e| {
+                            xai_tool_runtime::ToolError::execution(
+                                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                                format!("Invalid header value for '{key}': {e}"),
+                            )
+                        })?;
+                        headers.insert(header_name, header_value);
+                    }
+                    let _ = alpha_test_key;
+                    (
+                        (base_url.clone(), model.clone()),
+                        Some(headers),
+                        None,
+                        allowed_domains.clone(),
+                        excluded_domains.clone(),
+                    )
+                }
+                WebSearchConfig::Profiled { profile } => {
+                    let base_url = profile.base_url.clone().ok_or_else(|| {
+                        xai_tool_runtime::ToolError::invalid_arguments(
+                            "profiled web search requires base_url",
+                        )
+                    })?;
+                    (
+                        (base_url, profile.model.clone().unwrap_or_default()),
+                        None,
+                        Some(profile.clone()),
+                        None,
+                        None,
+                    )
+                }
+                WebSearchConfig::Disabled => {
+                    return Err(xai_tool_runtime::ToolError::execution(
+                        xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                        "Cannot create WebSearchClient from disabled config".to_string(),
+                    ));
+                }
+            };
+        let http = match &default_headers {
+            Some(headers) => crate::util::shared_http::cached_client(
+                crate::util::shared_http::cache_key("web_search", headers),
+                || {
+                    xai_grok_extra_ca::build_reqwest_client(|builder| {
+                        builder.default_headers(headers.clone())
+                    })
+                },
+            ),
+            None => xai_grok_extra_ca::build_reqwest_client(|builder| builder),
         }
-        let _ = alpha_test_key;
-        let key = crate::util::shared_http::cache_key("web_search", &headers);
-        let http = crate::util::shared_http::cached_client(key, || {
-            xai_grok_extra_ca::build_reqwest_client(|builder| {
-                builder.default_headers(headers.clone())
-            })
-        })
         .map_err(|e| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
@@ -91,8 +122,9 @@ impl WebSearchClient {
             http,
             base_url: base_url.clone(),
             model: model.clone(),
-            default_allowed_domains: allowed_domains.clone(),
-            default_excluded_domains: excluded_domains.clone(),
+            default_allowed_domains: allowed_domains,
+            default_excluded_domains: excluded_domains,
+            profile,
             api_key_provider,
             attribution_callback: None,
         })
@@ -208,6 +240,9 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        if self.profile.is_some() {
+            return self.search_profile(query, allowed_domains).await;
+        }
         let (allowed, excluded) = self.resolve_filters(allowed_domains);
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
@@ -265,6 +300,100 @@ impl WebSearchClient {
         let citations = extract_citations(&response_obj);
         Ok((content, citations))
     }
+
+    async fn search_profile(
+        &self,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        let profile = self.profile.as_ref().expect("checked by caller");
+        let input = xai_grok_provider::ProviderRequestInput::new()
+            .value("query", query.to_owned())
+            .value("max_results", 10)
+            .value(
+                "allowed_domains",
+                serde_json::to_value(allowed_domains.unwrap_or_default()).unwrap_or_default(),
+            );
+        let built = xai_grok_provider::ProviderHttpRuntime::new(self.http.clone())
+            .build(profile, "search", &input, |name| std::env::var(name).ok())
+            .or_else(|_| {
+                xai_grok_provider::ProviderHttpRuntime::new(self.http.clone()).build(
+                    profile,
+                    "default",
+                    &input,
+                    |name| std::env::var(name).ok(),
+                )
+            })
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))?;
+        let response = self.http.execute(built.request).await.map_err(|error| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Generic search request failed: {error}"),
+            )
+        })?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.map_err(|error| {
+            xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Generic search response was not JSON: {error}"),
+            )
+        })?;
+        if !status.is_success() {
+            return Err(xai_tool_runtime::ToolError::execution(
+                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Generic search returned HTTP {status}: {body}"),
+            ));
+        }
+        let mapping = profile
+            .operation("search")
+            .or_else(|| profile.operation("default"))
+            .map(|operation| &operation.response)
+            .ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments("search profile has no operation")
+            })?;
+        let items = mapping
+            .items
+            .as_deref()
+            .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments(
+                    "search profile response.items is not an array",
+                )
+            })?;
+        let mut citations = Vec::new();
+        let mut content = String::new();
+        for (index, item) in items.iter().enumerate() {
+            let url = mapping
+                .url
+                .as_deref()
+                .and_then(|pointer| item.pointer(pointer))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if url.is_empty() {
+                continue;
+            }
+            let title = mapping
+                .title
+                .as_deref()
+                .and_then(|pointer| item.pointer(pointer))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(url);
+            let snippet = mapping
+                .content
+                .as_deref()
+                .and_then(|pointer| item.pointer(pointer))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            citations.push(url.to_owned());
+            content.push_str(&format!("{}. [{}]({})", index + 1, title, url));
+            if !snippet.is_empty() {
+                content.push_str(&format!(" — {snippet}"));
+            }
+            content.push('\n');
+        }
+        Ok((content.trim_end().to_owned(), citations))
+    }
     /// Same as [`Self::search`] but also extracts per-citation titles when
     /// the Responses API surfaces them. Returns `(content, citations_with_titles)`
     /// where each citation is `(title, url)`. Empty `title` strings indicate
@@ -277,6 +406,13 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        if self.profile.is_some() {
+            let (content, urls) = self.search_profile(query, allowed_domains).await?;
+            return Ok((
+                content,
+                urls.into_iter().map(|url| (String::new(), url)).collect(),
+            ));
+        }
         let (allowed, excluded) = self.resolve_filters(allowed_domains);
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
@@ -766,6 +902,210 @@ mod tests {
             None
         }
     }
+
+    #[tokio::test]
+    async fn profiled_brave_search_uses_query_auth_and_normalizes_results() {
+        use wiremock::matchers::{header, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/res/v1/web/search"))
+            .and(query_param("q", "rust"))
+            .and(header("X-Subscription-Token", "brave-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "web": {"results": [{
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org",
+                    "description": "A language empowering everyone"
+                }]}
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            base_url: Some(server.uri()),
+            api_key: Some("brave-key".into()),
+            auth: xai_grok_provider::ProviderAuthConfig {
+                name: "X-Subscription-Token".into(),
+                prefix: String::new(),
+                ..Default::default()
+            },
+            operations: [(
+                "search".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "GET".into(),
+                    path: "/res/v1/web/search".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        body: xai_grok_provider::BodyCodec::Query,
+                        query: [("query".into(), "q".into())].into_iter().collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        items: Some("/web/results".into()),
+                        title: Some("/title".into()),
+                        url: Some("/url".into()),
+                        content: Some("/description".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let client = WebSearchClient::new(&WebSearchConfig::Profiled { profile }, None).unwrap();
+        let (content, citations) = client.search("rust", None).await.unwrap();
+        assert!(content.contains("Rust"));
+        assert!(content.contains("A language empowering everyone"));
+        assert_eq!(citations, vec!["https://www.rust-lang.org"]);
+    }
+
+    #[tokio::test]
+    async fn profiled_tavily_search_uses_post_bearer_and_nested_results() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(header("Authorization", "Bearer tavily-key"))
+            .and(body_json(serde_json::json!({
+                "query": "rust async",
+                "max_results": 10,
+                "include_answer": true,
+                "include_domains": ["rust-lang.org"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "title": "Async Rust",
+                    "url": "https://www.rust-lang.org/async",
+                    "content": "Async Rust uses futures and executors."
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "tavily".into(),
+            base_url: Some(server.uri()),
+            api_key: Some("tavily-key".into()),
+            operations: [(
+                "search".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "POST".into(),
+                    path: "/search".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        fields: [
+                            ("query".into(), "query".into()),
+                            ("max_results".into(), "max_results".into()),
+                            ("allowed_domains".into(), "include_domains".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        defaults: [("include_answer".into(), serde_json::json!(true))]
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        items: Some("/results".into()),
+                        title: Some("/title".into()),
+                        url: Some("/url".into()),
+                        content: Some("/content".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let client = WebSearchClient::new(&WebSearchConfig::Profiled { profile }, None).unwrap();
+        let (content, citations) = client
+            .search("rust async", Some(vec!["rust-lang.org".into()]))
+            .await
+            .unwrap();
+        assert!(content.contains("Async Rust"));
+        assert!(content.contains("Async Rust uses futures"));
+        assert_eq!(citations, vec!["https://www.rust-lang.org/async"]);
+    }
+
+    #[tokio::test]
+    async fn profiled_firecrawl_search_uses_v2_shape_and_data_web_results() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/search"))
+            .and(header("Authorization", "Bearer firecrawl-key"))
+            .and(body_json(serde_json::json!({
+                "query": "rust async",
+                "limit": 10,
+                "includeDomains": ["rust-lang.org"]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "web": [{
+                        "title": "Async Rust",
+                        "url": "https://www.rust-lang.org/async",
+                        "description": "Async Rust uses futures and executors."
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "firecrawl".into(),
+            base_url: Some(format!("{}/v2", server.uri())),
+            api_key: Some("firecrawl-key".into()),
+            operations: [(
+                "search".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "POST".into(),
+                    path: "/search".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        body: xai_grok_provider::BodyCodec::Json,
+                        fields: [
+                            ("query".into(), "query".into()),
+                            ("max_results".into(), "limit".into()),
+                            ("allowed_domains".into(), "includeDomains".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        items: Some("/data/web".into()),
+                        title: Some("/title".into()),
+                        url: Some("/url".into()),
+                        content: Some("/description".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        let client = WebSearchClient::new(&WebSearchConfig::Profiled { profile }, None).unwrap();
+        let (content, citations) = client
+            .search("rust async", Some(vec!["rust-lang.org".into()]))
+            .await
+            .unwrap();
+        assert!(content.contains("Async Rust"));
+        assert!(content.contains("Async Rust uses futures"));
+        assert_eq!(citations, vec!["https://www.rust-lang.org/async"]);
+    }
+
     /// When the dynamic provider returns `None`, the static `api_key`
     /// from config must still be sent as the Authorization header.
     /// This is a regression scenario: API-key users

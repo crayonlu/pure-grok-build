@@ -2,9 +2,7 @@ use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::init::{bootstrap, exit_on_config_error};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
-#[cfg(test)]
-use crate::auth::AuthMode;
-use crate::auth::{AuthManager, GrokAuth, GrokComConfig, run_auth_flow};
+use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig, run_auth_flow};
 use crate::leader::protocol::InternalMethod;
 use crate::util::grok_home;
 use agent_client_protocol as acp;
@@ -304,9 +302,23 @@ pub async fn run_stdio_agent(
                 let _ = tx.shutdown().await;
             });
             let auth_manager = Arc::new(agent_config.create_auth_manager());
-            auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            // Proactive token refresh; runs until process exit.
+            if agent_config.overlay_runtime.policy().allows_session_auth() {
+                auth_manager.start_proactive_refresh(tokio_util::sync::CancellationToken::new());
+            }
+            // Pause refreshes across system sleep so an OIDC refresh can't straddle a
+            // suspend (which can revoke the refresh token and force re-login).
+            // `grok agent stdio` is a local/interactive entrypoint (spawned by
+            // grok-desktop), so it needs the gate like the leader and pager paths;
+            // no-op where the OS listener is unavailable.
             auth_manager.start_system_power_listener();
-            crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+
+            // Restore managed policy right before bootstrap reads it (no stale window after prefetch).
+            crate::managed_config::ensure_managed_policy_present_for_overlay(
+                &auth_manager,
+                &agent_config.overlay_runtime,
+            )
+            .await;
             apply_otel_config(&auth_manager, &agent_config.grok_com_config);
             let handle_io = spawn_agent_local(
                 agent_config,
@@ -441,16 +453,19 @@ pub async fn run_headless(
                 let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
                 let gateway = GatewaySender::new(gw_tx);
                 let auth_manager = shared_auth_manager;
-                auth_manager.start_proactive_refresh(agent_cancel.clone());
-                crate::managed_config::ensure_managed_policy_present(&auth_manager)
-                    .await;
-                let mut agent = MvpAgent::new(
-                        gateway,
-                        &agent_config_clone,
-                        auth_manager,
-                        prefetched_models,
-                    )
-                    .unwrap_or_else(exit_on_config_error);
+                // Proactive token refresh for the headless agent.
+                if agent_config_clone.overlay_runtime.policy().allows_session_auth() {
+                    auth_manager.start_proactive_refresh(agent_cancel.clone());
+                }
+                // Restore managed policy right before bootstrap reads it (no stale window after relay setup).
+                crate::managed_config::ensure_managed_policy_present_for_overlay(
+                    &auth_manager,
+                    &agent_config_clone.overlay_runtime,
+                )
+                .await;
+                let mut agent =
+                    MvpAgent::new(gateway, &agent_config_clone, auth_manager, prefetched_models)
+                        .unwrap_or_else(exit_on_config_error);
                 agent.models_manager.spawn_background_refresh();
                 if let Some(mc) = memory_config_for_first {
                     agent.set_memory_config(mc);
@@ -565,6 +580,12 @@ fn relay_config_for_session(
     agent_config: &AgentConfig,
     shared_auth_manager: &Arc<AuthManager>,
 ) -> Option<crate::agent::relay::RelayConfig> {
+    if !agent_config
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay)
+    {
+        return None;
+    }
     let session = auth?;
     if should_seed_shared_session(shared_auth_manager.current_or_expired().as_ref(), session) {
         shared_auth_manager.hot_swap(session.clone());
@@ -646,6 +667,99 @@ fn spawn_leader_relay(
         *slot_for_task.borrow_mut() = Some(handle);
     });
 }
+
+/// Migrate a legacy devbox WebLogin token to fresh OIDC in place (mint, persist,
+/// drop the legacy scope). No-op outside a devbox or for non-WebLogin / `None`.
+/// On mint/save failure, returns the existing token so the leader still starts.
+async fn migrate_devbox_auth_if_legacy(
+    auth: Option<GrokAuth>,
+    agent_config: &AgentConfig,
+) -> Option<GrokAuth> {
+    let auth = auth?;
+    if !crate::auth::devbox_login::is_devbox_environment() || auth.auth_mode != AuthMode::WebLogin {
+        return Some(auth);
+    }
+
+    info!("Devbox legacy auth detected, attempting migration to OIDC");
+    xai_grok_telemetry::unified_log::info(
+        "devbox legacy auth migration: starting",
+        None,
+        Some(serde_json::json!({
+            "user_id": auth.user_id,
+            "auth_mode": format!("{:?}", auth.auth_mode),
+        })),
+    );
+
+    // save + remove_scope are two non-atomic writes to auth.json (no lock). Safe
+    // at startup: no concurrent writer yet, and `lookup_auth` prefers the primary
+    // scope if a reader sees the intermediate state.
+    let migration_auth_manager = agent_config.create_auth_manager();
+
+    let mint = crate::auth::devbox_login::mint_devbox_auth(&migration_auth_manager);
+    let on_fail = |reason: String| {
+        tracing::warn!(%reason, "devbox legacy auth migration failed, continuing with legacy auth");
+        xai_grok_telemetry::unified_log::error(
+            "devbox legacy auth migration failed",
+            None,
+            Some(serde_json::json!({ "reason": reason })),
+        );
+    };
+    let budget = xai_grok_telemetry::startup::ReadinessBudget::new(
+        crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+    );
+    let minted = budget
+        .run(
+            xai_grok_telemetry::startup::StartupPhase::ManagedPolicy,
+            mint,
+        )
+        .await;
+    let new_auth = match minted {
+        Some(Ok(new_auth)) => new_auth,
+        Some(Err(e)) => {
+            on_fail(format!("devbox login helper call failed: {e}"));
+            return Some(auth);
+        }
+        None => {
+            on_fail(format!(
+                "mint timed out after {}s",
+                crate::http::STARTUP_AUTH_REFRESH_TIMEOUT.as_secs()
+            ));
+            return Some(auth);
+        }
+    };
+    match migration_auth_manager
+        .save_without_enrichment(new_auth)
+        .await
+    {
+        Ok(saved_auth) => {
+            if let Err(e) = migration_auth_manager.remove_scope(crate::auth::LEGACY_AUTH_SCOPE) {
+                tracing::warn!(error = ?e, "Failed to remove legacy auth scope entry (non-fatal)");
+            }
+            xai_grok_telemetry::unified_log::info(
+                "devbox legacy auth migration: succeeded",
+                None,
+                Some(serde_json::json!({
+                    "user_id": saved_auth.user_id,
+                    "has_refresh_token": saved_auth.refresh_token.is_some(),
+                    "expires_at": saved_auth.expires_at.map(|e| e.to_rfc3339()),
+                    "auth_mode": format!("{:?}", saved_auth.auth_mode),
+                })),
+            );
+            info!(user_id = %saved_auth.user_id, "Devbox legacy auth migrated to OIDC successfully");
+            Some(saved_auth)
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "devbox legacy auth migration: failed to save new auth, continuing with legacy");
+            xai_grok_telemetry::unified_log::error(
+                "devbox legacy auth migration: save failed",
+                None,
+                Some(serde_json::json!({ "error": e.to_string() })),
+            );
+            Some(auth)
+        }
+    }
+}
+
 /// Everything needed to arm the leader's grok.com relay *after* startup.
 ///
 /// A leader that boots without auth used to disable the relay forever — the
@@ -883,8 +997,26 @@ pub async fn run_leader(
     debug!("IPC socket created");
     let _lock = lock;
     let ctx = &agent_config.grok_com_config;
-    suppress_otel();
-    let auth: Option<GrokAuth> = crate::auth::try_noninteractive_auth_no_mint(ctx).await;
+
+    suppress_otel(); // idempotent re-assert
+    // No-mint on the readiness path: a cached/expired session + a bounded
+    // (~5s) refresh only. A session-less-but-mintable leader is minted by the
+    // post-readiness background task below, so readiness never blocks on the
+    // provider command (which could take up to STARTUP_AUTH_TIMEOUT ~60s).
+    let auth: Option<GrokAuth> = if agent_config.overlay_runtime.policy().allows_session_auth() {
+        crate::auth::try_noninteractive_auth_no_mint(ctx).await
+    } else {
+        None
+    };
+
+    // ── Phase 6b: Legacy devbox auth migration ─────────────────────────────
+    let auth: Option<GrokAuth> = migrate_devbox_auth_if_legacy(auth, &agent_config).await;
+
+    // A session-less leader that can still mint one (auth provider / devbox) will
+    // acquire a grok.com session post-readiness whose fleet policy governs
+    // external OTEL; see the background cold-mint below.
+    // Disk presence, not the is_xai-filtered no-mint result: an enterprise
+    // session has remote policy and must keep the gate closed.
     let has_session = auth.is_some()
         || agent_config
             .create_auth_manager()
@@ -920,7 +1052,16 @@ pub async fn run_leader(
     let agent_to_ipc_tx_clone = agent_to_ipc_tx.clone();
     let cancel_clone = cancel.clone();
     let shared_auth_manager = Arc::new(agent_config_for_spawn.create_auth_manager());
-    shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
+    // Proactive token refresh for the leader; cancelled on shutdown.
+    if agent_config_for_spawn
+        .overlay_runtime
+        .policy()
+        .allows_session_auth()
+    {
+        shared_auth_manager.start_proactive_refresh(cancel_clone.clone());
+    }
+    // Pause refreshes across system sleep on this local (laptop) leader
+    // process so a refresh can't straddle a suspend.
     shared_auth_manager.start_system_power_listener();
     if let Some(session) = auth.as_ref()
         && should_seed_shared_session(shared_auth_manager.current_or_expired().as_ref(), session)
@@ -932,7 +1073,13 @@ pub async fn run_leader(
     let auth_manager_for_agent = shared_auth_manager.clone();
     let auth_manager_for_config = shared_auth_manager.clone();
     let auth_manager_for_mint = shared_auth_manager.clone();
-    crate::managed_config::ensure_managed_policy_present(&auth_manager_for_agent).await;
+
+    // Restore managed policy right before bootstrap reads it (no stale window after the long auth/prefetch phase).
+    crate::managed_config::ensure_managed_policy_present_for_overlay(
+        &auth_manager_for_agent,
+        &agent_config_for_spawn.overlay_runtime,
+    )
+    .await;
     let (agent_config_for_spawn, shared_models_manager) = bootstrap(
         &agent_config_for_spawn,
         &auth_manager_for_agent,
@@ -1092,16 +1239,23 @@ pub async fn run_leader(
                      (BYOK / local-only leader); will arm if an eligible \
                      token is hot-reloaded"
                 );
-                deferred_relay_arm = Some(DeferredRelayArm {
-                    relay_on_demand,
-                    relay_demand_rx,
-                    ws_to_agent_tx: ws_to_agent_tx.clone(),
-                    agent_to_ws_tx: agent_to_ws_tx.clone(),
-                    cancel: cancel_clone.clone(),
-                    slot: relay_handle_slot.clone(),
-                    grok_com_config: agent_config.grok_com_config.clone(),
-                    alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
-                });
+                if agent_config
+                    .overlay_runtime
+                    .allows_implicit(xai_grok_overlay_api::ServiceKind::Relay)
+                {
+                    deferred_relay_arm = Some(DeferredRelayArm {
+                        relay_on_demand,
+                        relay_demand_rx,
+                        ws_to_agent_tx: ws_to_agent_tx.clone(),
+                        agent_to_ws_tx: agent_to_ws_tx.clone(),
+                        cancel: cancel_clone.clone(),
+                        slot: relay_handle_slot.clone(),
+                        grok_com_config: agent_config.grok_com_config.clone(),
+                        alpha_test_key: agent_config.endpoints.alpha_test_key.clone(),
+                    });
+                } else {
+                    info!("Relay disabled by overlay policy");
+                }
             }
             let update_cancel = cancel_clone.clone();
             if let Some(update_config) = auto_update_check {

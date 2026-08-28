@@ -2,7 +2,8 @@
 # Grok CLI installer for PowerShell — https://x.ai/cli/install.ps1
 #
 # Auth: GROK_DEPLOYMENT_KEY env var (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL
+# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL,
+#      GROK_CLI_BASE_URL (self-hosted release host; skips upstream fallback)
 #
 # Usage:
 #   irm https://x.ai/cli/install.ps1 | iex                                       # latest stable
@@ -157,17 +158,23 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
 $Channel = if ($env:GROK_CHANNEL) { $env:GROK_CHANNEL } else { 'stable' }
 
-# Pick a working BaseUrl: try Cloudflare-fronted x.ai first, fall back to
-# direct GCS if it's unreachable. The probe doubles as the channel-pointer
-# fetch when no -Version was passed, so the happy path costs zero extra requests.
-if (-not $Version) { Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray }
-$probeResult = Download-String "$BaseUrlPrimary/$Channel"
-if ($probeResult) {
-    $BaseUrl = $BaseUrlPrimary
-} else {
-    Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
-    $BaseUrl = $BaseUrlFallback
+# Pick a working BaseUrl. An explicit self-hosted base is authoritative;
+# otherwise try the x.ai CDN and fall back to direct GCS.
+$ConfiguredBaseUrl = if ($env:GROK_CLI_BASE_URL) { $env:GROK_CLI_BASE_URL.Trim() } else { '' }
+if ($ConfiguredBaseUrl) {
+    $BaseUrl = $ConfiguredBaseUrl.TrimEnd('/')
+    if (-not $Version) { Write-Host "Fetching latest $Channel version from $BaseUrl..." -ForegroundColor DarkGray }
     $probeResult = Download-String "$BaseUrl/$Channel"
+} else {
+    if (-not $Version) { Write-Host "Fetching latest $Channel version..." -ForegroundColor DarkGray }
+    $probeResult = Download-String "$BaseUrlPrimary/$Channel"
+    if ($probeResult) {
+        $BaseUrl = $BaseUrlPrimary
+    } else {
+        Write-Host "Note: $BaseUrlPrimary unreachable, falling back to direct GCS." -ForegroundColor Yellow
+        $BaseUrl = $BaseUrlFallback
+        $probeResult = Download-String "$BaseUrl/$Channel"
+    }
 }
 
 if ($Version) {
@@ -209,7 +216,7 @@ if (-not $downloaded) {
 
 # --- Install binary (locked-file safe) ---
 
-foreach ($binName in @('grok.exe', 'agent.exe')) {
+foreach ($binName in @('grok.exe')) {
     $dest = Join-Path $BinDir $binName
     $old = "$dest.old"
 
@@ -229,7 +236,9 @@ foreach ($binName in @('grok.exe', 'agent.exe')) {
     }
 }
 
-Write-Host "  Installed to $BinDir\grok.exe and $BinDir\agent.exe." -ForegroundColor DarkGray
+# Remove the legacy top-level alias; only `grok` is supported now.
+Remove-Item (Join-Path $BinDir 'agent.exe') -Force -ErrorAction SilentlyContinue
+Write-Host "  Installed to $BinDir\grok.exe." -ForegroundColor DarkGray
 
 # --- Generate completions (best-effort) ---
 
@@ -343,4 +352,4 @@ if ($pathEntries -notcontains $BinDir) {
 }
 
 Write-Host ''
-Write-Host "Run 'grok' or 'agent' to get started!" -ForegroundColor Cyan
+Write-Host "Run 'grok' to get started!" -ForegroundColor Cyan
