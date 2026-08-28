@@ -40,46 +40,6 @@ fn invalidate_models_cache(home: &std::path::Path) {
 fn is_grok_build_system_prompt(sys_prompt: &str) -> bool {
     sys_prompt.contains("<work_policy>")
 }
-/// Alternate-agent compiled prompts: grok-build's `<work_policy>` is absent
-/// from the system template, and the injected workspace path is present in
-/// a user-role message (`cursor_user.md`, not `cursor_prompt.md`). Empty or
-/// unrelated prompts fail the user-path check.
-fn assert_alternate_harness(server: &MockInferenceServer, workspace: &std::path::Path) {
-    let sys_prompt = server
-        .last_system_prompt()
-        .expect("should have at least one inference request");
-    let user_prompt = last_request_user_text(server)
-        .expect("should have a user message on the inference request");
-    let path = workspace.to_string_lossy();
-    assert!(
-        !is_grok_build_system_prompt(&sys_prompt),
-        "alternate template must not use grok-build `<work_policy>`\n\
-         system prompt preview: {}",
-        &sys_prompt[..sys_prompt.len().min(500)]
-    );
-    assert!(
-        user_prompt.contains(path.as_ref()),
-        "alternate user template must include injected workspace path `{path}`\n\
-         user prompt preview: {}",
-        &user_prompt[..user_prompt.len().min(500)]
-    );
-}
-/// Join user-role message text from the most recent chat/Responses request.
-fn last_request_user_text(server: &MockInferenceServer) -> Option<String> {
-    let body = server.requests().into_iter().rev().find_map(|e| {
-        if e.path.contains("chat/completions") || e.path.contains("responses") {
-            e.body
-        } else {
-            None
-        }
-    })?;
-    let texts = user_role_texts(&body);
-    if texts.is_empty() {
-        None
-    } else {
-        Some(texts.join("\n"))
-    }
-}
 fn user_role_texts(body: &serde_json::Value) -> Vec<String> {
     let Some(items) = body
         .get("messages")
