@@ -128,6 +128,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     notifications_suppressed: false,
                     rewindable: false,
                     front_message_committed: false,
+                    hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
                 }),
                 notifications: NotificationSender {
@@ -622,6 +623,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     notifications_suppressed: false,
                     rewindable: false,
                     front_message_committed: false,
+                    hook_block_hold: Default::default(),
                     nudges_used_this_session: 0,
                 }),
                 notifications: NotificationSender {
@@ -894,6 +896,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 notifications_suppressed: false,
                 rewindable: false,
                 front_message_committed: false,
+                hook_block_hold: Default::default(),
                 nudges_used_this_session: 0,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -1146,13 +1149,16 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
             let bridge = actor.agent.borrow().tool_bridge().clone();
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                        })
-                        .abort_handle(),
-                });
+                state.running_task = Some(
+                    AgentTask::new(
+                        "running",
+                        tokio::task::spawn_local(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(60))
+                                    .await;
+                            })
+                            .abort_handle(),
+                    ),
+                );
                 state
                     .pending_inputs
                     .push_back(InputItem {
@@ -1173,9 +1179,11 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                         respond_to: tx,
                         persist_ack: None,
                         parsed_prompt_tx: None,
+                        initial_child_prompt_ready: None,
                         queue_meta: None,
                         queue_mutation_policy: QueueMutationPolicy::hidden(),
                         send_now: false,
+                        traceparent: None,
                     });
             }
             let _ = actor
@@ -1245,13 +1253,13 @@ async fn cancel_records_mid_turn_abort_interrupt_marker() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
             }
             assert_eq!(actor.events.take_prior_interrupt_category(), None);
             let _ = actor
@@ -1288,13 +1296,13 @@ async fn cancel_without_assistant_text_skips_interrupt_reminder() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
             }
             assert!(!actor.events.has_active_tool());
             assert!(!actor.events.take_pending_interrupt_reminder());
@@ -1334,13 +1342,13 @@ async fn send_now_cancel_arms_no_interrupt_signals_and_resets_wait_depth() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
             }
             let zombie_guard = crate::tools::tool_context::BlockingWaitGuard::enter(
                 actor.tool_context.blocking_wait_depth.clone(),
@@ -1398,13 +1406,13 @@ async fn cancel_with_dangling_tool_call_skips_interrupt_reminder() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
             }
             assert!(!actor.events.has_active_tool());
             let _ = actor
@@ -1691,6 +1699,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
                 id: queue_id.to_string(),
                 version: 0,
@@ -1702,6 +1711,7 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            traceparent: None,
         };
         (item, rx)
     }
@@ -1722,13 +1732,13 @@ async fn cancel_running_task_interactive_preserves_queued_work() {
             let (q2_item, mut q2_rx) = make_item("q2-pid", "q2");
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async move {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
                 state.pending_inputs.push_back(running_item);
                 state.pending_inputs.push_back(q1_item);
                 state.pending_inputs.push_back(q2_item);
@@ -2250,6 +2260,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: queue_id.map(|id| crate::session::prompt_queue::QueueEntryMeta {
                 id: id.to_string(),
                 version: 0,
@@ -2261,6 +2272,7 @@ async fn cancel_resolves_front_when_running_task_is_none() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            traceparent: None,
         };
         (item, rx)
     }
@@ -2439,6 +2451,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 notifications_suppressed: false,
                 rewindable: false,
                 front_message_committed: false,
+                hook_block_hold: Default::default(),
                 nudges_used_this_session: 0,
             });
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<
@@ -2716,10 +2729,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             }
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: task.abort_handle(),
-                });
+                state.running_task = Some(
+                    AgentTask::new("running", task.abort_handle()),
+                );
             }
             let _ = actor
                 .cancel_running_task(crate::session::CancelOptions {
@@ -2839,6 +2851,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
             respond_to,
             persist_ack: None,
             parsed_prompt_tx: None,
+            initial_child_prompt_ready: None,
             queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
                 id: queue_id.to_string(),
                 version: 0,
@@ -2850,6 +2863,7 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
             }),
             queue_mutation_policy: QueueMutationPolicy::editable(),
             send_now: false,
+            traceparent: None,
         }
     }
     let local = tokio::task::LocalSet::new();
@@ -2866,13 +2880,13 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
             {
                 let mut state = actor.state.lock().await;
-                state.running_task = Some(AgentTask {
-                    prompt_id: "running".into(),
-                    handle: tokio::task::spawn_local(async move {
+                state.running_task = Some(AgentTask::new(
+                    "running",
+                    tokio::task::spawn_local(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                     })
                     .abort_handle(),
-                });
+                ));
                 state
                     .pending_inputs
                     .push_back(make_item("running", "running"));
