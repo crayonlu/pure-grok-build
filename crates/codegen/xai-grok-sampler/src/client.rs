@@ -26,7 +26,8 @@ use xai_grok_sampling_types::error::{
 };
 use xai_grok_sampling_types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
+    ConversationResponse, CreateResponseWrapper, DEFAULT_EXACT_REPETITION_MIN_TOKENS,
+    DOOM_LOOP_CHECK_HEADER, EXACT_REPETITION_CHECK_HEADER, MessagesRequestWrapper,
     ResponseModelMetadata, Result, SamplingError, SentCredential, build_messages_request,
     is_check_event, messages, rs,
 };
@@ -44,8 +45,6 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
-const ANTHROPIC_VERSION_HEADER: &str = "anthropic-version";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
@@ -54,6 +53,8 @@ struct GrokRequestHeaders<'a> {
     model_id: &'a str,
     session_id: &'a str,
     turn_idx: Option<&'a str>,
+    /// Turn-level resubmit attempt; the proxy counts retry traffic by it.
+    transient_retry: Option<&'a str>,
     agent_id: &'a str,
     deployment_id: Option<&'a str>,
     user_id: Option<&'a str>,
@@ -69,6 +70,9 @@ impl GrokRequestHeaders<'_> {
             .header("x-grok-agent-id", self.agent_id);
         if let Some(idx) = self.turn_idx {
             b = b.header("x-grok-turn-idx", idx);
+        }
+        if let Some(attempt) = self.transient_retry {
+            b = b.header("x-grok-transient-retry", attempt);
         }
         if let Some(id) = self.deployment_id.filter(|s| !s.is_empty()) {
             b = b.header("x-grok-deployment-id", id);
@@ -623,18 +627,6 @@ impl SamplingClient {
             &mut headers,
         );
 
-        // Native Anthropic Messages endpoints require this header. Keep it as
-        // a protocol default here so direct SamplerConfig users remain
-        // interoperable; an explicit extra/env header remains authoritative.
-        if matches!(config.api_backend, ApiBackend::Messages)
-            && !headers.contains_key(ANTHROPIC_VERSION_HEADER)
-        {
-            headers.insert(
-                HeaderName::from_static(ANTHROPIC_VERSION_HEADER),
-                HeaderValue::from_static(ANTHROPIC_VERSION),
-            );
-        }
-
         // Add x-grok-client-version header for version gating at the proxy.
         if let Some(client_version) = config.client_version.as_ref()
             && let Ok(header_value) = HeaderValue::from_str(client_version)
@@ -995,6 +987,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: payload.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: payload.x_grok_turn_idx.as_deref(),
+            transient_retry: payload.x_grok_transient_retry.as_deref(),
             agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
@@ -1055,6 +1048,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: payload.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: payload.x_grok_turn_idx.as_deref(),
+            transient_retry: payload.x_grok_transient_retry.as_deref(),
             agent_id: payload.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
@@ -1266,6 +1260,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: request.x_grok_turn_idx.as_deref(),
+            transient_retry: request.x_grok_transient_retry.as_deref(),
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
@@ -1402,6 +1397,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: request.x_grok_turn_idx.as_deref(),
+            transient_retry: request.x_grok_transient_retry.as_deref(),
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
@@ -1432,8 +1428,12 @@ impl SamplingClient {
             .apply(builder)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if let Some(policy) = self.defaults.doom_loop_recovery {
-            http_request =
-                http_request.header(DOOM_LOOP_CHECK_HEADER, policy.window_tokens.to_string());
+            http_request = http_request
+                .header(DOOM_LOOP_CHECK_HEADER, policy.window_tokens.to_string())
+                .header(
+                    EXACT_REPETITION_CHECK_HEADER,
+                    DEFAULT_EXACT_REPETITION_MIN_TOKENS.to_string(),
+                );
         }
         let http_request = http_request.json(&request_body);
 
@@ -1626,6 +1626,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: request.x_grok_turn_idx.as_deref(),
+            transient_retry: request.x_grok_transient_retry.as_deref(),
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
@@ -1740,6 +1741,7 @@ impl SamplingClient {
             model_id: &model_id,
             session_id: request.x_grok_session_id.as_deref().unwrap_or_default(),
             turn_idx: request.x_grok_turn_idx.as_deref(),
+            transient_retry: request.x_grok_transient_retry.as_deref(),
             agent_id: request.x_grok_agent_id.as_deref().unwrap_or_default(),
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
@@ -1971,6 +1973,7 @@ impl SamplingClient {
         let x_grok_req_id = request.x_grok_req_id.clone();
         let x_grok_session_id = request.x_grok_session_id.clone();
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+        let x_grok_transient_retry = request.x_grok_transient_retry.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
         // The hosted tools travel as raw JSON, spliced in after serialization by
@@ -1984,6 +1987,7 @@ impl SamplingClient {
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+        wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
         wrapper.extra_tool_entries = extra_tools;
 
@@ -2008,6 +2012,7 @@ impl SamplingClient {
         let x_grok_req_id = request.x_grok_req_id.clone();
         let x_grok_session_id = request.x_grok_session_id.clone();
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+        let x_grok_transient_retry = request.x_grok_transient_retry.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
         // The hosted tools travel as raw JSON, spliced in by `create_response` through
@@ -2021,6 +2026,7 @@ impl SamplingClient {
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+        wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
         wrapper.extra_tool_entries = extra_tools;
 
@@ -2048,6 +2054,7 @@ impl SamplingClient {
         let x_grok_req_id = request.x_grok_req_id.clone();
         let x_grok_session_id = request.x_grok_session_id.clone();
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+        let x_grok_transient_retry = request.x_grok_transient_retry.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
         let messages_request = build_messages_request(&request);
@@ -2057,6 +2064,7 @@ impl SamplingClient {
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+        wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
 
         if let Some(trace) = trace {
@@ -2080,6 +2088,7 @@ impl SamplingClient {
         let x_grok_req_id = request.x_grok_req_id.clone();
         let x_grok_session_id = request.x_grok_session_id.clone();
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
+        let x_grok_transient_retry = request.x_grok_transient_retry.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
         let messages_request = build_messages_request(&request);
@@ -2089,6 +2098,7 @@ impl SamplingClient {
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
+        wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
 
         if let Some(trace) = trace {
@@ -2101,11 +2111,8 @@ impl SamplingClient {
     /// Backend-aware streaming call that collects the full response.
     ///
     /// Honors the request's [`LengthPolicy`](xai_grok_sampling_types::LengthPolicy)
-    /// like the actor path: under the default `Fail`, a `Length` stop is an
-    /// error, so side callers (autocomplete, memory notes, summaries) never
-    /// persist a silently truncated result. Under `CompletePartial` the
-    /// same salvage gate as `drive_l2` applies: empty Length and Length
-    /// carrying tool calls still fail.
+    /// like the actor path: the default still fails text-only or empty
+    /// `Length`, so side callers never persist a silently truncated result.
     pub async fn conversation_collect(
         &self,
         request: ConversationRequest,
@@ -2167,6 +2174,16 @@ pub(crate) fn apply_length_policy(
                 content_len = response.assistant().map_or(0, |a| a.content.len()),
                 completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens),
                 "salvaging Length-truncated response per LengthPolicy::CompletePartial"
+            );
+            Ok(response)
+        }
+        LengthVerdict::SalvageToolCalls => {
+            // Breadcrumb for counting turns rescued from max_tokens_truncation.
+            tracing::info!(
+                tool_calls = response.tool_calls().len(),
+                content_len = response.assistant().map_or(0, |a| a.content.len()),
+                completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens),
+                "completing Length-truncated response with completed tool calls"
             );
             Ok(response)
         }
@@ -2331,6 +2348,7 @@ mod tests {
             x_grok_req_id: None,
             x_grok_session_id: None,
             x_grok_turn_idx: None,
+            x_grok_transient_retry: None,
             x_grok_agent_id: None,
             x_grok_deployment_id: None,
             x_grok_user_id: None,
@@ -2354,6 +2372,11 @@ mod tests {
                 .and_then(|v| v.get("include_usage"))
                 .and_then(|v| v.as_bool()),
             Some(true)
+        );
+        assert!(
+            !obj.keys().any(|k| k.starts_with("x_grok_")),
+            "x_grok_* are header fields and must never serialize into the body: {:?}",
+            obj.keys().collect::<Vec<_>>()
         );
 
         assert!(
@@ -2662,41 +2685,6 @@ mod tests {
                 .default_headers
                 .get(HeaderName::from_static("x-api-key"))
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn messages_adds_default_anthropic_version_and_allows_override() {
-        let cfg = SamplerConfig {
-            api_key: Some("anthropic-key-abc123".to_string()),
-            api_backend: ApiBackend::Messages,
-            auth_scheme: AuthScheme::XApiKey,
-            ..minimal_config()
-        };
-        let client = SamplingClient::new(cfg).expect("client should build");
-        assert_eq!(
-            client
-                .default_headers
-                .get(ANTHROPIC_VERSION_HEADER)
-                .and_then(|value| value.to_str().ok()),
-            Some(ANTHROPIC_VERSION)
-        );
-
-        let mut overridden = minimal_config();
-        overridden.api_key = Some("anthropic-key-abc123".to_string());
-        overridden.api_backend = ApiBackend::Messages;
-        overridden.auth_scheme = AuthScheme::XApiKey;
-        overridden.extra_headers.insert(
-            ANTHROPIC_VERSION_HEADER.to_string(),
-            "2024-10-22".to_string(),
-        );
-        let client = SamplingClient::new(overridden).expect("client should build");
-        assert_eq!(
-            client
-                .default_headers
-                .get(ANTHROPIC_VERSION_HEADER)
-                .and_then(|value| value.to_str().ok()),
-            Some("2024-10-22")
         );
     }
 

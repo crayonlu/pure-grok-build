@@ -300,16 +300,11 @@ impl acp::Agent for MvpAgent {
             }),
             ),
         );
-        let allow_session_auth = self.cfg.borrow().overlay_runtime.policy().allows_session_auth();
-        let mut has_cached_token = allow_session_auth && init_has_current;
+        let mut has_cached_token = init_has_current;
         if !init_has_current && init_is_expired {
-            has_cached_token = if allow_session_auth {
-                match self.auth_manager.silent_refresh().await {
-                    SilentRefresh::Renewed(_) => true,
-                    SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
-                }
-            } else {
-                false
+            has_cached_token = match self.auth_manager.silent_refresh().await {
+                SilentRefresh::Renewed(_) => true,
+                SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
             };
         }
         let (
@@ -1285,32 +1280,78 @@ impl acp::Agent for MvpAgent {
                 }
             }
         };
-        handle
-            .cmd_tx
-            .send(SessionCommand::Prompt {
-                prompt_id: prompt_id.clone(),
-                prompt_blocks: arguments.prompt.clone(),
-                prompt_mode,
-                artifact_upload_ctx: trace_context
-                    .as_ref()
-                    .map(|ctx| ctx.artifact_upload_context()),
-                client_identifier: prompt_client_identifier,
-                screen_mode: prompt_screen_mode,
-                verbatim,
-                traceparent: xai_file_utils::trace_context::current_traceparent(),
-                json_schema,
-                send_now,
-                admission: None,
-                tool_overrides_update,
-                respond_to: tx,
-                prompt_admitted: None,
-                persist_ack: None,
-                parsed_prompt_tx,
-            })
-            .map_err(|e| {
-                acp::Error::internal_error()
-                    .data(format!("failed to dispatch prompt to session: {e}"))
-            })?;
+        let prompt_blocks = arguments.prompt.clone();
+        let artifact_upload_ctx = trace_context
+            .as_ref()
+            .map(|ctx| ctx.artifact_upload_context());
+        let traceparent = xai_file_utils::trace_context::current_traceparent();
+        let dispatch_result: Result<(), acp::Error> = if send_now {
+            handle
+                .cmd_tx
+                .send(SessionCommand::Prompt {
+                    prompt_id: prompt_id.clone(),
+                    prompt_blocks,
+                    prompt_mode,
+                    artifact_upload_ctx,
+                    client_identifier: prompt_client_identifier,
+                    screen_mode: prompt_screen_mode,
+                    verbatim,
+                    traceparent,
+                    json_schema,
+                    send_now: true,
+                    admission: None,
+                    tool_overrides_update,
+                    respond_to: tx,
+                    prompt_admitted: None,
+                    persist_ack: None,
+                    parsed_prompt_tx,
+                })
+                .map_err(|e| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to dispatch prompt to session: {e}"))
+                })
+        } else {
+            let envelope = xai_message_delivery_core::DeliveryEnvelope::from_human(
+                xai_message_delivery_core::Operation::Queue,
+                crate::session::message_delivery::HumanPromptContent {
+                    prompt_blocks,
+                    prompt_mode,
+                    artifact_upload_ctx,
+                    client_identifier: prompt_client_identifier,
+                    screen_mode: prompt_screen_mode,
+                    verbatim,
+                    traceparent,
+                    json_schema,
+                    tool_overrides_update,
+                    respond_to: tx,
+                    parsed_prompt_tx,
+                },
+                crate::session::message_delivery::human_delivery_identity(
+                    prompt_id.clone(),
+                ),
+                crate::session::message_delivery::ResidentHumanGrant::new(
+                    handle.info.id.0.to_string(),
+                ),
+            );
+            handle
+                .message_delivery()
+                .send_human(envelope)
+                .map_err(|error| match error {
+                    crate::session::message_delivery::HumanDeliveryError::ChannelClosed(
+                        error,
+                    ) => {
+                        acp::Error::internal_error()
+                            .data(
+                                format!("failed to dispatch prompt to session: {error}"),
+                            )
+                    }
+                    crate::session::message_delivery::HumanDeliveryError::Rejected
+                    | crate::session::message_delivery::HumanDeliveryError::Unsupported => {
+                        unreachable!("resident human Queue is target-bound and supported")
+                    }
+                })
+        };
+        dispatch_result?;
         drop(dispatch_guard);
         self.push_roster_activity_delta(
             &arguments.session_id,
@@ -1386,20 +1427,16 @@ impl acp::Agent for MvpAgent {
                 .as_ref()
                 .map(|ok| ok.stop_reason)
                 .map_err(Clone::clone);
-            let (stop_reason_value, agent_result_value) = crate::sampling::error::prompt_complete_fields(
-                &mapped,
-            );
             let turn_id = arguments
                 .meta
                 .as_ref()
                 .and_then(|m| m.get("turnId"))
                 .and_then(|v| v.as_u64());
-            let mut payload = serde_json::json!({
-                "sessionId": arguments.session_id.to_string(),
-                "promptId": prompt_id.as_str(),
-                "stopReason": stop_reason_value,
-                "agentResult": agent_result_value,
-            });
+            let mut payload = crate::session::turn_completion::prompt_complete_payload(
+                &arguments.session_id,
+                prompt_id.as_str(),
+                &mapped,
+            );
             if let Some(tid) = turn_id {
                 payload["turnId"] = serde_json::json!(tid);
             }
@@ -1412,15 +1449,15 @@ impl acp::Agent for MvpAgent {
             if let Some(ref ctx) = cancellation_context {
                 payload["cancellationContext"] = ctx.clone();
             }
-            let params = serde_json::value::to_raw_value(&payload)
-                .expect("prompt_complete params serialization");
-            self.gateway
-                .forward_fire_and_forget(
-                    acp::ExtNotification::new(
-                        "x.ai/session/prompt_complete",
-                        params.into(),
-                    ),
-                );
+            if let Ok(params) = serde_json::value::to_raw_value(&payload) {
+                self.gateway
+                    .forward_fire_and_forget(
+                        acp::ExtNotification::new(
+                            "x.ai/session/prompt_complete",
+                            params.into(),
+                        ),
+                    );
+            }
         }
         {
             let end_activity = if handle
@@ -2288,11 +2325,6 @@ impl acp::Agent for MvpAgent {
             | "x.ai/btw" => crate::extensions::feedback::handle(self, &args).await,
             "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
             "x.ai/cloud/terminate" => {
-                crate::extensions::require_overlay_service(
-                    self,
-                    xai_grok_overlay_api::ServiceKind::Relay,
-                    method.as_ref(),
-                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2325,11 +2357,6 @@ impl acp::Agent for MvpAgent {
                 crate::extensions::to_raw_response(&serde_json::json!({ "ok": true }))
             }
             "x.ai/cloud/env/list" => {
-                crate::extensions::require_overlay_service(
-                    self,
-                    xai_grok_overlay_api::ServiceKind::Relay,
-                    method.as_ref(),
-                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2355,11 +2382,6 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/create" => {
-                crate::extensions::require_overlay_service(
-                    self,
-                    xai_grok_overlay_api::ServiceKind::Relay,
-                    method.as_ref(),
-                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2417,11 +2439,6 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/update" => {
-                crate::extensions::require_overlay_service(
-                    self,
-                    xai_grok_overlay_api::ServiceKind::Relay,
-                    method.as_ref(),
-                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
@@ -2482,11 +2499,6 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/cloud/env/delete" => {
-                crate::extensions::require_overlay_service(
-                    self,
-                    xai_grok_overlay_api::ServiceKind::Relay,
-                    method.as_ref(),
-                )?;
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
                     "Authentication required",
