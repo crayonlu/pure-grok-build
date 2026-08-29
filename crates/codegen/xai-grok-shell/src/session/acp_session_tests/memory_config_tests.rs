@@ -16,7 +16,6 @@ fn first_turn_memory_visibility_matches_displayed_score() {
 fn initial_injection_backend_params_use_override_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
         session_id: "test-session".to_owned(),
-        embedding_runtime: None,
         embed_config: None,
         embed_base_url: "http://localhost".to_owned(),
         embed_api_key: None,
@@ -46,7 +45,6 @@ fn initial_injection_backend_params_use_override_min_score() {
 fn initial_injection_backend_params_preserve_default_zero_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
         session_id: "test-session".to_owned(),
-        embedding_runtime: None,
         embed_config: None,
         embed_base_url: "http://localhost".to_owned(),
         embed_api_key: None,
@@ -137,6 +135,9 @@ async fn create_test_actor_with_memory(
         .as_ref()
         .map_or_else(Default::default, |mc| mc.initial_injection.clone());
     SessionActor {
+        transient_retry_enabled: true,
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-memory"),
@@ -330,8 +331,9 @@ async fn create_test_actor_with_memory(
         title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
-        turn_stream_drained: parking_lot::Mutex::new(None),
-        pending_image_strip: parking_lot::Mutex::new(None),
+        turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        pending_image_strip: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
         sampler_handle: xai_grok_sampler::SamplerHandle::noop(),
         sampling_gate: None,
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
@@ -559,7 +561,6 @@ async fn create_injection_ready_actor(
     std::mem::forget(tmp);
     actor.memory.backend_params = Some(crate::session::memory::MemoryBackendParams {
         session_id: "test-memory".to_owned(),
-        embedding_runtime: None,
         embed_config: None,
         embed_base_url: "http://localhost".to_owned(),
         embed_api_key: None,

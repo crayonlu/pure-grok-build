@@ -246,24 +246,17 @@ pub fn stream_chat_completions<'a>(
 
         // ── Build the final response ─────────────────────────────────
         let tool_calls: Vec<ToolCall> = tool_call_acc
-            .into_iter()
-            .map(|(index, (id, name, arguments))| {
-                let resolved_id = if id.is_empty() {
-                    format!("call_{index}").into()
-                } else {
-                    std::sync::Arc::<str>::from(id)
-                };
-                ToolCall {
-                    id: resolved_id,
-                    name,
-                    arguments: std::sync::Arc::<str>::from(arguments),
-                }
+            .into_values()
+            .map(|(id, name, arguments)| ToolCall {
+                id: std::sync::Arc::<str>::from(id),
+                name,
+                arguments: std::sync::Arc::<str>::from(arguments),
             })
             .collect();
 
         // Tool calls override the stop reason, even an explicit `length`.
         // NOTE: opposite precedence from the Messages backend, where Length
-        // wins so `drive_l2` can refuse to salvage a possibly
+        // wins so the `LengthPolicy` gate can refuse a possibly
         // argument-truncated trailing call. Load-bearing; don't "fix" here.
         if !tool_calls.is_empty() {
             if finish_reason == Some(StopReason::Length) {

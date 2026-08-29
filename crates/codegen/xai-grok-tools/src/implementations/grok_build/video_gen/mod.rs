@@ -1626,6 +1626,7 @@ mod tests {
             zdr_video_output_s3: None,
             tier_restricted: false,
             zdr_restricted: false,
+            capability_profile: None,
         };
         let client = VideoGenClient::new(&cfg, None)
             .unwrap()

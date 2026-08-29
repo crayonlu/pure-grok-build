@@ -1,10 +1,6 @@
 //! Embedding provider abstraction for memory vector search.
 //!
-//! Defines the `EmbeddingProvider` trait and an API-based implementation
-//! that calls an OpenAI-compatible embeddings API endpoint.
-//!
-//! Embeddings are cached in the sqlite-vec `chunks_vec` table — the vec0
-//! virtual table IS the cache. No separate cache needed.
+//! The sqlite-vec `chunks_vec` virtual table is the embedding cache; there is no separate cache.
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
@@ -18,11 +14,8 @@ const MAX_RETRIES: usize = 3;
 /// Initial backoff delay in milliseconds (doubles on each retry: 1s, 2s, 4s).
 const INITIAL_BACKOFF_MS: u64 = 1000;
 
-/// Trait for generating text embeddings.
-///
-/// Implementations must be `Send + Sync` so they can be used in `Send`
-/// futures (e.g., inside `tokio::spawn`). The `embed_batch` method is
-/// async to support API-based providers.
+/// Generates text embeddings.
+/// The `Send + Sync` bound lets implementations run inside `Send` futures such as `tokio::spawn`.
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a batch of texts, returning one vector per input text.
@@ -31,10 +24,8 @@ pub trait EmbeddingProvider: Send + Sync {
         texts: &[&str],
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>>;
 
-    /// The model name used for embeddings.
     fn model_name(&self) -> &str;
 
-    /// The dimensionality of the embedding vectors.
     fn dimensions(&self) -> usize;
 }
 
@@ -509,7 +500,7 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
         let profile = provider_profile(self);
         let runtime = xai_grok_provider::ProviderHttpRuntime::shared();
 
-        // Process in batches to respect API payload limits
+        // The API caps payload size, so texts are sent in chunks of max_batch_size
         for batch in texts.chunks(self.max_batch_size) {
             let input = xai_grok_provider::ProviderRequestInput::new()
                 .value("model", self.model.clone())
@@ -520,7 +511,7 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
                 input
             };
 
-            // Retry with exponential backoff on transient errors (429, 5xx)
+            // Transient errors (429, 5xx) are retried with exponential backoff
             let mut last_err = String::new();
             let mut success = false;
             for attempt in 0..MAX_RETRIES {
@@ -580,7 +571,7 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
                     continue;
                 }
 
-                // Non-retryable error (4xx other than 429)
+                // Any other status is not retryable, so fail immediately
                 let body = response.text().await.unwrap_or_default();
                 return Err(format!("embedding API error {status}: {body}").into());
             }

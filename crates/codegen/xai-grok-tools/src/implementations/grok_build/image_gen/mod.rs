@@ -1238,6 +1238,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let client = ImageGenClient::new(&cfg_plain, None)
             .unwrap()
@@ -1261,6 +1263,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let client = ImageGenClient::new(&cfg, None)
             .unwrap()
