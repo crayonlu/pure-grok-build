@@ -35,12 +35,18 @@ pub enum WebSearchConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         excluded_domains: Option<Vec<String>>,
     },
+    /// A provider-neutral profile for search services such as Brave, Tavily,
+    /// SerpApi, or Firecrawl. The profile owns its endpoint and credentials;
+    /// it never inherits the chat model's request shape.
+    Profiled {
+        profile: xai_grok_provider::CapabilityProviderConfig,
+    },
 }
 
 impl WebSearchConfig {
     /// Returns `true` when the config is the `Enabled` variant.
     pub fn is_enabled(&self) -> bool {
-        matches!(self, Self::Enabled { .. })
+        matches!(self, Self::Enabled { .. }) || matches!(self, Self::Profiled { .. })
     }
 
     /// Return a copy safe for returning to clients.
@@ -65,6 +71,15 @@ impl WebSearchConfig {
                 alpha_test_key: None,
                 allowed_domains: allowed_domains.clone(),
                 excluded_domains: excluded_domains.clone(),
+            },
+            Self::Profiled { profile } => Self::Profiled {
+                profile: xai_grok_provider::CapabilityProviderConfig {
+                    api_key: profile
+                        .api_key
+                        .as_ref()
+                        .map(|_| "***REDACTED***".to_owned()),
+                    ..profile.clone()
+                },
             },
         }
     }

@@ -5,7 +5,6 @@ use super::*;
 use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
-
 const CLASSIFIER_REQUEST_TOKEN_RESERVE: u64 = 16_384;
 
 fn classifier_request_fits_context(input_tokens: u64, context_window: u64) -> bool {
@@ -328,7 +327,6 @@ impl SessionActor {
     pub(super) async fn prepare_tool_definitions(&self) -> Vec<ToolDefinition> {
         self.prepare_tool_definitions_timed().await.0
     }
-
     /// The exact tool specs a turn sends before its structured-output append.
     /// Shared with `SnapshotToolDefinitions` so verbatim mirrors preserve the parent schema.
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
@@ -745,6 +743,7 @@ impl SessionActor {
                 None
             },
             supports_backend_search: self.supports_backend_search.get(),
+            supports_vision: self.supports_vision.get(),
             compactions_remaining: self.compactions_remaining.get(),
             compaction_at_tokens: self.compaction_at_tokens.get(),
             // The sampler sends the opt-in header itself when this is set.
@@ -2030,8 +2029,8 @@ impl SessionActor {
         let raw_config = crate::config::load_effective_config()
             .map_err(|e| tracing::warn!(error = %e, "Failed to reload config"))
             .ok()?;
-
-        let config = crate::agent::config::Config::new_from_toml_cfg(&raw_config)
+        let host_config = xai_grok_overlay::without_overlay(&raw_config);
+        let config = crate::agent::config::Config::new_from_toml_cfg(&host_config)
             .map_err(|e| tracing::warn!(error = %e, "Failed to parse reloaded config.toml"))
             .ok()?;
 

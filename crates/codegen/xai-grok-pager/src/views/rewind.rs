@@ -63,7 +63,7 @@ pub enum RewindPhase {
     CancelOffer {
         active_idx: usize,
     },
-    /// Confirm before executing a conversation-only rewind.
+    /// Confirm before executing a rewind.
     Confirm {
         target_prompt_index: usize,
         active_idx: usize,
@@ -77,12 +77,52 @@ pub enum RewindPhase {
     },
 }
 
+/// What a rewind rolls back. Mirrors the shell's `RewindMode` wire values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RewindMode {
+    /// Roll back both conversation and files (full time-travel).
+    All,
+    /// Roll back conversation only; leave files untouched.
+    #[default]
+    ConversationOnly,
+    /// Roll back files only; leave conversation untouched.
+    FilesOnly,
+}
+
+impl RewindMode {
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ConversationOnly => "conversation_only",
+            Self::FilesOnly => "files_only",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::All => "Conversation + Files",
+            Self::ConversationOnly => "Conversation only",
+            Self::FilesOnly => "Files only",
+        }
+    }
+
+    /// Cycle to the next mode; wraps around.
+    pub fn next(&self) -> Self {
+        match self {
+            Self::All => Self::ConversationOnly,
+            Self::ConversationOnly => Self::FilesOnly,
+            Self::FilesOnly => Self::All,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct RewindState {
     pub phase: RewindPhase,
     pub anchor_entry_idx: usize,
     pub stashed_draft: Option<StashedPrompt>,
     pub selected_prompt_index: Option<usize>,
+    pub mode: RewindMode,
 }
 
 impl RewindState {
@@ -96,6 +136,7 @@ impl RewindState {
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index,
+            mode: RewindMode::ConversationOnly,
         }
     }
 }
@@ -111,6 +152,7 @@ pub enum RewindInput {
     MoveUp,
     MoveDown,
     ConfirmCursor,
+    CycleMode,
     Consumed,
 }
 
@@ -126,6 +168,7 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
         RewindPhase::Picker { points, selected } => match key.code {
             KeyCode::Char('j') | KeyCode::Down => RewindInput::MoveDown,
             KeyCode::Char('k') | KeyCode::Up => RewindInput::MoveUp,
+            KeyCode::Char('m') => RewindInput::CycleMode,
             KeyCode::Enter => {
                 if let Some(p) = points.get(*selected) {
                     RewindInput::PickerSelect(p.prompt_index)
@@ -323,7 +366,13 @@ pub fn rewind_overlay_height(phase: &RewindPhase, screen_h: u16) -> u16 {
     content + 1
 }
 
-pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, focused: bool) {
+pub fn render_rewind_overlay(
+    buf: &mut Buffer,
+    area: Rect,
+    phase: &RewindPhase,
+    mode: RewindMode,
+    focused: bool,
+) {
     if area.height == 0 || area.width < 10 {
         return;
     }
@@ -368,27 +417,33 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 len: points.len(),
                 selected: *selected,
             }
-            .render(buf, area, "Rewind to which turn?", focused, |i, ctx| {
-                let point = &points[i];
-                let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
-                let preview: String = crate::render::line_utils::truncate_str(
-                    point.prompt_preview.as_deref().unwrap_or("(no preview)"),
-                    ctx.content_width.saturating_sub(8) as usize,
-                );
-                let text_style = Style::default()
-                    .fg(theme.text_primary)
-                    .bg(ctx.row_bg)
-                    .add_modifier(if ctx.is_cursor {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    });
+            .render(
+                buf,
+                area,
+                &format!("Rewind to which turn?  ·  mode: {} (m)", mode.label()),
+                focused,
+                |i, ctx| {
+                    let point = &points[i];
+                    let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
+                    let preview: String = crate::render::line_utils::truncate_str(
+                        point.prompt_preview.as_deref().unwrap_or("(no preview)"),
+                        ctx.content_width.saturating_sub(8) as usize,
+                    );
+                    let text_style = Style::default()
+                        .fg(theme.text_primary)
+                        .bg(ctx.row_bg)
+                        .add_modifier(if ctx.is_cursor {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        });
 
-                Line::from(vec![
-                    Span::styled("\u{00B7} ", dot_style),
-                    Span::styled(preview, text_style),
-                ])
-            });
+                    Line::from(vec![
+                        Span::styled("\u{00B7} ", dot_style),
+                        Span::styled(preview, text_style),
+                    ])
+                },
+            );
             return;
         }
         RewindPhase::CancelOffer { active_idx } => {
@@ -655,6 +710,7 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: Some(3),
+            mode: RewindMode::default(),
         }
     }
 
@@ -838,6 +894,7 @@ mod tests {
     #[test]
     fn esc_dismisses_from_picker_and_other_phases() {
         let s = RewindState {
+            mode: RewindMode::default(),
             phase: RewindPhase::Picker {
                 points: vec![],
                 selected: 0,
@@ -858,6 +915,7 @@ mod tests {
         ));
 
         let s = RewindState {
+            mode: RewindMode::default(),
             phase: RewindPhase::Loading,
             anchor_entry_idx: 0,
             stashed_draft: None,

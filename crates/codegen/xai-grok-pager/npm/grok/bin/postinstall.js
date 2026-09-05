@@ -16,8 +16,8 @@ const zlib = require('zlib');
 const { execSync } = require('child_process');
 const TOML = require('@iarna/toml');
 
-// $GROK_HOME (else ~/.grok), matching the Rust grok_home(): a symlinked
-// $HOME resolves the same way. Lets fleets relocate the binary off a slow $HOME
+// $GROK_HOME (else ~/.grok), matching the Rust grok_home() including its
+// canonicalized-home default. Lets fleets relocate the binary off a slow $HOME
 // (NFS); old code hardcoded os.homedir().
 function defaultGrokHome() {
     const home = os.homedir();
@@ -65,13 +65,13 @@ const EXE = IS_WINDOWS ? '.exe' : '';
 
 fs.mkdirSync(CANONICAL_DIR, { recursive: true });
 
-function writeVendorBinary(brotliPath, binaryPath, destPath) {
+function writeVendorBinary(brPath, rawPath, destPath) {
     const tmp = destPath + `.tmp.${process.pid}`;
     try {
-        if (fs.existsSync(brotliPath)) {
-            fs.writeFileSync(tmp, zlib.brotliDecompressSync(fs.readFileSync(brotliPath)));
-        } else if (fs.existsSync(binaryPath)) {
-            fs.copyFileSync(binaryPath, tmp);
+        if (fs.existsSync(brPath)) {
+            fs.writeFileSync(tmp, zlib.brotliDecompressSync(fs.readFileSync(brPath)));
+        } else if (fs.existsSync(rawPath)) {
+            fs.copyFileSync(rawPath, tmp);
         } else {
             return false;
         }
@@ -86,8 +86,8 @@ function writeVendorBinary(brotliPath, binaryPath, destPath) {
 }
 
 function installBinary(binName, sourceDir, vendorSubpath) {
-    const brotliPath = path.join(sourceDir, 'bin', vendorSubpath + '.br');
-    const binaryPath = path.join(sourceDir, 'bin', vendorSubpath);
+    const brPath = path.join(sourceDir, 'bin', vendorSubpath + '.br');
+    const rawPath = path.join(sourceDir, 'bin', vendorSubpath);
 
     const versionedName = `${binName}-${version}${EXE}`;
     const versionedPath = path.join(CANONICAL_DIR, versionedName);
@@ -95,8 +95,8 @@ function installBinary(binName, sourceDir, vendorSubpath) {
     const canonicalPath = path.join(CANONICAL_DIR, canonicalName);
 
     // Skip if this exact version is already installed.
-    if (!fs.existsSync(versionedPath) && !writeVendorBinary(brotliPath, binaryPath, versionedPath)) {
-        console.error(`@xai-official/grok: missing binary at ${brotliPath}`);
+    if (!fs.existsSync(versionedPath) && !writeVendorBinary(brPath, rawPath, versionedPath)) {
+        console.error(`@xai-official/grok: missing binary at ${brPath}`);
         return false;
     }
 
@@ -140,6 +140,19 @@ function installBinary(binName, sourceDir, vendorSubpath) {
 
     console.log(`${binName} ${version} installed to ${canonicalPath} -> ${versionedName}`);
     return true;
+}
+
+// Older installers created a top-level `agent` alias next to `grok`. Keep npm
+// installs single-command as well: remove only the legacy symlink on Unix,
+// or the legacy copied executable on Windows. Leave unrelated filesystem
+// objects alone.
+function removeLegacyAgentAlias() {
+    const legacyPath = path.join(CANONICAL_DIR, `agent${EXE}`);
+    try {
+        const metadata = fs.lstatSync(legacyPath);
+        const removable = metadata.isSymbolicLink() || (IS_WINDOWS && metadata.isFile());
+        if (removable) fs.unlinkSync(legacyPath);
+    } catch {}
 }
 
 // Comparator: sort "<prefix>X.Y.Z" filenames by version, newest first.
@@ -186,35 +199,8 @@ if (!platformDir) {
     process.exit(0);
 }
 
-// Point the bin entry at a binary extracted beside it: launches become one
-// process, and the link can only dangle if the package itself is broken.
-// Windows keeps the node launcher; npm generates its command shims from it.
-function installBinLink(platformDir) {
-    if (IS_WINDOWS) return;
-    // Other package managers wrap the entry's `#!` line in their own launchers.
-    if (!(process.env.npm_config_user_agent ?? '').startsWith('npm/')) return;
-    const brotliPath = path.join(platformDir, 'bin', `grok${EXE}.br`);
-    const binaryPath = path.join(platformDir, 'bin', `grok${EXE}`);
-    const nativePath = path.join(__dirname, 'grok-native');
-    const entryPath = path.join(__dirname, 'grok');
-    const tmp = entryPath + `.link.${process.pid}`;
-    try {
-        if (!writeVendorBinary(brotliPath, binaryPath, nativePath)) {
-            return;
-        }
-        try { fs.unlinkSync(tmp); } catch {}
-        fs.symlinkSync('./grok-native', tmp);
-        fs.renameSync(tmp, entryPath);
-    } catch (e) {
-        // Losing the link only costs latency; the node launcher still works.
-        console.error(`@xai-official/grok: bin link not installed: ${e.message}`);
-        try { fs.unlinkSync(tmp); } catch {}
-    }
-}
-
-if (installBinary('grok', platformDir, `grok${EXE}`)) {
-    installBinLink(platformDir);
-}
+const grokInstalled = installBinary('grok', platformDir, `grok${EXE}`);
+if (grokInstalled) removeLegacyAgentAlias();
 cleanupOldVersions('grok');
 cleanupOldVersions('grok-pager');
 
@@ -226,7 +212,7 @@ try { obj = TOML.parse(fs.readFileSync(configPath, 'utf8')); } catch { }
 obj.cli ??= {};
 obj.cli.installer = 'npm';
 
-// Persist the npm registry so `grok update` and the launcher use the same one.
+// Persist the npm registry so `grok update` and the trampoline use the same one.
 const npmRegistry = process.env.GROK_NPM_REGISTRY
     || (() => {
         try {

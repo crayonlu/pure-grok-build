@@ -97,6 +97,12 @@ impl AgentView {
                 let resolved = crate::views::rewind::confirm_cursor(&state.phase);
                 Self::rewind_input_to_outcome(resolved)
             }
+            crate::views::rewind::RewindInput::CycleMode => {
+                if let Some(ref mut rw) = self.rewind_state {
+                    rw.mode = rw.mode.next();
+                }
+                InputOutcome::Changed
+            }
             other => Self::rewind_input_to_outcome(other),
         }
     }
@@ -118,6 +124,7 @@ impl AgentView {
             RewindInput::MoveUp
             | RewindInput::MoveDown
             | RewindInput::ConfirmCursor
+            | RewindInput::CycleMode
             | RewindInput::Consumed => InputOutcome::Changed,
         }
     }
@@ -256,7 +263,7 @@ mod sync_rewind_anchor_to_picker_tests {
         }
     }
     fn install_picker(agent: &mut AgentView) {
-        use crate::views::rewind::{RewindPhase, RewindPointInfo, RewindState};
+        use crate::views::rewind::{RewindMode, RewindPhase, RewindPointInfo, RewindState};
         let pt = |pi: usize, preview: &str| RewindPointInfo {
             prompt_index: pi,
             created_at: String::new(),
@@ -273,6 +280,7 @@ mod sync_rewind_anchor_to_picker_tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            mode: RewindMode::default(),
         });
     }
     #[test]

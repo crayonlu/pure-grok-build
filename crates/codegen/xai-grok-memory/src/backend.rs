@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use xai_grok_tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
 
-use super::embedding::EmbeddingProvider as _;
+use super::embedding::{EmbeddingAuthScheme, EmbeddingProvider as _, EmbeddingRuntimeConfig};
 use super::observation::{
     MemoryObservationSink, MemoryRetrievalMode, MemorySearchErrorClass, MemorySearchObservation,
     MemorySearchOutcome, MemorySearchSource, MemoryWatcherSyncObservation,
@@ -129,7 +129,7 @@ pub struct MemoryBackendParams {
     /// Base URL for embedding API calls (CLI proxy).
     /// It must match the endpoint `embedding_credentials` was scoped to; a mismatch fails closed.
     pub embed_base_url: String,
-    /// API key for embedding API calls.
+    /// Legacy API key used only when `embedding_runtime` is absent.
     pub embed_api_key: Option<String>,
     /// Hybrid search scoring config (weights, thresholds, decay, MMR).
     pub search_config: xai_grok_config_types::MemorySearchConfig,
@@ -155,6 +155,64 @@ impl MemoryBackendParams {
     }
 }
 
+fn runtime_config_from_config(
+    config: &xai_grok_config_types::MemoryEmbeddingConfig,
+    base_url: &str,
+) -> Option<EmbeddingRuntimeConfig> {
+    if !config.provider.trim().eq_ignore_ascii_case("api") {
+        tracing::warn!(
+            provider = %config.provider,
+            "memory embeddings: provider is not implemented; using FTS-only"
+        );
+        return None;
+    }
+    let model = config
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())?;
+    if config.dimensions == 0 {
+        tracing::warn!("memory embeddings: dimensions must be greater than zero; using FTS-only");
+        return None;
+    }
+    let auth_scheme = EmbeddingAuthScheme::parse(config.auth_scheme.as_deref())?;
+    let api_key = config
+        .api_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            config
+                .env_key
+                .as_ref()
+                .and_then(|keys| keys.resolve_value())
+        });
+    let mut request = config.request.clone();
+    if let Some(input_type) = config.input_type.as_deref() {
+        request.defaults.insert(
+            "input_type".to_owned(),
+            serde_json::Value::String(input_type.to_owned()),
+        );
+    }
+    Some(EmbeddingRuntimeConfig {
+        base_url: base_url.trim_end_matches('/').to_owned(),
+        model,
+        dimensions: config.dimensions,
+        protocol: config.protocol.clone(),
+        path: config
+            .path
+            .clone()
+            .unwrap_or_else(|| super::embedding::default_embedding_path(&config.protocol)),
+        api_key,
+        auth_scheme,
+        auth: super::embedding::effective_embedding_auth(config),
+        extra_headers: config.extra_headers.clone(),
+        env_headers: config.env_headers.clone(),
+        query_params: config.query_params.clone(),
+        request,
+        response: config.response.clone(),
+    })
+}
+
 async fn build_embedding_provider(
     config: Option<&xai_grok_config_types::MemoryEmbeddingConfig>,
     credentials: &EndpointScopedCredentials,
@@ -162,9 +220,16 @@ async fn build_embedding_provider(
     base_url: &str,
 ) -> Option<super::embedding::ApiEmbeddingProvider> {
     let config = config?;
-    if config.model.as_ref().is_none_or(|m| m.is_empty()) {
-        return None;
-    }
+    let runtime = runtime_config_from_config(config, base_url)?;
+    build_embedding_provider_from_runtime(&runtime, credentials, static_api_key).await
+}
+
+async fn build_embedding_provider_from_runtime(
+    runtime: &EmbeddingRuntimeConfig,
+    credentials: &EndpointScopedCredentials,
+    static_api_key: Option<&str>,
+) -> Option<super::embedding::ApiEmbeddingProvider> {
+    let base_url = runtime.base_url.as_str();
 
     // Enforce at runtime, in release too: a `debug_assert` compiles out of shipped binaries and lets a scoped credential reach an unapproved URL
     let credentials_approved = credentials.approved_for(base_url);
@@ -177,13 +242,17 @@ async fn build_embedding_provider(
         );
     }
 
+    // An explicit embedding key always wins over inherited session/provider
+    // credentials. This keeps the endpoint/key pair auditable and prevents an
+    // AuthManager token from shadowing a user-specified BYOK key.
+    if runtime.api_key.is_some() {
+        let client = super::embedding::build_static_middleware_client(runtime.api_key.clone());
+        return super::embedding::ApiEmbeddingProvider::from_runtime(runtime.clone(), client);
+    }
+
     if credentials_approved && let Some(creds) = credentials.auth_credentials() {
         let client = super::embedding::build_middleware_client(creds.clone());
-        return super::embedding::ApiEmbeddingProvider::from_config(
-            config,
-            base_url.to_owned(),
-            client,
-        );
+        return super::embedding::ApiEmbeddingProvider::from_runtime(runtime.clone(), client);
     }
 
     let per_call_key = if credentials_approved && let Some(p) = credentials.api_key_provider() {
@@ -191,8 +260,15 @@ async fn build_embedding_provider(
     } else {
         None
     };
-    let api_key = per_call_key.or_else(|| static_api_key.map(|s| s.to_owned()))?;
-    super::embedding::ApiEmbeddingProvider::from_session(config, base_url.to_owned(), api_key)
+    let api_key = per_call_key.or_else(|| {
+        static_api_key
+            .filter(|key| !key.trim().is_empty())
+            .map(str::to_owned)
+    })?;
+    let mut runtime = runtime.clone();
+    runtime.api_key = Some(api_key);
+    let client = super::embedding::build_static_middleware_client(runtime.api_key.clone());
+    super::embedding::ApiEmbeddingProvider::from_runtime(runtime, client)
 }
 
 /// `MemoryBackend` implementation backed by hybrid search (FTS5 + vector KNN).
@@ -208,6 +284,7 @@ pub struct MemoryBackendImpl {
     embed_base_url: String,
     /// API key for embedding requests.
     embed_api_key: Option<String>,
+    embedding_runtime: Option<EmbeddingRuntimeConfig>,
     /// Search scoring config (weights, min_score, max_results).
     search_config: xai_grok_config_types::MemorySearchConfig,
     /// File watcher for detecting external memory edits.
@@ -232,6 +309,7 @@ impl MemoryBackendImpl {
             embed_config: None,
             embed_base_url: String::new(),
             embed_api_key: None,
+            embedding_runtime: None,
             search_config: xai_grok_config_types::MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
@@ -259,6 +337,10 @@ impl MemoryBackendImpl {
         self.embed_config = Some(config);
         self.embed_base_url = base_url;
         self.embed_api_key = api_key;
+        self.embedding_runtime = self
+            .embed_config
+            .as_ref()
+            .and_then(|config| runtime_config_from_config(config, &self.embed_base_url));
         self
     }
 
@@ -282,6 +364,14 @@ impl MemoryBackendImpl {
     }
 
     async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
+        if let Some(runtime) = self.embedding_runtime.as_ref() {
+            return build_embedding_provider_from_runtime(
+                runtime,
+                &self.embedding_credentials,
+                self.embed_api_key.as_deref(),
+            )
+            .await;
+        }
         build_embedding_provider(
             self.embed_config.as_ref(),
             &self.embedding_credentials,
@@ -336,7 +426,19 @@ impl MemoryBackend for MemoryBackendImpl {
         let query_length = query.len();
         let keyword_count = super::query_expansion::extract_keywords(query).len();
 
-        let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
+        // Open a MemoryIndex for this query (open-per-query, ~1ms).
+        //
+        // IMPORTANT: `MemoryIndex` is `Send` but `!Sync`, so `&MemoryIndex`
+        // is `!Send`. To keep this future `Send`, we must never hold a
+        // `&index` borrow across an `.await` point. The code below is
+        // structured into sync phases (borrow &index) and async phases
+        // (no &index borrow) to satisfy this constraint.
+        let embed_dims = self
+            .embedding_runtime
+            .as_ref()
+            .map(|runtime| runtime.dimensions)
+            .or_else(|| self.embed_config.as_ref().map(|config| config.dimensions))
+            .unwrap_or(1024);
         let mut index = match super::index::MemoryIndex::open_or_create(
             &self.db_path,
             self.storage.clone(),
@@ -599,7 +701,7 @@ mod factory_tests {
 
     fn make_params_fts_only(session_id: &str) -> MemoryBackendParams {
         MemoryBackendParams {
-            session_id: session_id.to_owned(),
+            session_id: session_id.to_string(),
             embed_config: None,
             embed_base_url: String::new(),
             embed_api_key: None,
@@ -612,6 +714,28 @@ mod factory_tests {
         }
     }
 
+    #[test]
+    fn runtime_config_preserves_provider_input_type() {
+        let config = MemoryEmbeddingConfig {
+            provider: "api".into(),
+            protocol: "cohere_v2".into(),
+            model: Some("embed-v4.0".into()),
+            input_type: Some("search_document".into()),
+            ..Default::default()
+        };
+        let runtime = runtime_config_from_config(&config, "https://embed.example/v2")
+            .expect("configured embedding should resolve");
+        assert_eq!(
+            runtime.request.defaults.get("input_type"),
+            Some(&serde_json::Value::String("search_document".into()))
+        );
+    }
+
+    /// from_session_params stores the session_id it was given.
+    ///
+    /// Direct assertion via the `#[cfg(test)]` accessor proves the factory
+    /// actually stored the value rather than discarding it.  The counter
+    /// increment check additionally confirms the backend is functional.
     #[tokio::test]
     async fn test_factory_backend_increments_search_counter() {
         let tmp = TempDir::new().unwrap();

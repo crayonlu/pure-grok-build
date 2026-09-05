@@ -24,6 +24,7 @@ xai-grok-shell = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-grok-overlay = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }
 

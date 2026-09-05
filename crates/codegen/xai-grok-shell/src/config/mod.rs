@@ -4,8 +4,8 @@ use crate::bundle;
 use serde::Deserialize;
 pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryConfig, MemoryDreamConfig, MemoryDreamSettings,
-    MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryFlushConfig, MemoryFlushSettings,
-    MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
+    MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryEnvKeys, MemoryFlushConfig,
+    MemoryFlushSettings, MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
     MemoryInitialInjectionConfig, MemoryInitialInjectionSettings, MemorySearchConfig,
     MemorySearchSettings, MemorySessionConfig, MemorySessionSettings, MemorySettings,
     MemoryWatcherConfig, MemoryWatcherSettings, MmrConfig, MmrSettings, PruningConfig,

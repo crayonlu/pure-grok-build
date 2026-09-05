@@ -98,6 +98,7 @@ temperature = 0.7                         # Sampling temperature
 top_p = 0.95                              # Nucleus sampling parameter
 max_completion_tokens = 8192              # Maximum tokens per response
 context_window = 128000                   # Total context window in tokens
+supports_vision = true                    # Set false for text-only models
 extra_headers = { "x-api-key" = "sk-..." } # Extra request headers, sent verbatim (optional)
 query_params = { api-version = "2026-07-22" } # Query params appended to every request URL (optional)
 env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }    # Headers from env vars, resolved at client build (optional)
@@ -115,6 +116,30 @@ Grok resolves the API key in this order:
 ### Context Window
 
 The `context_window` value tells Grok when to trigger auto-compaction. When you override a known model, Grok inherits that model's context window. When you define a new model and omit `context_window`, Grok defaults to 200,000 tokens, so set it explicitly to match your provider.
+
+### Vision Capability
+
+Model entries accept `supports_vision`, which defaults to `true` for backward
+compatibility. Set it to `false` for a text-only endpoint. Grok then keeps
+attachments on disk and sends a text-only note instead of embedding image
+pixels in user messages, `read_file` results, or rendered PDF pages.
+
+### Parallel Tool Calls
+
+Model entries accept `supports_parallel_tool_calls`, which defaults to `true`.
+When a model returns several tool calls in one turn, Grok normally runs them
+concurrently. Some models or providers work better with strict one-at-a-time
+execution (for example, tools that share state, or endpoints that reject
+overlapping requests). Set this to `false` and Grok will run that model's tool
+calls sequentially, in the order the model emitted them:
+
+```toml
+[model.my-model]
+supports_parallel_tool_calls = false
+```
+
+The flag is per-model, so you can leave parallel dispatch on for models that
+benefit from it while opting out only where needed.
 
 ### Global Default Headers
 

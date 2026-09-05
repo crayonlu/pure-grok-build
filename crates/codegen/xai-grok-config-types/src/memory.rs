@@ -2,6 +2,7 @@
 //!
 //! These are the raw optional settings and resolved leaf value types for `[memory.*]` and the memory-owned `[compaction.*]` tables.
 
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Raw `[memory]` settings. Absence is preserved for per-field fallback.
@@ -121,6 +122,44 @@ pub struct PruningSettings {
     pub hard_clear_age_turns: Option<usize>,
 }
 
+use crate::{ProviderAuthConfig, RequestMapping, ResponseMapping};
+
+/// One or more environment variable names used for an embedding API key.
+///
+/// This mirrors the model-level `env_key` shape while keeping the leaf config
+/// crate independent from the shell's model resolver.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum MemoryEnvKeys {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl MemoryEnvKeys {
+    /// Configured names in priority order.
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Self::One(name) => vec![name.as_str()],
+            Self::Many(names) => names.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Resolve the first set, non-blank environment variable.
+    pub fn resolve_value(&self) -> Option<String> {
+        self.resolve_value_with(|name| std::env::var(name).ok())
+    }
+
+    /// Testable form of [`Self::resolve_value`].
+    pub fn resolve_value_with(
+        &self,
+        mut getenv: impl FnMut(&str) -> Option<String>,
+    ) -> Option<String> {
+        self.names()
+            .into_iter()
+            .find_map(|name| getenv(name).filter(|value| !value.trim().is_empty()))
+    }
+}
+
 /// Index and chunking configuration (`[memory.index]`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -141,22 +180,90 @@ impl Default for MemoryIndexConfig {
 }
 
 /// Embedding provider configuration (`[memory.embedding]`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryEmbeddingConfig {
     /// Provider type: `"api"`, `"local"`, or `"auto"`.
     pub provider: String,
+    /// Wire protocol profile. `openai_compatible` is the backwards-compatible
+    /// default; `voyage` and `cohere_v1`/`cohere_v2` are built-in profiles.
+    pub protocol: String,
+    /// Optional OpenAI-compatible embedding API base URL. When omitted, the
+    /// active model's base URL is used for backwards compatibility.
+    pub base_url: Option<String>,
     /// Model name for the embedding API. `None` disables vector embeddings.
     pub model: Option<String>,
+    /// Static embedding API key. Takes precedence over `env_key`.
+    pub api_key: Option<String>,
+    /// Environment variable name(s) containing the embedding API key.
+    pub env_key: Option<MemoryEnvKeys>,
+    /// Authentication scheme for a static embedding API key. Supported values
+    /// are `"bearer"` and `"x_api_key"`; omitted defaults to Bearer (or the
+    /// active model's scheme when the endpoint is inherited).
+    pub auth_scheme: Option<String>,
+    /// Full authentication placement. `auth_scheme` remains as a legacy
+    /// shorthand for header-based Bearer/X-API-Key auth.
+    pub auth: ProviderAuthConfig,
+    /// Optional provider-specific request field mapping.
+    pub request: RequestMapping,
+    /// Optional provider-specific response extraction mapping.
+    pub response: ResponseMapping,
+    /// Static query parameters for providers that require them.
+    pub query_params: IndexMap<String, String>,
+    /// Header name -> environment variable name.
+    pub env_headers: IndexMap<String, String>,
+    /// Endpoint path; defaults to the protocol's standard path (`/embeddings`
+    /// for OpenAI/Voyage-compatible APIs, `/v2/embed` for Cohere v2).
+    pub path: Option<String>,
+    /// Optional provider-specific embedding input type (e.g. Cohere/Voyage).
+    pub input_type: Option<String>,
+    /// Additional headers sent to the embedding endpoint.
+    pub extra_headers: IndexMap<String, String>,
     /// Embedding vector dimensions.
     pub dimensions: usize,
+}
+
+impl std::fmt::Debug for MemoryEmbeddingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryEmbeddingConfig")
+            .field("provider", &self.provider)
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("env_key", &self.env_key)
+            .field("auth_scheme", &self.auth_scheme)
+            .field("auth", &self.auth)
+            .field("request", &self.request)
+            .field("response", &self.response)
+            .field("query_params", &self.query_params)
+            .field("env_headers", &self.env_headers)
+            .field("path", &self.path)
+            .field("input_type", &self.input_type)
+            .field("extra_headers", &self.extra_headers)
+            .field("dimensions", &self.dimensions)
+            .finish()
+    }
 }
 
 impl Default for MemoryEmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: "api".to_string(),
+            protocol: "openai_compatible".to_string(),
+            base_url: None,
             model: None,
+            api_key: None,
+            env_key: None,
+            auth_scheme: None,
+            auth: ProviderAuthConfig::default(),
+            request: RequestMapping::default(),
+            response: ResponseMapping::default(),
+            query_params: IndexMap::new(),
+            env_headers: IndexMap::new(),
+            path: None,
+            input_type: None,
+            extra_headers: IndexMap::new(),
             dimensions: 1024,
         }
     }
@@ -625,6 +732,7 @@ impl MemoryConfig {
                             .map(|value| value as usize)
                     })
                     .unwrap_or(defaults.embedding.dimensions),
+                ..Default::default()
             },
             search: MemorySearchConfig {
                 max_results: search
@@ -811,6 +919,55 @@ impl MemoryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub_config_defaults_match() {
+        assert_eq!(MemoryIndexConfig::default().max_chunk_chars, 1600);
+        assert_eq!(MemoryEmbeddingConfig::default().dimensions, 1024);
+        let s = MemorySearchConfig::default();
+        assert_eq!(s.max_results, 6);
+        assert_eq!(s.recency_decay, DEFAULT_RECENCY_DECAY);
+        assert!(s.temporal_decay.enabled);
+        assert!(!s.mmr.enabled);
+        assert!(MemorySessionConfig::default().save_on_end);
+        assert_eq!(MemoryGcConfig::default().max_age_days, 30);
+        assert_eq!(PruningConfig::default().keep_last_n_turns, 3);
+    }
+
+    #[test]
+    fn embedding_config_parses_independent_endpoint_and_credentials() {
+        let config: MemoryEmbeddingConfig = toml::from_str(
+            r#"
+            provider = "api"
+            protocol = "openai_compatible"
+            base_url = "https://embed.example/v1"
+            model = "qwen/qwen3-embedding-8b"
+            env_key = ["EMBEDDING_API_KEY", "OPENAI_API_KEY"]
+            auth_scheme = "x_api_key"
+            dimensions = 1024
+            [extra_headers]
+            X-Tenant = "team-a"
+            [auth]
+            location = "header"
+            name = "X-API-Key"
+            prefix = ""
+            "#,
+        )
+        .expect("embedding config should parse");
+
+        assert_eq!(config.base_url.as_deref(), Some("https://embed.example/v1"));
+        assert_eq!(config.model.as_deref(), Some("qwen/qwen3-embedding-8b"));
+        assert_eq!(config.dimensions, 1024);
+        assert_eq!(
+            config.env_key.as_ref().map(MemoryEnvKeys::names),
+            Some(vec!["EMBEDDING_API_KEY", "OPENAI_API_KEY"])
+        );
+        assert_eq!(config.auth.name, "X-API-Key");
+        assert_eq!(
+            config.extra_headers.get("X-Tenant"),
+            Some(&"team-a".to_owned())
+        );
+    }
 
     #[test]
     fn mmr_lambda_is_clamped_on_deserialize() {

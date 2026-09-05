@@ -26,6 +26,142 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
+// ---------------------------------------------------------------------------
+// Provider-agnostic image generation configuration
+// ---------------------------------------------------------------------------
+
+/// How the size/aspect-ratio is represented in the request body.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeFormat {
+    /// Pixel dimensions, e.g. `"1024x1024"`. Requires `size_map` to
+    /// translate Grok aspect ratios into provider-specific pixel strings.
+    #[default]
+    Dimensions,
+    /// Aspect ratio string, e.g. `"1:1"`. Passed through as-is.
+    Ratio,
+}
+
+/// How the HTTP response carries the generated image.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMode {
+    /// Image bytes are base64-encoded inline in the JSON response.
+    #[default]
+    Base64,
+    /// The response contains a URL that must be downloaded to get the bytes.
+    Url,
+}
+
+/// How the `image` parameter is formatted in edit requests.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditImageFormat {
+    /// Plain data-URL string: `"data:image/png;base64,..."`.
+    #[default]
+    String,
+    /// Wrapped in an object: `{"url": "data:image/png;base64,..."}`.
+    ObjectUrl,
+}
+
+/// Provider-agnostic image generation API configuration. A partial
+/// `[image_gen]` section keeps the native xAI-compatible wire behavior;
+/// populate the format fields when adapting a different image API.
+///
+/// Credentials (`env_key` / `api_key`) are resolved by the shell; the
+/// tools crate only uses the format fields.
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ImageGenProviderConfig {
+    /// Environment variable name(s) holding the API key (shell resolves).
+    pub env_key: Option<String>,
+    /// Literal API key (prefer `env_key` for secrets).
+    pub api_key: Option<String>,
+    /// Base URL for an explicitly configured image-generation endpoint.
+    pub base_url: String,
+    /// Path appended to `base_url` for text-to-image.
+    pub gen_path: String,
+    /// Path appended to `base_url` for image edit.
+    pub edit_path: String,
+    /// Request-body field name for the size/aspect-ratio value.
+    pub size_field: String,
+    /// How to represent the size.
+    pub size_format: SizeFormat,
+    /// Extra static key-value pairs merged into every request body.
+    pub extra_fields: indexmap::IndexMap<String, serde_json::Value>,
+    /// How the response carries image data.
+    pub response_mode: ResponseMode,
+    /// Top-level JSON field containing the image data array.
+    pub response_field: String,
+    /// Subfield within each array element. Empty string means the array
+    /// elements are plain strings (URL or base64).
+    pub response_subfield: String,
+    /// How the `image` parameter is formatted in edit requests.
+    pub edit_image_format: EditImageFormat,
+    /// Mapping from Grok aspect-ratio strings to provider size strings.
+    /// Only consulted when `size_format` is `Dimensions`.
+    pub size_map: indexmap::IndexMap<String, String>,
+}
+
+impl std::fmt::Debug for ImageGenProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageGenProviderConfig")
+            .field("env_key", &self.env_key)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("base_url", &self.base_url)
+            .field("gen_path", &self.gen_path)
+            .field("edit_path", &self.edit_path)
+            .field("size_field", &self.size_field)
+            .field("size_format", &self.size_format)
+            .field("extra_fields", &self.extra_fields)
+            .field("response_mode", &self.response_mode)
+            .field("response_field", &self.response_field)
+            .field("response_subfield", &self.response_subfield)
+            .field("edit_image_format", &self.edit_image_format)
+            .field("size_map", &self.size_map)
+            .finish()
+    }
+}
+
+impl ImageGenProviderConfig {
+    /// Whether the caller supplied a custom wire shape. A base URL and key
+    /// alone are intentionally treated as the native Imagine-compatible
+    /// contract so older local configurations keep working.
+    pub fn has_custom_wire_format(&self) -> bool {
+        !self.gen_path.is_empty()
+            || !self.edit_path.is_empty()
+            || !self.size_field.is_empty()
+            || !self.extra_fields.is_empty()
+            || !matches!(self.response_mode, ResponseMode::Base64)
+            || !self.response_field.is_empty()
+            || !self.response_subfield.is_empty()
+            || !matches!(self.edit_image_format, EditImageFormat::String)
+            || !self.size_map.is_empty()
+    }
+
+    /// Build the full URL for a text-to-image request.
+    pub fn gen_url(&self) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), self.gen_path)
+    }
+
+    /// Build the full URL for an image-edit request.
+    pub fn edit_url(&self) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), self.edit_path)
+    }
+
+    /// Map a Grok aspect-ratio string to the provider's size value.
+    pub fn resolve_size<'a>(&'a self, aspect_ratio: &'a str) -> &'a str {
+        match self.size_format {
+            SizeFormat::Ratio => aspect_ratio,
+            SizeFormat::Dimensions => self
+                .size_map
+                .get(aspect_ratio)
+                .map(|s| s.as_str())
+                .unwrap_or("auto"),
+        }
+    }
+}
+
 /// Default Imagine model for `image_gen`. Used unless an explicit
 /// `model_override` is supplied via `ImageGenConfig::Enabled`.
 const XAI_IMAGINE_MODEL: &str = "grok-imagine-image-quality";
@@ -74,6 +210,13 @@ pub struct ImageGenClient {
     /// transport stays session-independent and cacheable.
     session_header: Option<HeaderValue>,
     defaults_have_session_header: bool,
+    /// Provider-agnostic API format config. When `Some`, the client uses
+    /// the provider's endpoint paths, request body format, and response
+    /// parsing instead of the default x.ai Imagine behavior.
+    provider: Option<ImageGenProviderConfig>,
+    /// Fully generic capability profile. This owns the endpoint, transport,
+    /// request mapping, authentication, and response extraction.
+    capability_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
 }
 
 impl ImageGenClient {
@@ -88,6 +231,8 @@ impl ImageGenClient {
             model_override,
             edit_model_override,
             tier_restricted,
+            provider,
+            capability_profile,
             ..
         } = config
         else {
@@ -95,9 +240,19 @@ impl ImageGenClient {
                 "Cannot create ImageGenClient from disabled config",
             ));
         };
+        let provider = provider
+            .as_ref()
+            .filter(|provider| provider.has_custom_wire_format())
+            .cloned();
         let model = model_override
             .clone()
             .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                capability_profile
+                    .as_ref()
+                    .and_then(|profile| profile.model.clone())
+                    .filter(|m| !m.trim().is_empty())
+            })
             .unwrap_or_else(|| XAI_IMAGINE_MODEL.to_owned());
         let edit_model = edit_model_override
             .clone()
@@ -108,14 +263,16 @@ impl ImageGenClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         // Always bake the static api_key as the default Authorization header.
         // The dynamic provider overrides per-request; this is the fallback.
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Invalid API key for header: {e}"
-                ))
-            })?,
-        );
+        if capability_profile.is_none() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Invalid API key for header: {e}"
+                    ))
+                })?,
+            );
+        }
 
         extra_headers.into_iter().try_for_each(|(key, value)| {
             let header_name =
@@ -162,6 +319,8 @@ impl ImageGenClient {
             tier_restricted: *tier_restricted,
             session_header: None,
             defaults_have_session_header,
+            provider,
+            capability_profile: capability_profile.clone(),
         })
     }
 
@@ -195,6 +354,14 @@ impl ImageGenClient {
     }
 
     pub(crate) async fn current_bearer(&self) -> Option<String> {
+        // A legacy `[image_gen]` provider owns its own resolved key. Do not
+        // let the session's primary-model key provider overwrite it; that
+        // would break independent BYOK and could send the wrong credential
+        // to the image endpoint. Capability profiles already carry auth in
+        // their provider mapping and never call this helper.
+        if self.provider.is_some() {
+            return None;
+        }
         crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
     }
 
@@ -202,6 +369,7 @@ impl ImageGenClient {
         crate::attribution::emit_401(self.attribution_callback.as_ref(), consumer, sent_bearer);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -232,21 +400,166 @@ impl ImageGenClient {
         &self.edit_model
     }
 
+    /// Provider-agnostic API format config, if any.
+    pub(crate) fn provider(&self) -> Option<&ImageGenProviderConfig> {
+        self.provider.as_ref()
+    }
+
+    pub(crate) fn capability_profile(
+        &self,
+    ) -> Option<&xai_grok_provider::CapabilityProviderConfig> {
+        self.capability_profile.as_ref()
+    }
+
+    /// Build the full URL for a text-to-image request.
+    pub(crate) fn gen_url(&self) -> String {
+        match &self.provider {
+            Some(p) => p.gen_url(),
+            None => format!("{}/images/generations", self.base_url.trim_end_matches('/')),
+        }
+    }
+
+    /// Build the full URL for an image-edit request.
+    pub(crate) fn edit_url(&self) -> String {
+        match &self.provider {
+            Some(p) => p.edit_url(),
+            None => format!("{}/images/edits", self.base_url.trim_end_matches('/')),
+        }
+    }
+
+    /// Build the request body for a text-to-image call.
+    pub(crate) fn build_gen_payload(&self, prompt: &str, aspect_ratio: &str) -> serde_json::Value {
+        match &self.provider {
+            Some(p) => {
+                let mut payload = serde_json::json!({ "prompt": prompt });
+                let size_value = p.resolve_size(aspect_ratio);
+                payload[p.size_field.clone()] = serde_json::Value::String(size_value.to_string());
+                for (k, v) in &p.extra_fields {
+                    payload[k.clone()] = v.clone();
+                }
+                payload
+            }
+            None => serde_json::json!({
+                "model": self.model,
+                "prompt": prompt,
+                "n": 1,
+                "aspect_ratio": aspect_ratio,
+                "resolution": "1k",
+                "response_format": "b64_json",
+            }),
+        }
+    }
+
+    /// Extract image bytes from an HTTP response body. Handles both
+    /// base64-inline and URL-download modes depending on the provider config.
+    pub(crate) async fn extract_image_bytes(
+        &self,
+        body: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        match &self.provider {
+            Some(p) => {
+                let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+                    let preview: String = body.chars().take(500).collect();
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Failed to parse image generation response: {e} — body preview: {preview}"
+                    ))
+                })?;
+                let arr = json
+                    .get(&p.response_field)
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| {
+                        xai_tool_runtime::ToolError::invalid_arguments(format!(
+                            "Image response missing '{}' array field",
+                            p.response_field
+                        ))
+                    })?;
+                let first = arr.first().ok_or_else(|| {
+                    xai_tool_runtime::ToolError::invalid_arguments(
+                        "Image generation returned no image data.".to_string(),
+                    )
+                })?;
+                let data_str = if p.response_subfield.is_empty() {
+                    first.as_str().ok_or_else(|| {
+                        xai_tool_runtime::ToolError::invalid_arguments(
+                            "Image response array element is not a string".to_string(),
+                        )
+                    })?
+                } else {
+                    first
+                        .get(&p.response_subfield)
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Image response missing '{}' subfield",
+                                p.response_subfield
+                            ))
+                        })?
+                };
+                match p.response_mode {
+                    ResponseMode::Base64 => base64::engine::general_purpose::STANDARD
+                        .decode(data_str)
+                        .map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to decode base64 image data: {e}"
+                            ))
+                        }),
+                    ResponseMode::Url => {
+                        let download_client = reqwest::Client::new();
+                        let resp = download_client.get(data_str).send().await.map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to download image from URL: {e}"
+                            ))
+                        })?;
+                        if !resp.status().is_success() {
+                            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Image download failed with HTTP {}",
+                                resp.status()
+                            )));
+                        }
+                        let bytes = resp.bytes().await.map_err(|e| {
+                            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                                "Failed to read image download body: {e}"
+                            ))
+                        })?;
+                        Ok(bytes.to_vec())
+                    }
+                }
+            }
+            None => {
+                let resp_json: ImageGenResponse = serde_json::from_str(body).map_err(|e| {
+                    let preview: String = body.chars().take(500).collect();
+                    tracing::warn!("Imagine API returned unparseable body: {preview}");
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Failed to parse image generation response: {e} — body preview: {preview}"
+                    ))
+                })?;
+                let b64_data = resp_json.b64_data().unwrap_or("");
+                if b64_data.is_empty() {
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "Image generation returned no image data.".to_string(),
+                    ));
+                }
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64_data)
+                    .map_err(|e| {
+                        xai_tool_runtime::ToolError::invalid_arguments(format!(
+                            "Failed to decode base64 image data: {e}"
+                        ))
+                    })
+            }
+        }
+    }
+
     pub async fn generate(
         &self,
         prompt: &str,
         aspect_ratio: &str,
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
-        let url = format!("{}/images/generations", self.base_url.trim_end_matches('/'));
-
-        let payload = serde_json::json!({
-            "model": self.model,
-            "prompt": prompt,
-            "n": 1,
-            "aspect_ratio": aspect_ratio,
-            "resolution": "1k",
-            "response_format": "b64_json",
-        });
+        if self.capability_profile.is_some() {
+            return self.generate_profiled(prompt, aspect_ratio).await;
+        }
+        let url = self.gen_url();
+        let payload = self.build_gen_payload(prompt, aspect_ratio);
 
         // Capture the bearer once so the request and the 401-attribution
         // emit see the same value (even if the provider rotates between
@@ -281,30 +594,349 @@ impl ImageGenClient {
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine API returned unparseable body: {preview}");
+        self.extract_image_bytes(&body).await
+    }
+
+    async fn generate_profiled(
+        &self,
+        prompt: &str,
+        aspect_ratio: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        let profile = self.capability_profile.as_ref().expect("checked above");
+        let operation = profile
+            .operation("generate")
+            .or_else(|| profile.operation("default"))
+            .ok_or_else(|| {
+                xai_tool_runtime::ToolError::invalid_arguments(
+                    "image capability profile has no generate/default operation",
+                )
+            })?;
+        let input = xai_grok_provider::ProviderRequestInput::new()
+            .value("model", self.model.clone())
+            .value("prompt", prompt.to_owned())
+            .value("aspect_ratio", aspect_ratio.to_owned())
+            .value("size", aspect_ratio.to_owned())
+            .value("n", 1_i64)
+            .value("response_format", "b64_json");
+        let built = xai_grok_provider::ProviderHttpRuntime::new(self.http.clone())
+            .build(profile, "generate", &input, |name| std::env::var(name).ok())
+            .or_else(|_| {
+                xai_grok_provider::ProviderHttpRuntime::new(self.http.clone()).build(
+                    profile,
+                    "default",
+                    &input,
+                    |name| std::env::var(name).ok(),
+                )
+            })
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))?;
+        let response = self.http.execute(built.request).await.map_err(|error| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image generation response: {e} — body preview: {preview}"
+                "Image provider request failed: {error}"
             ))
         })?;
-
-        let b64_data = resp_json.b64_data().unwrap_or("");
-
-        if b64_data.is_empty() {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(
-                "Image generation returned no image data.",
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            self.record_401_attribution(ToolConsumer::ImageGen, profile.api_key.as_deref());
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(xai_tool_runtime::ToolError::new(
+                xai_tool_runtime::ToolErrorKind::Custom,
+                format!(
+                    "Image provider failed with HTTP {}: {}",
+                    status,
+                    body.chars().take(200).collect::<String>()
+                ),
             ));
         }
-
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let bytes = response.bytes().await.map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to read image provider response: {error}"
+            ))
+        })?;
+        if !content_type.contains("json") {
+            return Ok(bytes.to_vec());
+        }
+        let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Invalid image provider JSON response: {error}"
+            ))
+        })?;
+        let mapping = &operation.response;
+        if let Some(pointer) = mapping.bytes.as_deref()
+            && let Some(value) =
+                xai_grok_provider::json_pointer(&body, pointer).and_then(|value| value.as_str())
+        {
+            return base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .map_err(|error| {
+                    xai_tool_runtime::ToolError::invalid_arguments(format!(
+                        "Invalid base64 image response: {error}"
+                    ))
+                });
+        }
+        if let Some(pointer) = mapping.url.as_deref()
+            && let Some(url) =
+                xai_grok_provider::json_pointer(&body, pointer).and_then(|value| value.as_str())
+        {
+            return download_profiled_image(url).await;
+        }
+        let value = mapping
+            .value
+            .as_deref()
+            .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            .or_else(|| {
+                mapping
+                    .items
+                    .as_deref()
+                    .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            })
+            .or_else(|| body.get("data"));
+        let value = value
+            .and_then(|value| {
+                value
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .or(Some(value))
+            })
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("b64_json").and_then(|v| v.as_str()))
+            });
+        let encoded = value.ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "Image provider response did not contain base64 data",
+            )
+        })?;
         base64::engine::general_purpose::STANDARD
-            .decode(b64_data)
-            .map_err(|e| {
+            .decode(encoded)
+            .map_err(|error| {
                 xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to decode base64 image data: {e}"
+                    "Invalid base64 image response: {error}"
                 ))
             })
     }
+
+    pub(crate) async fn edit_profiled(
+        &self,
+        prompt: &str,
+        images: Vec<String>,
+        aspect_ratio: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        let profile = self.capability_profile.as_ref().ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "image capability profile is not configured",
+            )
+        })?;
+        let operation_name = if profile.operation("edit").is_some() {
+            "edit"
+        } else {
+            "default"
+        };
+        let first_image = images.first().cloned().unwrap_or_default();
+        let mut input = xai_grok_provider::ProviderRequestInput::new()
+            .value("model", self.edit_model.clone())
+            .value("prompt", prompt.to_owned())
+            .value("image", first_image)
+            .value(
+                "images",
+                serde_json::Value::Array(images.into_iter().map(serde_json::Value::from).collect()),
+            )
+            .value("aspect_ratio", aspect_ratio.to_owned())
+            .value("size", aspect_ratio.to_owned());
+        let operation = profile.operation(operation_name).ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "image capability profile has no edit/default operation",
+            )
+        })?;
+        // Providers such as OpenAI expose `/images/edits` as multipart and
+        // require an actual file part rather than a data URL string. The tool
+        // has already normalized attachments to base64 data URLs, so decode
+        // the first image when the profile declares a binary file mapping.
+        if operation.request.files.contains_key("image") {
+            if let Some(part) = decode_image_data_url(
+                input
+                    .values
+                    .get("image")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )? {
+                input = input.binary("image", part);
+            }
+        }
+        let built = xai_grok_provider::ProviderHttpRuntime::new(self.http.clone())
+            .build(profile, operation_name, &input, |name| {
+                std::env::var(name).ok()
+            })
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))?;
+        let response = self.http.execute(built.request).await.map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Image edit provider request failed: {error}"
+            ))
+        })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(xai_tool_runtime::ToolError::new(
+                xai_tool_runtime::ToolErrorKind::Custom,
+                format!(
+                    "Image edit provider failed with HTTP {status}: {}",
+                    body.chars().take(200).collect::<String>()
+                ),
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let bytes = response.bytes().await.map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to read image edit response: {error}"
+            ))
+        })?;
+        if !content_type.contains("json") {
+            return Ok(bytes.to_vec());
+        }
+        let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Invalid image edit JSON response: {error}"
+            ))
+        })?;
+        if let Some(pointer) = operation.response.url.as_deref()
+            && let Some(url) =
+                xai_grok_provider::json_pointer(&body, pointer).and_then(|value| value.as_str())
+        {
+            return download_profiled_image(url).await;
+        }
+        let value = operation
+            .response
+            .bytes
+            .as_deref()
+            .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            .or_else(|| {
+                operation
+                    .response
+                    .value
+                    .as_deref()
+                    .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            })
+            .or_else(|| {
+                operation
+                    .response
+                    .items
+                    .as_deref()
+                    .and_then(|pointer| xai_grok_provider::json_pointer(&body, pointer))
+            })
+            .or_else(|| body.get("data"));
+        let value = value
+            .and_then(|value| {
+                value
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .or(Some(value))
+            })
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("b64_json").and_then(|v| v.as_str()))
+            });
+        let encoded = value.ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "Image edit response did not contain image data",
+            )
+        })?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|error| {
+                xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "Invalid base64 image edit response: {error}"
+                ))
+            })
+    }
+}
+
+/// Download a provider-returned image URL without forwarding the capability
+/// provider's credential. Image URLs are commonly presigned object URLs and
+/// must be treated as a separate origin from the API endpoint.
+async fn download_profiled_image(raw_url: &str) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+    let url = reqwest::Url::parse(raw_url).map_err(|error| {
+        xai_tool_runtime::ToolError::invalid_arguments(format!(
+            "Invalid image provider URL: {error}"
+        ))
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "Image provider URL must use http(s) without embedded credentials",
+        ));
+    }
+    let response = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to download image provider URL: {error}"
+            ))
+        })?;
+    if !response.status().is_success() {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
+            "Image provider download failed with HTTP {}",
+            response.status()
+        )));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "Failed to read image provider download: {error}"
+            ))
+        })
+}
+
+fn decode_image_data_url(
+    value: &str,
+) -> Result<Option<xai_grok_provider::BinaryPart>, xai_tool_runtime::ToolError> {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let Some((meta, encoded)) = rest.split_once(',') else {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "malformed image data URL",
+        ));
+    };
+    if !meta.ends_with(";base64") {
+        return Err(xai_tool_runtime::ToolError::invalid_arguments(
+            "image data URL must use base64 encoding",
+        ));
+    }
+    let mime = meta.trim_end_matches(";base64");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| {
+            xai_tool_runtime::ToolError::invalid_arguments(format!(
+                "invalid base64 image data URL: {error}"
+            ))
+        })?;
+    let extension = mime.rsplit('/').next().unwrap_or("bin");
+    Ok(Some(xai_grok_provider::BinaryPart {
+        bytes: bytes::Bytes::from(bytes),
+        filename: Some(format!("image.{extension}")),
+        content_type: Some(mime.to_owned()),
+    }))
 }
 
 /// `Enabled` means credentials are present; each tool has its own gate.
@@ -331,6 +963,11 @@ pub enum ImageGenConfig {
         /// host from the subscription tier; always `false` for team /
         /// API-key / workspace callers.
         tier_restricted: bool,
+        /// Provider-agnostic API format config. When `Some`, overrides the
+        /// default x.ai Imagine behavior with a configurable endpoint,
+        /// request body, and response format.
+        provider: Option<ImageGenProviderConfig>,
+        capability_profile: Option<xai_grok_provider::CapabilityProviderConfig>,
     },
 }
 
@@ -508,6 +1145,19 @@ impl xai_tool_runtime::Tool for ImageGenTool {
 mod tests {
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
+    use wiremock::matchers::{any, body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn image_provider_debug_redacts_static_key() {
+        let provider = ImageGenProviderConfig {
+            api_key: Some("do-not-log".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{provider:?}");
+        assert!(!rendered.contains("do-not-log"));
+        assert!(rendered.contains("[redacted]"));
+    }
 
     #[test]
     fn tool_name_and_description() {
@@ -522,6 +1172,21 @@ mod tests {
     }
 
     #[test]
+    fn multipart_edit_data_url_decodes_to_binary_part() {
+        let part = decode_image_data_url("data:image/png;base64,aGVsbG8=")
+            .unwrap()
+            .expect("data URL should produce a file part");
+        assert_eq!(part.bytes.as_ref(), b"hello");
+        assert_eq!(part.filename.as_deref(), Some("image.png"));
+        assert_eq!(part.content_type.as_deref(), Some("image/png"));
+        assert!(
+            decode_image_data_url("https://example.test/image.png")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn per_tool_gates_are_independent() {
         let cfg = ImageGenConfig::Enabled {
             api_key: "k".into(),
@@ -532,6 +1197,8 @@ mod tests {
             model_override: Some("grok-imagine-image".into()),
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         assert!(cfg.has_credentials());
         assert!(!cfg.image_gen_enabled());
@@ -554,6 +1221,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let client = ImageGenClient::new(&cfg, None)
             .unwrap()
@@ -569,6 +1238,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let client = ImageGenClient::new(&cfg_plain, None)
             .unwrap()
@@ -592,6 +1263,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let client = ImageGenClient::new(&cfg, None)
             .unwrap()
@@ -629,6 +1302,8 @@ mod tests {
             model_override: model_override.map(String::from),
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         // No override → default quality model.
         assert_eq!(
@@ -660,6 +1335,8 @@ mod tests {
             model_override: None,
             edit_model_override: edit_model_override.map(String::from),
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         assert_eq!(
             ImageGenClient::new(&mk(None), None).unwrap().edit_model(),
@@ -713,6 +1390,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: true,
+            provider: None,
+            capability_profile: None,
         };
         let mut resources = crate::types::resources::Resources::new();
         resources.insert(ImageGenClient::new(&cfg, None).unwrap());
@@ -735,5 +1414,346 @@ mod tests {
             }
             other => panic!("expected Text upsell, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn profiled_image_provider_uses_mapping_and_x_api_key() {
+        let server = MockServer::start().await;
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "openai_images".into(),
+            base_url: Some(server.uri()),
+            model: Some("image-model".into()),
+            api_key: Some("image-secret".into()),
+            auth: xai_grok_provider::ProviderAuthConfig {
+                name: "x-api-key".into(),
+                prefix: String::new(),
+                ..Default::default()
+            },
+            operations: [(
+                "generate".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "POST".into(),
+                    path: "/images/generations".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        fields: [
+                            ("model".into(), "model".into()),
+                            ("prompt".into(), "prompt".into()),
+                            ("size".into(), "size".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        items: Some("/data".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("x-api-key", "image-secret"))
+            .and(body_json(serde_json::json!({
+                "model": "image-model",
+                "prompt": "a cat",
+                "size": "1:1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "aGVsbG8="}]
+            })))
+            .mount(&server)
+            .await;
+        let config = ImageGenConfig::Enabled {
+            api_key: String::new(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: false,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+            provider: None,
+            capability_profile: Some(profile),
+        };
+        let client = ImageGenClient::new(&config, None).unwrap();
+        assert_eq!(client.generate("a cat", "1:1").await.unwrap(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn partial_legacy_provider_keeps_native_imagine_wire_shape() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("authorization", "Bearer image-provider-key"))
+            .and(body_json(serde_json::json!({
+                "model": "grok-imagine-image-quality",
+                "prompt": "a cat",
+                "n": 1,
+                "aspect_ratio": "1:1",
+                "resolution": "1k",
+                "response_format": "b64_json",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "aGVsbG8="}]
+            })))
+            .mount(&server)
+            .await;
+        let config = ImageGenConfig::Enabled {
+            api_key: "image-provider-key".into(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: false,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+            provider: Some(ImageGenProviderConfig {
+                api_key: Some("image-provider-key".into()),
+                base_url: server.uri(),
+                ..Default::default()
+            }),
+            capability_profile: None,
+        };
+        let client = ImageGenClient::new(&config, None).unwrap();
+        assert_eq!(client.generate("a cat", "1:1").await.unwrap(), b"hello");
+    }
+
+    struct PrimaryKeyProvider;
+
+    impl crate::types::ApiKeyProvider for PrimaryKeyProvider {
+        fn current_api_key(&self) -> Option<String> {
+            Some("primary-model-key".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_image_gen_provider_preserves_its_dedicated_key_and_wire_shape() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v3/gpt-image-2-text-to-image"))
+            .and(header("authorization", "Bearer image-provider-key"))
+            .and(body_json(serde_json::json!({
+                "prompt": "a cat",
+                "size": "1024x1024",
+                "output_format": "png"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "images": [format!("{}/downloads/image", server.uri())]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/downloads/image"))
+            .and(any())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(b"ppio-image".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = ImageGenProviderConfig {
+            api_key: Some("image-provider-key".into()),
+            base_url: server.uri(),
+            gen_path: "/v3/gpt-image-2-text-to-image".into(),
+            edit_path: "/v3/gpt-image-2-edit".into(),
+            size_field: "size".into(),
+            size_format: SizeFormat::Dimensions,
+            response_mode: ResponseMode::Url,
+            response_field: "images".into(),
+            size_map: [("1:1".into(), "1024x1024".into())].into_iter().collect(),
+            extra_fields: [("output_format".into(), serde_json::json!("png"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let config = ImageGenConfig::Enabled {
+            api_key: "image-provider-key".into(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: false,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+            provider: Some(provider),
+            capability_profile: None,
+        };
+        let client =
+            ImageGenClient::new(&config, Some(std::sync::Arc::new(PrimaryKeyProvider))).unwrap();
+        assert_eq!(
+            client.generate("a cat", "1:1").await.unwrap(),
+            b"ppio-image"
+        );
+    }
+
+    #[tokio::test]
+    async fn profiled_image_edit_sends_openai_style_multipart_file() {
+        use wiremock::matchers::body_string_contains;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/edits"))
+            .and(header("Authorization", "Bearer image-secret"))
+            .and(body_string_contains("name=\"model\""))
+            .and(body_string_contains("image-model"))
+            .and(body_string_contains("name=\"prompt\""))
+            .and(body_string_contains("replace the sky"))
+            .and(body_string_contains(
+                "name=\"image\"; filename=\"image.png\"",
+            ))
+            .and(body_string_contains("hello"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"b64_json": "aGVsbG8="}]
+            })))
+            .mount(&server)
+            .await;
+
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "openai_images".into(),
+            base_url: Some(server.uri()),
+            model: Some("image-model".into()),
+            api_key: Some("image-secret".into()),
+            operations: [(
+                "edit".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "POST".into(),
+                    path: "/images/edits".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        body: xai_grok_provider::BodyCodec::Multipart,
+                        fields: [
+                            ("model".into(), "model".into()),
+                            ("prompt".into(), "prompt".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        files: [(
+                            "image".into(),
+                            xai_grok_provider::MultipartPartConfig {
+                                field: "image".into(),
+                                filename: None,
+                                content_type: None,
+                            },
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        items: Some("/data".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let config = ImageGenConfig::Enabled {
+            api_key: String::new(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: false,
+            image_edit_enabled: true,
+            model_override: None,
+            edit_model_override: Some("image-model".into()),
+            tier_restricted: false,
+            provider: None,
+            capability_profile: Some(profile),
+        };
+        let client = ImageGenClient::new(&config, None).unwrap();
+        let edited = client
+            .edit_profiled(
+                "replace the sky",
+                vec!["data:image/png;base64,aGVsbG8=".into()],
+                "auto",
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited, b"hello");
+    }
+
+    #[tokio::test]
+    async fn profiled_image_generation_downloads_url_without_api_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("Authorization", "Bearer image-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"url": format!("{}/downloads/image", server.uri())}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/downloads/image"))
+            .and(any())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(b"url-image".to_vec()),
+            )
+            .mount(&server)
+            .await;
+
+        let profile = xai_grok_provider::CapabilityProviderConfig {
+            protocol: "openai_images".into(),
+            base_url: Some(server.uri()),
+            model: Some("image-model".into()),
+            api_key: Some("image-secret".into()),
+            operations: [(
+                "generate".into(),
+                xai_grok_provider::CapabilityOperationConfig {
+                    method: "POST".into(),
+                    path: "/images/generations".into(),
+                    request: xai_grok_provider::RequestMapping {
+                        fields: [
+                            ("model".into(), "model".into()),
+                            ("prompt".into(), "prompt".into()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                    response: xai_grok_provider::ResponseMapping {
+                        url: Some("/data/0/url".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let config = ImageGenConfig::Enabled {
+            api_key: String::new(),
+            base_url: server.uri(),
+            extra_headers: indexmap::IndexMap::new(),
+            image_gen_enabled: true,
+            image_edit_enabled: false,
+            model_override: None,
+            edit_model_override: None,
+            tier_restricted: false,
+            provider: None,
+            capability_profile: Some(profile),
+        };
+        let client = ImageGenClient::new(&config, None).unwrap();
+        assert_eq!(client.generate("a cat", "1:1").await.unwrap(), b"url-image");
+
+        let download_request = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| request.url.path() == "/downloads/image")
+            .expect("image URL download request");
+        assert!(!download_request.headers.contains_key("authorization"));
     }
 }

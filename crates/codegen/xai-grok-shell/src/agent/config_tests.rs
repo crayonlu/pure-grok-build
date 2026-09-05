@@ -1047,13 +1047,15 @@ fn test_model_entry(
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
-            subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
+            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -2115,13 +2117,15 @@ fn model_info_from_config_propagates_use_concise() {
         agent_type: default_agent_type(),
         inference_idle_timeout_secs: None,
         max_retries: None,
-        subagent_rate_limit_max_attempts: None,
         hidden: false,
         supported_in_api: true,
         reasoning_effort: None,
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2277,13 +2281,15 @@ fn model_info_from_config_propagates_agent_type() {
         agent_type: "codex".to_string(),
         inference_idle_timeout_secs: None,
         max_retries: None,
-        subagent_rate_limit_max_attempts: None,
         hidden: false,
         supported_in_api: true,
         reasoning_effort: None,
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2731,13 +2737,15 @@ fn inference_idle_timeout_propagates_to_model_info() {
         agent_type: default_agent_type(),
         inference_idle_timeout_secs: Some(120),
         max_retries: None,
-        subagent_rate_limit_max_attempts: None,
         hidden: false,
         supported_in_api: true,
         reasoning_effort: None,
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -5192,19 +5200,11 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
             not_a_real_feature = true
             [slash_command_tags]
             workflows = "new"
-            [marketplace]
-            plugin_cta_marketplace = "Acme Marketplace"
         "#,
     );
     assert!(
         !unused.iter().any(|k| k == "features.remote_fetch"),
         "features.remote_fetch must not be treated as a typo: {unused:?}"
-    );
-    assert!(
-        !unused
-            .iter()
-            .any(|k| k == "marketplace.plugin_cta_marketplace"),
-        "the pager-read CTA marketplace override must not warn: {unused:?}"
     );
     assert!(
         !unused.iter().any(|k| k == "features.session_search"),
@@ -7127,13 +7127,15 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             agent_type: default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
-            subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
+            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7266,7 +7268,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     cfg.models.max_completion_tokens = Some(4096);
     cfg.models.max_retries = Some(9);
     cfg.models.inference_idle_timeout_secs = Some(600);
-    cfg.models.subagent_rate_limit_max_attempts = Some(12);
     cfg.models.stream_tool_calls = Some(true);
     let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
     let mut prefetched = IndexMap::new();
@@ -7281,7 +7282,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     assert_eq!(info.max_completion_tokens, Some(4096));
     assert_eq!(info.max_retries, Some(9));
     assert_eq!(info.inference_idle_timeout_secs, Some(600));
-    assert_eq!(info.subagent_rate_limit_max_attempts, Some(12));
     assert_eq!(info.stream_tool_calls, Some(true));
 }
 #[test]
@@ -7978,4 +7978,36 @@ fn a_status_line_the_parser_could_not_read_in_full_reaches_grok_inspect() {
         1
     );
     assert_eq!(cfg.ui.theme.as_deref(), Some("kanagawa"));
+}
+
+#[test]
+fn host_config_does_not_resolve_overlay_namespace() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+        [overlay]
+        mode = "open"
+        "#,
+    )
+    .expect("overlay config should parse");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+}
+
+#[test]
+fn overlay_defaults_to_upstream_without_overlay_table() {
+    let raw_config = toml::Value::Table(Default::default());
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+    assert_eq!(
+        cfg.overlay_runtime.auth_policy(),
+        xai_grok_overlay_api::AuthPolicy::Inherited
+    );
 }

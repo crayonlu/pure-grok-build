@@ -169,8 +169,15 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     startup::enter(StartupPhase::ConfigLoad);
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    // Keep the upstream parser call as a stable merge anchor. The overlay is
+    // consumed before this composition-root code sees the document.
+    let raw_config = xai_grok_overlay::without_overlay(&raw_config);
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+    agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
+    });
 
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
@@ -277,8 +284,12 @@ pub async fn connect_via_leader(
         ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn,
     };
 
-    // These flags are baked into the agent at startup
-    // In leader mode the agent is already running, so per-client overrides cannot be applied
+    // These flags are baked into the agent at startup.  In leader mode the
+    // agent is already running, so per-client overrides cannot be applied.
+    // Shadow the input before the upstream startup/parser sequence so that
+    // upstream changes in that sequence remain textually mergeable.
+    let sanitized_config = xai_grok_overlay::without_overlay(raw_config);
+    let raw_config = &sanitized_config;
     warn_unsupported_leader_flags(&flags);
 
     apply_config_writes(&flags);
@@ -288,6 +299,10 @@ pub async fn connect_via_leader(
     startup::set_auth_mode(xai_grok_shell::managed_config::classify_auth_mode());
     let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    agent_config.overlay_runtime = xai_grok_overlay::load_runtime().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to load overlay runtime; using fail-closed Open defaults");
+        xai_grok_overlay_api::OverlayRuntime::open()
+    });
     // resolve_telemetry_mode reads remote_settings.
     agent_config.remote_settings = flags.remote_settings.clone();
 
@@ -1147,7 +1162,8 @@ mod tests {
         assert_eq!(blank["x.ai/hunkTracker"]["mode"], "off");
     }
 
-    /// The agent gates the whole payload on this key, so a misspelling on either side switches the feature off with nothing to show for it.
+    /// The agent gates the whole payload on this key, so a misspelling on
+    /// either side switches the feature off with nothing to show for it.
     #[test]
     fn client_capabilities_meta_advertises_the_status_line_the_config_asked_for() {
         let key = xai_grok_status_line::STATUS_LINE_CAPABILITY;

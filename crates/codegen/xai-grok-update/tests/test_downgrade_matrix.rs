@@ -378,6 +378,25 @@ async fn gh_release_same_version_no_update() {
     assert!(!status.update_available);
 }
 
+#[tokio::test]
+#[serial]
+async fn managed_check_uses_subscription_version_on_disk() {
+    // Fork builds keep the upstream embedded semver in the executable, while
+    // the managed subscription publishes date-based versions. `--check` must
+    // compare the source pointer with the managed symlink target, otherwise a
+    // freshly installed 2026.8.7 build appears perpetually behind 0.2.121.
+    let g = setup_gh("0.2.121");
+    g.set_stable_only_stdout("v2026.8.7\n");
+    fake_managed_install("2026.8.7");
+
+    let status = check_update_status(&make_config("stable")).await;
+
+    assert_eq!(status.current_version, "2026.8.7");
+    assert_eq!(status.latest_version.as_deref(), Some("2026.8.7"));
+    assert!(!status.update_available);
+    assert!(status.error.is_none());
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // auto_update_target: the leader/background auto-install decision
 //

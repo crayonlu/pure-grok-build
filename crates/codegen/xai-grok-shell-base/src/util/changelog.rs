@@ -84,8 +84,9 @@ impl ChangelogManager {
     /// When `GROK_CHANGELOG_OFFLINE` is set (PTY / integration tests), the CDN is skipped and only the disk cache is read.
     /// JSON is cached only after a successful parse; the markdown cache is write-through since it's consumed as raw text.
     pub fn fetch(&self) -> Changelog {
-        // Always re-resolve from env so a caller holding an older manager (or a stale OnceLock) still reads the live harness home
-        Self::from_env_home().fetch_with(changelog_offline(), CHANGELOG_BASE)
+        // Always re-resolve from env so a caller holding an older manager
+        // (or OnceLock lag) still reads the live harness home.
+        Self::from_env_home().fetch_with(changelog_offline(), &changelog_base())
     }
 
     /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base.
@@ -180,6 +181,16 @@ impl ChangelogManager {
 /// Used by PTY harness tests that seed `CHANGELOG.{md,json}` under a temp home.
 fn changelog_offline() -> bool {
     std::env::var_os("GROK_CHANGELOG_OFFLINE").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Resolve the changelog mirror at runtime. This keeps self-hosted builds
+/// aligned with the update source without changing the upstream default.
+fn changelog_base() -> String {
+    std::env::var("GROK_CHANGELOG_BASE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| CHANGELOG_BASE.to_owned())
 }
 
 fn read_cache(path: &std::path::Path) -> Option<String> {

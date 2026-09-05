@@ -7,7 +7,7 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::state::ScrollbackState;
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
-use crate::views::rewind::{RewindPhase, RewindState};
+use crate::views::rewind::{RewindMode, RewindPhase, RewindState};
 
 /// User prompt that participates in the shell's prompt numbering.
 /// Interjections render as user prompts but the shell never numbers them, so counting them would skew the positional prompt-to-entry mapping.
@@ -118,6 +118,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: selected_idx.unwrap_or(0),
         stashed_draft: draft,
         selected_prompt_index: selected_shell_idx,
+        mode: RewindMode::default(),
     });
 
     vec![Effect::FetchRewindPoints {
@@ -154,6 +155,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: 0,
         stashed_draft: draft,
         selected_prompt_index: None,
+        mode: RewindMode::default(),
     });
 
     vec![Effect::FetchRewindPoints {
@@ -183,7 +185,9 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         agent.scrollback.set_selected(Some(entry_idx));
     }
 
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    let stashed = agent.rewind_state.take();
+    let mode = stashed.as_ref().map(|s| s.mode).unwrap_or_default();
+    let draft = stashed.and_then(|s| s.stashed_draft);
     begin_rewind(
         agent,
         id,
@@ -191,6 +195,7 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         anchor.unwrap_or(0),
         draft,
         preview,
+        mode,
         confirm,
     )
 }
@@ -221,6 +226,7 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: selected,
+        mode: RewindMode::default(),
     });
     let mut effects = vec![Effect::CancelTurn {
         session_id: session_id.clone(),
@@ -248,8 +254,13 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
         .as_ref()
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
+    let mode = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.mode)
+        .unwrap_or_default();
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    enter_executing(agent, id, target, anchor, draft)
+    enter_executing(agent, id, target, anchor, draft, mode)
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
@@ -305,6 +316,7 @@ fn enter_executing(
     target: usize,
     anchor: usize,
     draft: Option<StashedPrompt>,
+    mode: RewindMode,
 ) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(d) = draft {
@@ -321,12 +333,14 @@ fn enter_executing(
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        mode,
     });
     stash_inline_resubmit_if_editing(agent);
     vec![Effect::RewindExecute {
         agent_id,
         session_id,
         target_prompt_index: target,
+        mode,
     }]
 }
 
@@ -338,6 +352,7 @@ fn begin_rewind(
     anchor: usize,
     draft: Option<StashedPrompt>,
     prompt_preview: Option<String>,
+    mode: RewindMode,
     confirm: bool,
 ) -> Vec<Effect> {
     if confirm {
@@ -350,10 +365,11 @@ fn begin_rewind(
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: Some(target),
+            mode,
         });
         return vec![];
     }
-    enter_executing(agent, agent_id, target, anchor, draft)
+    enter_executing(agent, agent_id, target, anchor, draft, mode)
 }
 
 pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
@@ -398,6 +414,7 @@ pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: Some(target),
+        mode: RewindMode::default(),
     });
 
     vec![Effect::FetchRewindPoints {
@@ -431,6 +448,7 @@ pub(super) fn dispatch_rewind_success(
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: None,
+            mode: RewindMode::default(),
         });
         // The inline editor (if any) stays open; dismissing the error returns to editing
         return vec![];
@@ -525,6 +543,11 @@ pub(super) fn handle_rewind_points_loaded(
         .rewind_state
         .as_ref()
         .and_then(|s| s.selected_prompt_index);
+    let mode = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.mode)
+        .unwrap_or_default();
     let stashed = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
     if points.is_empty() {
@@ -557,6 +580,7 @@ pub(super) fn handle_rewind_points_loaded(
                 anchor.unwrap_or(0),
                 draft,
                 preview,
+                mode,
                 confirm,
             );
         }
@@ -579,6 +603,7 @@ pub(super) fn handle_rewind_points_loaded(
         anchor_entry_idx: initial_anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        mode: RewindMode::default(),
     });
     agent.scrollback.scroll_to_entry_center(initial_anchor);
     vec![]
@@ -605,6 +630,7 @@ pub(super) fn handle_rewind_execute_failed(
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        mode: RewindMode::default(),
     });
     vec![]
 }
