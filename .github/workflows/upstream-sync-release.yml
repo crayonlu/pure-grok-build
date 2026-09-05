@@ -520,16 +520,6 @@ jobs:
         with:
           version: v0.17.0
 
-      - name: Restore Windows sccache archive
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: .sccache
-          key: sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: |
-            sccache-windows-msvc-v2-${{ hashFiles('Cargo.lock') }}-
-            sccache-windows-msvc-v2-
-
       - name: Build release binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
