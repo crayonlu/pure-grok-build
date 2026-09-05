@@ -23,6 +23,19 @@ pub use supervisor::{
     fetch_setup_report, post_login_sync, run_setup, start_refresh_supervisor, sync,
 };
 
+/// Overlay-aware composition-root wrapper. Provider-neutral distributions skip
+/// implicit managed-config refresh.
+pub async fn ensure_managed_policy_present_for_overlay(
+    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
+    overlay: &xai_grok_overlay_api::OverlayRuntime,
+) {
+    if !overlay.allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig) {
+        tracing::debug!("managed policy refresh skipped by overlay policy");
+        return;
+    }
+    ensure_managed_policy_present(auth_manager).await;
+}
+
 /// Absorbs a healthy in-flight apply without letting a wedged holder stall start.
 const GATE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 

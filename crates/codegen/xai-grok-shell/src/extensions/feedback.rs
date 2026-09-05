@@ -1,12 +1,8 @@
-//! `x.ai/feedback`, `x.ai/feedback/dismiss`, `x.ai/btw`, and `x.ai/review/*`
-//! extension handlers.
+//! `x.ai/feedback`, `x.ai/feedback/dismiss`, `x.ai/btw`, and `x.ai/review/*` extension handlers.
 //!
-//! - `feedback`/`feedback/dismiss`: persist user ratings/text locally and
-//!   forward to cli-chat-proxy.
-//! - `btw`: dispatch a side question to the active session via
-//!   `SessionCommand::SideQuestion` and return the answer.
-//! - `review/comment` and `review/comment/delete`: record inline code review
-//!   events to cloud storage.
+//! - `feedback` and `feedback/dismiss`: persist user ratings and text locally and forward to cli-chat-proxy.
+//! - `btw`: dispatch a side question to the active session via `SessionCommand::SideQuestion` and return the answer.
+//! - `review/comment` and `review/comment/delete`: record inline code review events to cloud storage.
 
 use std::sync::Arc;
 
@@ -35,6 +31,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             tracing::info!("handling user feedback");
             handle_feedback(agent, args).await
         }
+        "x.ai/feedback/upload-trace" => handle_upload_trace(agent, args).await,
         m if m.starts_with("x.ai/review") => {
             tracing::info!("handling review comment");
             handle_review(agent, args).await
@@ -42,8 +39,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         _ => Err(acp::Error::method_not_found()),
     }
 }
-
-/// Handle `x.ai/btw` -- a side question that doesn't interrupt the current turn.
+/// Handle `x.ai/btw`, a side question that doesn't interrupt the current turn.
 async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -356,7 +352,74 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
         _ => Err(acp::Error::method_not_found()),
     }
 }
-
+const FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS: u64 = 120;
+async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UploadTraceRequest {
+        session_id: String,
+    }
+    let req: UploadTraceRequest = parse_params(args)?;
+    if !agent.cfg.borrow().is_feedback_enabled()
+        || agent
+            .auth_manager
+            .current_or_expired()
+            .is_some_and(|a| a.is_zdr_team())
+        || agent.team_blocks_one_shot_trace_upload()
+    {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    }
+    if !agent.feedback_trace_offer() && !agent.cfg.borrow().is_trace_upload_enabled() {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    }
+    let sid: acp::SessionId = req.session_id.clone().into();
+    if agent.resident_handle(&sid).is_none() {
+        return Err(
+            acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
+        );
+    }
+    let Some(session_dir) = crate::session::persistence::find_session_dir_by_id(&req.session_id)
+    else {
+        return Err(acp::Error::invalid_params().data("session directory not found"));
+    };
+    let session_id = req.session_id.clone();
+    let archive = tokio::task::spawn_blocking({
+        let session_dir = session_dir.clone();
+        move || crate::upload::feedback_archive::build_session_archive(&session_dir, &session_id)
+    })
+    .await
+    .map_err(|e| acp::Error::internal_error().data(format!("couldn't build session archive: {e}")))?
+    .map_err(|e| {
+        acp::Error::internal_error().data(format!("couldn't build session archive: {e}"))
+    })?;
+    let Some(gcs_config) = agent
+        .one_shot_feedback_gcs_config(req.session_id.clone())
+        .await
+    else {
+        return Err(acp::Error::internal_error().data("trace upload is not available"));
+    };
+    let object_path = format!("{}/feedback_trace.tar.gz", req.session_id);
+    use crate::upload::gcs::WithAuth as _;
+    let auth_manager = Some(agent.auth_manager.clone());
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS),
+        xai_file_utils::gcs::upload_bytes(
+            &gcs_config.with_auth(auth_manager),
+            &object_path,
+            &archive,
+            "application/gzip",
+        ),
+    )
+    .await
+    {
+        Ok(Ok(_)) => super::to_ext_response(Ok(serde_json::json!({
+            "uploaded": true,
+            "objectPath": object_path,
+        }))),
+        Ok(Err(e)) => Err(acp::Error::internal_error().data(format!("trace upload failed: {e:#}"))),
+        Err(_) => Err(acp::Error::internal_error().data("trace upload timed out")),
+    }
+}
 /// Record inline code review events.
 ///
 /// Methods:

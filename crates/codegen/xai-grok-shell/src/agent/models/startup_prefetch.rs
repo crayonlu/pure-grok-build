@@ -57,6 +57,12 @@ pub fn begin_before_policy_gate(cfg: &Config) -> bool {
     if cfg!(test) {
         return INFLIGHT.lock().unwrap().is_some();
     }
+    if !cfg
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        return false;
+    }
     if cfg.remote_settings.is_some() || crate::managed_config::policy_repair_pending() {
         return false;
     }
