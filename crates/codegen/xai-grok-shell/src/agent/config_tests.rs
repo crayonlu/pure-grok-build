@@ -1084,7 +1084,6 @@ fn test_model_entry(
             supports_backend_search: false,
             supports_vision: false,
             supports_parallel_tool_calls: false,
-            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -2158,7 +2157,6 @@ fn model_info_from_config_propagates_use_concise() {
         supports_backend_search: false,
         supports_vision: false,
         supports_parallel_tool_calls: false,
-        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2324,7 +2322,6 @@ fn model_info_from_config_propagates_agent_type() {
         supports_backend_search: false,
         supports_vision: false,
         supports_parallel_tool_calls: false,
-        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2782,7 +2779,6 @@ fn inference_idle_timeout_propagates_to_model_info() {
         supports_backend_search: false,
         supports_vision: false,
         supports_parallel_tool_calls: false,
-        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -7433,7 +7429,6 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             supports_backend_search: false,
             supports_vision: false,
             supports_parallel_tool_calls: false,
-            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -8387,6 +8382,8 @@ async fn process_key_from_model_env_key() {
             .await
             .as_deref(),
         Some(TOKEN)
+    );
+}
 
 #[test]
 fn host_config_does_not_resolve_overlay_namespace() {

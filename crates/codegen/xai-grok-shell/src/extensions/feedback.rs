@@ -9,7 +9,9 @@ use std::sync::Arc;
 use agent_client_protocol as acp;
 
 use super::feedback_drafts::feedback_store;
-use super::{ExtResult, btw, feedback_drafts, feedback_trace, parse_params, require_overlay_service, review};
+use super::{
+    ExtResult, btw, feedback_drafts, feedback_trace, parse_params, require_overlay_service, review,
+};
 // The pager classifies its predraft failures the same way; `feedback_drafts` is crate-private.
 pub use super::feedback_drafts::draft_op_error;
 use crate::agent::MvpAgent;
