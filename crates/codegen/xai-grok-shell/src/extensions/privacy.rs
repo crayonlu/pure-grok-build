@@ -6,11 +6,16 @@
 use agent_client_protocol as acp;
 use serde::Deserialize;
 
-use super::{ExtResult, parse_params, to_raw_response};
+use super::{ExtResult, parse_params, require_overlay_service, to_raw_response};
 use crate::agent::MvpAgent;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::ManagedConfig,
+        args.method.as_ref(),
+    )?;
     match args.method.as_ref() {
         "x.ai/privacy/setCodingDataRetention" => handle_set(agent, args).await,
         _ => Err(acp::Error::method_not_found()),

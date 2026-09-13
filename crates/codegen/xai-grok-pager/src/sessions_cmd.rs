@@ -37,11 +37,15 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
     // Best-effort only: never force an interactive public login here. Enterprise deployments may configure only a
     // deployment_key and a custom xai_api_base_url. Otherwise we still proceed so the SessionRegistryClient can use
     // the deployment_key when talking to the custom proxy.
-    let auth = try_ensure_fresh_auth(
-        &agent_config.grok_com_config,
-        agent_config.endpoints.proxy_url(),
-    )
-    .await;
+    let auth = if agent_config.overlay_runtime.allows_session_auth() {
+        try_ensure_fresh_auth(
+            &agent_config.grok_com_config,
+            agent_config.endpoints.proxy_url(),
+        )
+        .await
+    } else {
+        None
+    };
 
     let auth_manager = std::sync::Arc::new(AuthManager::new_with_proxy_base_url(
         &grok_home(),

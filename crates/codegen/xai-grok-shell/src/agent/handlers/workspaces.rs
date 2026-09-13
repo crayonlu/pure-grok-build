@@ -57,6 +57,11 @@ pub(crate) async fn handle(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {
+    crate::extensions::require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::Subscription,
+        args.method.as_ref(),
+    )?;
     let req: WorkspacesListRequest = serde_json::from_str(args.params.get())
         .map_err(|e| acp::Error::invalid_params().data(format!("invalid params: {e}")))?;
 

@@ -142,6 +142,19 @@ function installBinary(binName, sourceDir, vendorSubpath) {
     return true;
 }
 
+// Older installers created a top-level `agent` alias next to `grok`. Keep npm
+// installs single-command as well: remove only the legacy symlink on Unix,
+// or the legacy copied executable on Windows. Leave unrelated filesystem
+// objects alone.
+function removeLegacyAgentAlias() {
+    const legacyPath = path.join(CANONICAL_DIR, `agent${EXE}`);
+    try {
+        const metadata = fs.lstatSync(legacyPath);
+        const removable = metadata.isSymbolicLink() || (IS_WINDOWS && metadata.isFile());
+        if (removable) fs.unlinkSync(legacyPath);
+    } catch {}
+}
+
 // Comparator: sort "<prefix>X.Y.Z" filenames by version, newest first.
 function byVersionDescending(prefix) {
     return (a, b) => {
@@ -214,6 +227,7 @@ function installBinLink(platformDir) {
 
 if (installBinary('grok', platformDir, `grok${EXE}`)) {
     installBinLink(platformDir);
+    removeLegacyAgentAlias();
 }
 cleanupOldVersions('grok');
 cleanupOldVersions('grok-pager');

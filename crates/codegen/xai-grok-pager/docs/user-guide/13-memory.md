@@ -350,8 +350,42 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 | Key | Default | Description |
 |-----|---------|-------------|
 | `provider` | `"api"` | Embedding provider (currently `"api"`) |
-| `model` | unset | Embedding model name. Unset or `""` uses full-text-only retrieval. |
+| `protocol` | `"openai_compatible"` | Wire profile (`openai_compatible`, `cohere_v2`, or `voyage`) |
+| `base_url` | chat endpoint | Embedding endpoint; defaults to the primary model endpoint for compatibility |
+| `model` | unset | Embedding model name; unset keeps FTS-only mode |
+| `api_key` | unset | Static embedding key; takes precedence over `env_key` |
+| `env_key` | unset | One variable name or an ordered array of variables |
+| `auth_scheme` | inherited Bearer | `bearer` or `x_api_key` shorthand |
+| `auth` | Bearer header | Full auth placement (`location`, `name`, `prefix`) |
+| `path` | protocol default | Endpoint path; OpenAI-compatible defaults to `/embeddings` |
+| `extra_headers` | `{}` | Additional static request headers |
+| `env_headers` | `{}` | Header name → environment variable mapping |
+| `query_params` | `{}` | Static query parameters |
+| `request` / `response` | protocol default | Optional request-field and JSON-pointer mappings |
 | `dimensions` | `1024` | Embedding vector dimensions |
+
+Example for a separate OpenAI-compatible provider:
+
+```toml
+[memory]
+enabled = true
+
+[memory.embedding]
+provider = "api"
+base_url = "https://api.ppio.com/openai/v1"
+model = "qwen/qwen3-embedding-8b"
+env_key = ["EMBEDDING_API_KEY", "OPENAI_API_KEY"]
+dimensions = 1024
+auth_scheme = "bearer"
+```
+
+Only the embedding section needs to change when moving embedding providers;
+the chat model endpoint does not need to expose `/embeddings`. Explicit
+embedding credentials are resolved first. A static primary-model BYOK key is a
+safe fallback, while session/OAuth credentials are withheld from a different
+endpoint. Consequently, an unkeyed custom endpoint stays FTS-only instead of
+receiving a session token. `local` and `auto` are compatibility spellings and
+currently warn/fall back to FTS-only.
 
 ### Search Settings (`[memory.search]`)
 

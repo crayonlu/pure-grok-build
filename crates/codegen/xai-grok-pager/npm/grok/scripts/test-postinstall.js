@@ -76,6 +76,17 @@ function installVersionedBinary(vendoredBinPath, version, canonicalDir) {
     return { canonicalPath, versionedPath, versionedName };
 }
 
+/** Remove the legacy top-level agent alias (same policy as postinstall.js). */
+function removeLegacyAgentAlias(canonicalDir, isWindows = false) {
+    const legacyPath = path.join(canonicalDir, isWindows ? 'agent.exe' : 'agent');
+    try {
+        const metadata = fs.lstatSync(legacyPath);
+        if (metadata.isSymbolicLink() || (isWindows && metadata.isFile())) {
+            fs.unlinkSync(legacyPath);
+        }
+    } catch {}
+}
+
 /** Cleanup old versioned binaries (same as postinstall.js). */
 function cleanupOldVersions(canonicalDir, currentVersionedName) {
     const entries = fs.readdirSync(canonicalDir);
@@ -655,6 +666,25 @@ test('full lifecycle: install, upgrade, cleanup', () => {
         // Canonical symlink points to v3
         assert.strictEqual(fs.readlinkSync(path.join(binDir, 'grok')), 'grok-0.1.142');
         assert.strictEqual(fs.readFileSync(path.join(binDir, 'grok'), 'utf8'), 'v3');
+    } finally {
+        cleanup(dir);
+    }
+});
+
+test('legacy agent alias is removed without touching unrelated files', () => {
+    const dir = makeTmpDir();
+    try {
+        const binDir = path.join(dir, 'bin');
+        fs.mkdirSync(binDir, { recursive: true });
+        const target = path.join(dir, 'grok-binary');
+        fs.writeFileSync(target, 'grok');
+        fs.symlinkSync(target, path.join(binDir, 'agent'));
+        removeLegacyAgentAlias(binDir);
+        assert.ok(!fs.existsSync(path.join(binDir, 'agent')));
+
+        fs.writeFileSync(path.join(binDir, 'agent'), 'user file');
+        removeLegacyAgentAlias(binDir);
+        assert.strictEqual(fs.readFileSync(path.join(binDir, 'agent'), 'utf8'), 'user file');
     } finally {
         cleanup(dir);
     }

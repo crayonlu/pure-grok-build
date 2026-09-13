@@ -40,6 +40,7 @@ pub mod v2_capture;
 pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
+pub use embedding::{EmbeddingAuthScheme, EmbeddingRuntimeConfig};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use observation::*;
 pub use storage::{MemoryScope, MemoryStorage, SaveRememberNoteError};

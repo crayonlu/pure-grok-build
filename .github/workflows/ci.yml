@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: cargo check / test / clippy / fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Configure protoc
+        run: echo "PROTOC=protoc" >> "$GITHUB_ENV"
+
+      - name: Rust toolchain
+        run: |
+          # rust-toolchain.toml pins the version; components are explicit so
+          # the workflow also works when the runner's global toolchain differs.
+          rustup component add rustfmt clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo check (affected crates + tests)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check -p xai-grok-sampler -p xai-grok-shell --all-targets --locked
+
+      - name: overlay policy tests
+        run: cargo test -p xai-grok-overlay-api --locked
+
+      - name: Open-mode auth policy tests
+        run: cargo test -p xai-grok-shell --lib extensions::auth::tests --locked
+
+      - name: cargo clippy (affected crates)
+        # Keep this informational: upstream occasionally carries lints that
+        # are outside the fork overlay and should not block synchronization.
+        run: cargo clippy -p xai-grok-sampler -p xai-grok-shell --all-targets --no-deps || true

@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use crate::views::rewind::RewindMode;
 use std::path::PathBuf;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 /// The invalid-params server detail survives `attach_prompt_usage` wrapping `error.data` as `{message, promptUsage}`.
@@ -2672,11 +2673,10 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
 }
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
+    let params = rewind_execute_params("sess-1", 3, RewindMode::ConversationOnly);
     assert_eq!(params["sessionId"], "sess-1");
     assert_eq!(params["targetPromptIndex"], 3);
     assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
 }
 /// Exact wire bytes of the one-shot request: the shell's `upload_trace_offer_gate_allows`
@@ -2708,4 +2708,16 @@ fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
             serde_json::to_string(&request).unwrap(),
             r#"{"sessionId":"sess-1"}"#
         );
+}
+
+#[test]
+fn rewind_execute_params_sends_all_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::All);
+    assert_eq!(params["mode"], "all");
+}
+
+#[test]
+fn rewind_execute_params_sends_files_only_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::FilesOnly);
+    assert_eq!(params["mode"], "files_only");
 }

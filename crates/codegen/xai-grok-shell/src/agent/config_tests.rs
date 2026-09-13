@@ -1082,6 +1082,9 @@ fn test_model_entry(
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
+            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -2153,6 +2156,9 @@ fn model_info_from_config_propagates_use_concise() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2316,6 +2322,9 @@ fn model_info_from_config_propagates_agent_type() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -2771,6 +2780,9 @@ fn inference_idle_timeout_propagates_to_model_info() {
         supports_reasoning_effort: false,
         reasoning_efforts: Vec::new(),
         supports_backend_search: false,
+        supports_vision: false,
+        supports_parallel_tool_calls: false,
+        subagent_rate_limit_max_attempts: None,
         compactions_remaining: None,
         compaction_at_tokens: None,
         show_model_fingerprint: false,
@@ -5381,19 +5393,11 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
             not_a_real_feature = true
             [slash_command_tags]
             workflows = "new"
-            [marketplace]
-            plugin_cta_marketplace = "Acme Marketplace"
         "#,
     );
     assert!(
         !unused.iter().any(|k| k == "features.remote_fetch"),
         "features.remote_fetch must not be treated as a typo: {unused:?}"
-    );
-    assert!(
-        !unused
-            .iter()
-            .any(|k| k == "marketplace.plugin_cta_marketplace"),
-        "the pager-read CTA marketplace override must not warn: {unused:?}"
     );
     assert!(
         !unused.iter().any(|k| k == "features.session_search"),
@@ -7427,6 +7431,9 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             supports_reasoning_effort: false,
             reasoning_efforts: Vec::new(),
             supports_backend_search: false,
+            supports_vision: false,
+            supports_parallel_tool_calls: false,
+            subagent_rate_limit_max_attempts: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
             show_model_fingerprint: false,
@@ -7560,7 +7567,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     cfg.models.max_completion_tokens = Some(4096);
     cfg.models.max_retries = Some(9);
     cfg.models.inference_idle_timeout_secs = Some(600);
-    cfg.models.subagent_rate_limit_max_attempts = Some(12);
     cfg.models.stream_tool_calls = Some(true);
     let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
     let mut prefetched = IndexMap::new();
@@ -7575,7 +7581,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     assert_eq!(info.max_completion_tokens, Some(4096));
     assert_eq!(info.max_retries, Some(9));
     assert_eq!(info.inference_idle_timeout_secs, Some(600));
-    assert_eq!(info.subagent_rate_limit_max_attempts, Some(12));
     assert_eq!(info.stream_tool_calls, Some(true));
 }
 #[test]
@@ -8382,5 +8387,35 @@ async fn process_key_from_model_env_key() {
             .await
             .as_deref(),
         Some(TOKEN)
+
+#[test]
+fn host_config_does_not_resolve_overlay_namespace() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+        [overlay]
+        mode = "open"
+        "#,
+    )
+    .expect("overlay config should parse");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+}
+
+#[test]
+fn overlay_defaults_to_upstream_without_overlay_table() {
+    let raw_config = toml::Value::Table(Default::default());
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+    assert_eq!(
+        cfg.overlay_runtime.auth_policy(),
+        xai_grok_overlay_api::AuthPolicy::Inherited
     );
 }
