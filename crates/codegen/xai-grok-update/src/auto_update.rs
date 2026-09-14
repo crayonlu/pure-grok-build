@@ -31,12 +31,19 @@ const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
 
+/// An empty or `"stable"` channel means stable, the installers' default
+/// (`CHANNEL="${GROK_CHANNEL:-stable}"` in install.sh).
+fn is_stable_channel(channel: &str) -> bool {
+    channel.is_empty() || channel == "stable"
+}
+
 /// Manual-install one-liner for this platform's bootstrap installer.
 ///
 /// In Open mode, honors the configured `[overlay.update_source]` instead of
-/// hardcoding the first-party x.ai installer; in compatibility modes it
-/// returns the upstream bootstrap one-liner.
-fn manual_install_cmd() -> String {
+/// hardcoding the first-party x.ai installer (channel is ignored for the
+/// Open-mode source URL). In compatibility modes it returns the upstream
+/// channel-aware bootstrap one-liner.
+fn manual_install_cmd(channel: &str) -> String {
     let runtime = xai_grok_overlay::load_runtime().ok();
     let open_mode = runtime
         .as_ref()
@@ -57,15 +64,36 @@ fn manual_install_cmd() -> String {
         }
         return "No update source is configured for Open mode. Set [overlay.update_source] or GROK_CLI_BASE_URL/GROK_UPDATE_REPO.".to_owned();
     }
+    // Only interpolate a well-formed channel ([A-Za-z0-9._-]) into the shell
+    // one-liner. Anything else falls back to stable.
+    let channel = channel.trim();
+    let safe = !channel.is_empty()
+        && channel
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if channel == "enterprise" {
+        return if cfg!(windows) {
+            "irm https://x.ai/cli/enterprise-install.ps1 | iex".to_owned()
+        } else {
+            "curl -fsSL https://x.ai/cli/enterprise-install.sh | bash".to_owned()
+        };
+    }
+    if is_stable_channel(channel) || !safe {
+        return if cfg!(windows) {
+            "irm https://x.ai/cli/install.ps1 | iex".to_owned()
+        } else {
+            "curl -fsSL https://x.ai/cli/install.sh | bash".to_owned()
+        };
+    }
     if cfg!(windows) {
-        "irm https://x.ai/cli/install.ps1 | iex".to_owned()
+        format!("$env:GROK_CHANNEL='{channel}'; irm https://x.ai/cli/install.ps1 | iex")
     } else {
-        "curl -fsSL https://x.ai/cli/install.sh | bash".to_owned()
+        format!("curl -fsSL https://x.ai/cli/install.sh | GROK_CHANNEL='{channel}' bash")
     }
 }
 
 /// Build a reinstall hint for a known installer type.
-fn reinstall_hint(installer: &str) -> String {
+fn reinstall_hint(installer: &str, channel: &str) -> String {
     match installer {
         "npm"
             if !xai_grok_overlay::load_runtime()
@@ -80,10 +108,10 @@ fn reinstall_hint(installer: &str) -> String {
                     "Please reinstall via GitHub Releases:\n  gh release download --repo {repo} --pattern 'grok-*' --output grok && chmod +x grok"
                 )
             } else {
-                format!("Please reinstall via:\n  {}", manual_install_cmd())
+                format!("Please reinstall via:\n  {}", manual_install_cmd(channel))
             }
         }
-        _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
+        _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
     }
 }
 
@@ -841,7 +869,7 @@ async fn run_update_subcommand(
     // One trigger representation end to end: the enum crosses the process
     // boundary as --trigger=<value> (FromStr on the other side).
     cmd.arg("update");
-    cmd.arg(format!("--trigger={}", trigger.as_str()));
+    cmd.arg(format!("--trigger={}", trigger.as_ref()));
     // Hand the resolved telemetry mode to the child, which cannot see the
     // remote-settings layer (requirement pins still beat env). None at the
     // startup spawns — they run before the settings prefetch, when this
@@ -995,7 +1023,7 @@ pub async fn run_install_script(
         anyhow::anyhow!(
             "Auto-update failed: {:#}\n\n{}",
             e,
-            reinstall_hint(installer)
+            reinstall_hint(installer, &update_config.channel)
         )
     })
 }

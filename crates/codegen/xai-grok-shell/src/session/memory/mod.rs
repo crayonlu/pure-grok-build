@@ -9,10 +9,11 @@ pub mod hooks;
 
 pub use xai_grok_memory::{
     EmbeddingAuthScheme, EmbeddingRuntimeConfig, EndpointScopedCredentials, MemoryBackendImpl,
-    MemoryBackendParams, MemoryIndex, MemoryScope, MemorySearchSource, MemoryStorage, archive,
-    backend, chunker, dream, dream_lock, embed_missing_chunks, embedding, index, init_sqlite_vec,
-    mmr, noop_memory_observation_sink, query_expansion, schema, search, storage, text_utils,
-    watcher,
+    MemoryBackendParams, MemoryIndex, MemoryScope, MemorySearchSource, MemoryStorage,
+    V2ManifestBudget, V2MemoryAccessPolicy, V2MemoryScope, archive, backend, chunker, dream,
+    dream_lock, embed_missing_chunks, embedding, index, init_sqlite_vec, mmr,
+    noop_memory_observation_sink, query_expansion, regenerate_scope_manifest, schema, search,
+    storage, text_utils, v2, watcher,
 };
 
 /// Resolve the effective embedding request configuration once at session

@@ -871,7 +871,7 @@ async fn test_cleanup_old_downloads_mixed_stable_and_alpha() {
 
 #[test]
 fn test_reinstall_hint_npm_mentions_npm_command() {
-    let hint = reinstall_hint("npm");
+    let hint = reinstall_hint("npm", "stable");
     if xai_grok_overlay::load_runtime()
         .ok()
         .is_some_and(|runtime| runtime.policy().mode.is_open())
@@ -898,7 +898,7 @@ fn test_reinstall_hint_npm_mentions_npm_command() {
 
 #[test]
 fn test_reinstall_hint_gh_release_mentions_gh_command() {
-    let hint = reinstall_hint("gh-release");
+    let hint = reinstall_hint("gh-release", "stable");
     assert!(
         hint.contains("gh release download")
             || hint.contains("No update source")
@@ -918,7 +918,7 @@ fn test_reinstall_hint_gh_release_mentions_gh_command() {
 
 #[test]
 fn test_reinstall_hint_internal_mentions_platform_installer() {
-    let hint = reinstall_hint("internal");
+    let hint = reinstall_hint("internal", "stable");
     let open_mode = xai_grok_overlay::load_runtime()
         .ok()
         .is_some_and(|runtime| runtime.policy().mode.is_open());
@@ -951,15 +951,15 @@ fn test_reinstall_hint_internal_mentions_platform_installer() {
 #[test]
 fn test_reinstall_hint_unknown_falls_back_to_internal() {
     // Unknown installer falls back to the same hint as "internal".
-    let unknown = reinstall_hint("homebrew");
-    let internal = reinstall_hint("internal");
+    let unknown = reinstall_hint("homebrew", "stable");
+    let internal = reinstall_hint("internal", "stable");
     assert_eq!(unknown, internal);
 }
 
 #[test]
 fn test_reinstall_hint_empty_falls_back_to_internal() {
-    let hint = reinstall_hint("");
-    assert_eq!(hint, reinstall_hint("internal"));
+    let hint = reinstall_hint("", "stable");
+    assert_eq!(hint, reinstall_hint("internal", "stable"));
 }
 
 #[test]
