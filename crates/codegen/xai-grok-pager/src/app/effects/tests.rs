@@ -41,6 +41,7 @@ fn j<'a, V: JsonKeyed + ?Sized>(v: &'a V, key: &str) -> &'a serde_json::Value {
     };
     got
 }
+use crate::views::rewind::RewindMode;
 use std::path::PathBuf;
 use actions::ProbedAttachment;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
@@ -2878,12 +2879,11 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
 }
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
-    assert_eq!(j(&params, "sessionId"), "sess-1");
-    assert_eq!(j(&params, "targetPromptIndex"), 3);
-    assert_eq!(j(&params, "force"), true);
-    assert_eq!(j(&params, "mode"), REWIND_MODE_WIRE);
-    assert_eq!(j(&params, "mode"), "conversation_only");
+    let params = rewind_execute_params("sess-1", 3, RewindMode::ConversationOnly);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], "conversation_only");
 }
 /// Exact wire bytes of the one-shot request: the shell's `upload_trace_offer_gate_allows`
 /// relaxation keys off this exact snake_case value, so the shape is a cross-crate contract.
@@ -2914,4 +2914,16 @@ fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
             serde_json::to_string(&request).unwrap(),
             r#"{"sessionId":"sess-1"}"#
         );
+}
+
+#[test]
+fn rewind_execute_params_sends_all_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::All);
+    assert_eq!(params["mode"], "all");
+}
+
+#[test]
+fn rewind_execute_params_sends_files_only_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::FilesOnly);
+    assert_eq!(params["mode"], "files_only");
 }

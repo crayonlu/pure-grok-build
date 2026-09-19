@@ -247,10 +247,11 @@ impl ModelsManager {
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
         auth_manager: Arc<AuthManager>,
     ) -> Result<Self, String> {
-        let has_session = auth_manager.current_or_expired().is_some();
-        let is_session_auth = auth_manager
-            .current_or_expired()
-            .is_some_and(|a| a.is_session_auth());
+        let has_session = cfg.overlay_runtime.policy().allows_session_auth()
+            && auth_manager.current_or_expired().is_some();
+        let is_session_auth = auth_manager.current_or_expired().is_some_and(|a| {
+            cfg.overlay_runtime.policy().allows_session_auth() && a.is_session_auth()
+        });
         let fetch_auth = ModelFetchAuth::resolve(&cfg.endpoints, has_session);
         let scope = ModelsCacheScope::resolve(
             &cfg.endpoints,
@@ -538,6 +539,32 @@ impl ModelsManager {
             .get(model_id)
             .map(|e| e.info().supports_backend_search)
             .unwrap_or(false)
+    }
+
+    /// Whether the model accepts image inputs. Unknown models remain
+    /// multimodal for backward compatibility with provider catalogs that do
+    /// not publish capability metadata.
+    pub fn model_supports_vision(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_vision)
+            .unwrap_or(true)
+    }
+
+    /// Whether the model may emit tool calls that the agent runs in parallel.
+    /// Unknown models default to `true` (the historical behavior) so catalogs
+    /// that don't publish the flag keep running tools concurrently.
+    pub fn model_supports_parallel_tool_calls(&self, model_id: &str) -> bool {
+        self.inner
+            .catalog
+            .read()
+            .models
+            .get(model_id)
+            .map(|e| e.info().supports_parallel_tool_calls)
+            .unwrap_or(true)
     }
 
     pub(crate) fn model_compactions_remaining(
@@ -860,6 +887,17 @@ impl ModelsManager {
 
     /// One-shot background catalog refresh after readiness; no-op when a fresh disk cache already loaded a real catalog.
     pub fn spawn_background_refresh(&self) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .policy()
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog background refresh skipped by overlay policy");
+            return;
+        }
         self.spawn_background_refresh_inner(crate::util::config::resolve_remote_fetch_enabled());
     }
 
@@ -875,6 +913,16 @@ impl ModelsManager {
 
     /// Refresh the model catalog on every auth token refresh.
     pub fn start_auth_refresh_watcher(&self, notify: Arc<tokio::sync::Notify>) {
+        if !self
+            .inner
+            .cfg
+            .read()
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+        {
+            tracing::debug!("model catalog auth-refresh watcher skipped by overlay policy");
+            return;
+        }
         let mgr = self.clone();
         let had_catalog_at_start = self.inner.catalog.read().has_fetched_real_catalog;
         xai_grok_telemetry::unified_log::info(

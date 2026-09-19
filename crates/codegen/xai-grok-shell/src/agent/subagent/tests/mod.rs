@@ -2475,7 +2475,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
         info: crate::agent::config::ModelInfo {
             model: model_id.to_string(),
             context_window: std::num::NonZeroU64::new(256_000).unwrap(),
-            ..Default::default()
+           ..Default::default()
         },
         mtls_cert_dir: None,
         api_key: None,

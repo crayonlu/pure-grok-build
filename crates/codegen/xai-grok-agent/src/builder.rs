@@ -2280,6 +2280,8 @@ mod tests {
             model_override: None,
             edit_model_override: None,
             tier_restricted: false,
+            provider: None,
+            capability_profile: None,
         };
         let defs = previewing_primary(|builder| builder.with_image_gen_config(image_gen)).await;
         let explore = task_type_line(&defs, "explore");

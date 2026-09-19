@@ -84,9 +84,12 @@ async fn mount_gcs_with_channels(
     server
 }
 
-// Scenario matrix: GCS internal installer, downgrade via install. Each test simulates a user on version X, with the
-// stable/alpha pointer now pointing to version Y. The internal installer should install Y regardless of whether Y < X
-// (rollback) or Y > X (upgrade) ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario matrix: GCS internal installer, downgrade via install
+//
+// Each test simulates a user on version X, with the stable/alpha pointer now pointing to version Y
+// The internal installer should install Y regardless of whether Y < X (rollback) or Y > X (upgrade)
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
@@ -259,9 +262,13 @@ async fn internal_install_alpha_user_gets_newer_stable_after_stable_passes_alpha
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────. The internal (GCS) path can't be
-// end-to-end tested via check_update_status (hardcoded URLs). Its update-detection logic is covered by the needs_update
-// unit tests and the install tests above ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario matrix: check_update_status across installer × version direction
+//
+// Uses check_update_status end-to-end with fake npm/gh binaries.
+// The internal (GCS) path can't be end-to-end tested via check_update_status (hardcoded URLs)
+// Its update-detection logic is covered by the needs_update unit tests and the install tests above
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn setup_npm(current_version: &str) -> FakeBinGuard {
     let _ = test_home();
@@ -371,8 +378,31 @@ async fn gh_release_same_version_no_update() {
     assert!(!status.update_available);
 }
 
-// It gates on the installer, so authoritative installers (gh-release/internal) follow a rolled-back pointer while npm
-// never downgrades `fetch_latest_version` keeps these hermetic
+#[tokio::test]
+#[serial]
+async fn managed_check_uses_subscription_version_on_disk() {
+    // Fork builds keep the upstream embedded semver in the executable, while
+    // the managed subscription publishes date-based versions. `--check` must
+    // compare the source pointer with the managed symlink target, otherwise a
+    // freshly installed 2026.8.7 build appears perpetually behind 0.2.121.
+    let g = setup_gh("0.2.121");
+    g.set_stable_only_stdout("v2026.8.7\n");
+    fake_managed_install("2026.8.7");
+
+    let status = check_update_status(&make_config("stable")).await;
+
+    assert_eq!(status.current_version, "2026.8.7");
+    assert_eq!(status.latest_version.as_deref(), Some("2026.8.7"));
+    assert!(!status.update_available);
+    assert!(status.error.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// auto_update_target: the leader/background auto-install decision
+//
+// Unlike the upgrade-only `check_update_status` report, this is the downgrade-aware convergence decision
+// It gates on the installer, so authoritative installers (gh-release/internal) follow a rolled-back pointer while npm never downgrades
+// `fetch_latest_version` keeps these hermetic
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -423,8 +453,12 @@ async fn auto_update_target_npm_rollback_returns_none() {
     );
 }
 
-// Each must decide staleness from the on-disk install, not its own compiled-in version. A binary another process already
-// installed is never downloaded a second time, but a stale running process still gets the relaunch signal
+// ─────────────────────────────────────────────────────────────────────────────
+// Disk-aware convergence: ensure_latest_on_disk and installed_on_disk_version
+//
+// The TUI background download, the leader hourly checker, and explicit `grok update` can run concurrently
+// Each must decide staleness from the on-disk install, not its own compiled-in version
+// A binary another process already installed is never downloaded a second time, but a stale running process still gets the relaunch signal
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Lay down what `install_internal_from_base` produces in the test GROK_HOME: `bin/grok -> ../downloads/grok-<version>-<platform>`.
@@ -498,9 +532,12 @@ async fn ensure_latest_relaunches_onto_rolled_back_disk() {
     assert!(outcome.relaunch_needed, "downgrade relaunch expected");
 }
 
-// Pointer-flip timing scenarios. These test the race between a user opening grok (which caches the version) and a
-// pointer flip happening. The 30-min TTL means the user won't see the new pointer until the cache expires, but once it
-// does, the correct behavior must kick in ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Pointer-flip timing scenarios
+//
+// These test the race between a user opening grok (which caches the version) and a pointer flip happening
+// The 30-min TTL means the user won't see the new pointer until the cache expires, but once it does, the correct behavior must kick in
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
