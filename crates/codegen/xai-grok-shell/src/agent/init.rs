@@ -331,14 +331,17 @@ fn ensure_remote_settings_side_effects(
         .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
     {
         tracing::debug!("remote settings fetch skipped by overlay policy");
-        crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
+        crate::agent::config::apply_remote_settings_side_effects(
+            cfg.remote_settings.as_ref(),
+            &config::EndpointsConfig::from_effective_config().proxy_url(),
+        );
         return Ok(if cfg.remote_settings.is_some() {
             StartupPrefetch::ClientSupplied
         } else {
             StartupPrefetch::Ran
         });
     }
-    if let Some(wait) = boot_wait {
+    let prefetch = if let Some(wait) = boot_wait {
         if matches!(wait, SettingsWait::Cancelled) || cancel.is_cancelled() {
             return Err(BootstrapError::Cancelled);
         }
@@ -350,11 +353,8 @@ fn ensure_remote_settings_side_effects(
             cfg.remote_settings = Some(settings);
             crate::util::config::set_remote_campaigns_from_settings(cfg.remote_settings.as_ref());
         }
-        crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
-        return Ok(StartupPrefetch::Ran);
-    }
-    let ran_prefetch = cfg.remote_settings.is_none();
-    if ran_prefetch {
+        StartupPrefetch::Ran
+    } else if cfg.remote_settings.is_none() {
         #[cfg(test)]
         PREFETCH_RUNS.with(|c| c.set(c.get() + 1));
         let deadline = startup_settings_deadline(profile);
@@ -372,15 +372,17 @@ fn ensure_remote_settings_side_effects(
             &wait,
             warmed_auth,
         );
+        StartupPrefetch::Ran
     } else if cancel.is_cancelled() {
         return Err(BootstrapError::Cancelled);
-    }
-    crate::agent::config::apply_remote_settings_side_effects(cfg.remote_settings.as_ref());
-    Ok(if ran_prefetch {
-        StartupPrefetch::Ran
     } else {
         StartupPrefetch::ClientSupplied
-    })
+    };
+    crate::agent::config::apply_remote_settings_side_effects(
+        cfg.remote_settings.as_ref(),
+        &config::EndpointsConfig::from_effective_config().proxy_url(),
+    );
+    Ok(prefetch)
 }
 fn startup_settings_deadline(profile: LaunchProfile) -> std::time::Duration {
     match profile {

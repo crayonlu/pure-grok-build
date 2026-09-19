@@ -41,38 +41,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: "http://localhost".to_string(),
-                mtls_cert_dir: None,
                 model: "test".to_string(),
-                max_completion_tokens: None,
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
-                extra_headers: Default::default(),
-                extra_response_includes: Vec::new(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
                 context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                rate_limit_retry_threshold: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
-                conversation_group_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                supports_vision: true,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
+                ..Default::default()
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -99,21 +70,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 vec![],
                 xai_grok_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
-                    mtls_cert_dir: None,
                     model: "test".to_string(),
-                    max_completion_tokens: None,
-                    temperature: None,
-                    top_p: None,
-                    max_retries: None,
-                    rate_limit_retry_threshold: None,
-                    api_backend: Default::default(),
-                    extra_headers: Default::default(),
-                    conversation_group_id: None,
-                    query_params: Default::default(),
-                    env_http_headers: Default::default(),
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
-                    reasoning_effort: None,
-                    stream_tool_calls: None,
+                    ..Default::default()
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -202,9 +161,17 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
+                    v2_config: Default::default(),
                     configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
+                    is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(None),
                     save_on_end: true,
@@ -224,6 +191,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     dream_count: std::sync::atomic::AtomicU64::new(0),
                     dream_success_count: std::sync::atomic::AtomicU64::new(0),
                     dream_error_count: std::sync::atomic::AtomicU64::new(0),
+                    token_totals: Default::default(),
                 },
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
@@ -488,38 +456,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                     api_key: Some("test-key".to_string()),
                     base_url: "http://localhost".to_string(),
-                    mtls_cert_dir: None,
                     model: "test-model".to_string(),
-                    max_completion_tokens: None,
-                    extra_headers: Default::default(),
-                    extra_response_includes: Vec::new(),
-                    query_params: Default::default(),
-                    env_http_headers: Default::default(),
-                    temperature: None,
-                    top_p: None,
-                    api_backend: Default::default(),
-                    auth_scheme: Default::default(),
                     context_window: 100_000,
-                    client_version: None,
-                    force_http1: false,
-                    max_retries: None,
-                    rate_limit_retry_threshold: None,
-                    stream_tool_calls: false,
-                    idle_timeout_secs: None,
-                    client_identifier: None,
-                    reasoning_effort: None,
-                    deployment_id: None,
-                    user_id: None,
-                    conversation_group_id: None,
-                    origin_client: None,
-                    attribution_callback: None,
-                    bearer_resolver: None,
-                    supports_backend_search: false,
-                    supports_vision: true,
-                    compactions_remaining: None,
-                    compaction_at_tokens: None,
-                    doom_loop_recovery: None,
-                    header_injector: None,
+                    ..Default::default()
                 })
                 .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -549,21 +488,9 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
                     ],
                 xai_grok_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
-                    mtls_cert_dir: None,
                     model: "test".to_string(),
-                    max_completion_tokens: None,
-                    temperature: None,
-                    top_p: None,
-                    max_retries: None,
-                    rate_limit_retry_threshold: None,
-                    api_backend: Default::default(),
-                    extra_headers: Default::default(),
-                    conversation_group_id: None,
-                    query_params: Default::default(),
-                    env_http_headers: Default::default(),
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
-                    reasoning_effort: None,
-                    stream_tool_calls: None,
+                    ..Default::default()
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -635,38 +562,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             let sampling_client = crate::sampling::Client::new(xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: "http://localhost".to_string(),
-                mtls_cert_dir: None,
                 model: "test-model".to_string(),
-                max_completion_tokens: None,
-                extra_headers: Default::default(),
-                extra_response_includes: Vec::new(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
-                temperature: None,
-                top_p: None,
-                api_backend: Default::default(),
-                auth_scheme: Default::default(),
                 context_window: 100_000,
-                client_version: None,
-                force_http1: false,
-                max_retries: None,
-                rate_limit_retry_threshold: None,
-                stream_tool_calls: false,
-                idle_timeout_secs: None,
-                client_identifier: None,
-                reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
-                conversation_group_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                supports_vision: true,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
+                ..Default::default()
             })
             .expect("sampling client should build for persistence actor");
             let persistence = crate::session::persistence::new_with_explicit_dir(
@@ -698,21 +596,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 initial_conversation.clone(),
                 xai_grok_sampling_types::SamplingConfig {
                     base_url: "http://localhost".to_string(),
-                    mtls_cert_dir: None,
                     model: "test".to_string(),
-                    max_completion_tokens: None,
-                    temperature: None,
-                    top_p: None,
-                    max_retries: None,
-                    rate_limit_retry_threshold: None,
-                    api_backend: Default::default(),
-                    extra_headers: Default::default(),
-                    conversation_group_id: None,
-                    query_params: Default::default(),
-                    env_http_headers: Default::default(),
                     context_window: std::num::NonZeroU64::new(100_000).unwrap(),
-                    reasoning_effort: None,
-                    stream_tool_calls: None,
+                    ..Default::default()
                 },
                 Box::new(
                     crate::session::chat_persistence::ChannelChatPersistence::new(
@@ -818,9 +704,17 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: Some(crate::config::MemoryMode::Legacy),
+                    v2_config: Default::default(),
                     configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
+                    is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(Some(memory_storage)),
                     save_on_end: true,
@@ -843,6 +737,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     dream_count: std::sync::atomic::AtomicU64::new(0),
                     dream_success_count: std::sync::atomic::AtomicU64::new(0),
                     dream_error_count: std::sync::atomic::AtomicU64::new(0),
+                    token_totals: Default::default(),
                 },
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
@@ -1149,9 +1044,19 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
+                    v2_config: Default::default(),
                     configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
+                    is_flushing: std::sync::Arc::new(
+                        std::sync::atomic::AtomicBool::new(false),
+                    ),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(None),
                     save_on_end: true,
@@ -1173,6 +1078,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     dream_count: std::sync::atomic::AtomicU64::new(0),
                     dream_success_count: std::sync::atomic::AtomicU64::new(0),
                     dream_error_count: std::sync::atomic::AtomicU64::new(0),
+                    token_totals: Default::default(),
                 },
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
@@ -1718,7 +1624,7 @@ async fn handle_prompt_frames_interrupt_on_user_message() {
             let user = conv
                 .iter()
                 .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_human())
                         && item.text_content().contains(query)
                 })
                 .expect("the user message must be in the conversation");
@@ -1767,7 +1673,7 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
             let user = conv
                 .iter()
                 .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_human())
                         && item.text_content().contains(query)
                 })
                 .expect("the user message must be in the conversation");
@@ -1815,7 +1721,7 @@ async fn handle_prompt_send_now_frames_interjection_envelope() {
             let user = conv
                 .iter()
                 .find(|item| {
-                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_none())
+                    matches!(item, ConversationItem::User(u) if u.synthetic_reason.is_human())
                         && item.text_content().contains(query)
                 })
                 .expect("the send-now user message must be in the conversation");
@@ -2565,38 +2471,12 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("test-key".to_string()),
                 base_url: format!("http://{addr}/v1"),
-                mtls_cert_dir: None,
                 model: "test-model".to_string(),
-                max_completion_tokens: None,
-                temperature: None,
-                top_p: None,
                 api_backend: xai_grok_sampler::ApiBackend::Responses,
-                auth_scheme: Default::default(),
-                extra_headers: Default::default(),
-                extra_response_includes: Vec::new(),
-                query_params: Default::default(),
-                env_http_headers: Default::default(),
                 context_window: 100_000,
-                client_version: None,
-                force_http1: false,
                 max_retries: Some(0),
-                rate_limit_retry_threshold: None,
-                stream_tool_calls: false,
                 idle_timeout_secs: Some(60),
-                client_identifier: None,
-                reasoning_effort: None,
-                deployment_id: None,
-                user_id: None,
-                conversation_group_id: None,
-                origin_client: None,
-                attribution_callback: None,
-                bearer_resolver: None,
-                supports_backend_search: false,
-                supports_vision: true,
-                compactions_remaining: None,
-                compaction_at_tokens: None,
-                doom_loop_recovery: None,
-                header_injector: None,
+                ..Default::default()
             };
             let (sampler_event_tx, _sampler_event_rx) = tokio::sync::mpsc::unbounded_channel::<
                 xai_grok_sampler::SamplingEvent,
@@ -2732,9 +2612,19 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 },
                 memory: crate::session::memory_state::SessionMemory {
                     configured_mode: None,
+                    v2_config: Default::default(),
                     configured_storage: None,
+                    process_disabled: false,
+                    config_opt_out: false,
+                    v2_legacy_carryover: false,
+                    prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
                     flush_config: crate::config::MemoryFlushConfig::default(),
-                    is_flushing: std::sync::atomic::AtomicBool::new(false),
+                    is_flushing: std::sync::Arc::new(
+                        std::sync::atomic::AtomicBool::new(false),
+                    ),
+                    capture_worker: std::cell::RefCell::new(None),
+                    dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+                    last_capture_failure: std::cell::RefCell::new(None),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
                     storage: std::cell::RefCell::new(None),
                     save_on_end: true,
@@ -2756,6 +2646,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     dream_count: std::sync::atomic::AtomicU64::new(0),
                     dream_success_count: std::sync::atomic::AtomicU64::new(0),
                     dream_error_count: std::sync::atomic::AtomicU64::new(0),
+                    token_totals: Default::default(),
                 },
                 session_start: std::time::Instant::now(),
                 inference_idle_timeout: Duration::from_secs(300),
@@ -2923,7 +2814,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                             content: vec![xai_grok_sampling_types::ContentPart::Text {
                                 text: "hi".into(),
                             }],
-                            synthetic_reason: None,
+                            synthetic_reason: SyntheticReason::Human,
                             ..Default::default()
                         },
                     )],
@@ -3123,8 +3014,11 @@ async fn cancel_keeps_remaining_queued_prompts_visible_to_clients() {
                 vec!["q1", "q2"],
                 "clients must still see the waiting prompts, in order, cancelled one gone"
             );
-            assert_eq!(wire[0].position, 0, "positions must renumber from 0");
-            assert_eq!(wire[1].position, 1);
+            let [first, second] = wire.as_slice() else {
+                panic!("expected two wire entries: {wire:?}");
+            };
+            assert_eq!(first.position, 0, "positions must renumber from 0");
+            assert_eq!(second.position, 1);
             assert!(
                 actor
                     .current_prompt_id

@@ -10,6 +10,7 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
+use crate::cleanup_downloads::cleanup_old_downloads;
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
@@ -553,8 +554,24 @@ pub async fn get_installer() -> Option<&'static str> {
     match cfg.cli.installer.as_deref() {
         Some("npm") => Some("npm"),
         Some("gh-release") => Some("gh-release"),
-        _ => Some("internal"),
+        Some(_) => Some("internal"),
+        // A wiped config must not reclassify an npm install as internal:
+        // that re-enables downgrades and updates npm never sees.
+        None if path_resolves_to_npm_entry() => Some("npm"),
+        None => Some("internal"),
     }
+}
+
+/// The npm entry links to a binary inside the package, so the running
+/// executable's real path names the installer.
+fn path_resolves_to_npm_entry() -> bool {
+    std::env::current_exe()
+        .and_then(|exe| dunce::canonicalize(&exe))
+        .is_ok_and(|exe| is_under_node_modules(&exe))
+}
+
+fn is_under_node_modules(exe: &std::path::Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "node_modules")
 }
 
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
@@ -1067,7 +1084,7 @@ pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
 /// [`DOWNLOAD_REQUEST_TIMEOUT`]; the leader check+download pass matches) so
 /// a concurrent updater's in-flight or just-landed file is never deleted
 /// out from under it.
-const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+pub(crate) const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Total timeout for a CLI artifact download request (including body).
 /// Previously 5 minutes, which was too tight on slow links and caused the
@@ -1452,6 +1469,15 @@ async fn download_and_decode(
     }
 }
 
+/// Object-name candidates in fetch order; on Windows the `.exe` name comes first.
+fn cli_object_candidates(object_name: &str, windows: bool) -> Vec<String> {
+    if windows {
+        vec![format!("{object_name}.exe"), object_name.to_string()]
+    } else {
+        vec![object_name.to_string()]
+    }
+}
+
 async fn download_cli_artifact_from_gcs(
     gcs_base_url: &str,
     object_name: &str,
@@ -1459,23 +1485,20 @@ async fn download_cli_artifact_from_gcs(
     with_progress: bool,
 ) -> Result<()> {
     let base = gcs_base_url.trim_end_matches('/');
-
-    for (suffix, codec) in [("zst", Codec::Zstd), ("gz", Codec::Gzip)] {
-        let url = format!("{base}/{object_name}.{suffix}");
-        match download_and_decode(&url, dest, codec, with_progress).await {
-            Ok(()) => return Ok(()),
-            Err(e) => tracing::debug!("compressed .{suffix} unusable, trying next: {e}"),
-        }
-    }
-
-    let mut plain = Vec::new();
-    #[cfg(windows)]
-    plain.push(format!("{base}/{object_name}.exe"));
-    plain.push(format!("{base}/{object_name}"));
+    let names = cli_object_candidates(object_name, cfg!(windows));
 
     let mut last_err = None;
-    for url in &plain {
-        match download_plain(url, dest, with_progress).await {
+    for name in &names {
+        for (suffix, codec) in [("zst", Codec::Zstd), ("gz", Codec::Gzip)] {
+            let url = format!("{base}/{name}.{suffix}");
+            match download_and_decode(&url, dest, codec, with_progress).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::debug!("compressed {name}.{suffix} unusable, trying next: {e}");
+                }
+            }
+        }
+        match download_plain(&format!("{base}/{name}"), dest, with_progress).await {
             Ok(()) => return Ok(()),
             Err(e) => last_err = Some(e),
         }
@@ -1561,7 +1584,7 @@ fn truncate_err(s: &str, max: usize) -> String {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &s[..end])
+    format!("{}...", s.get(..end).unwrap_or(""))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1661,6 +1684,9 @@ pub async fn install_internal_from_base(
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
+    /// Windows: the grove hook exes and MinGit archive fetched for this release (empty elsewhere).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    payload: windows_payload::Payload,
 }
 
 /// Base-dependent install phase: resolve the version (per base when no
@@ -1711,9 +1737,16 @@ async fn download_verified_from_base(
         return Err(fail.into());
     }
 
+    // Best-effort and base-dependent, so it belongs to this phase; a miss never fails the install.
+    #[cfg(windows)]
+    let payload = windows_payload::download(gcs_base_url, &version, &platform, &download_dir).await;
+    #[cfg(not(windows))]
+    let payload = windows_payload::Payload::default();
+
     Ok(VerifiedDownload {
         version,
         binary_path,
+        payload,
     })
 }
 
@@ -1732,9 +1765,14 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
 
     remove_stale_pager(&bin_dir).await;
 
+    // Hook exes beside grok.exe and the bundled MinGit; grok is already live, so a failure here is only logged.
+    #[cfg(windows)]
+    windows_payload::activate(&download.payload, &bin_dir, &download.version).await;
+
     eprintln!();
 
-    // Clean up old versioned binaries (keeps current + 1 previous).
+    // Clean up old versioned binaries while retaining the current and previous
+    // versions, plus any executable still in use by a live process.
     cleanup_old_downloads(&download_dir, "grok", &download.version).await;
     cleanup_old_downloads(&download_dir, "grok-pager", &download.version).await;
 
@@ -2230,128 +2268,6 @@ async fn sweep_old_exe_backups(old: &std::path::Path) {
     }
 }
 
-/// Best-effort cleanup of old versioned binaries for a given binary name.
-///
-/// Mirrors the npm `cleanupOldVersions()` policy: keeps the current version
-/// plus one previous version (in case a process is still running the old binary
-/// and hasn't fully loaded all pages yet — deleting it on macOS causes SIGKILL
-/// because the kernel can no longer verify the code signature).
-///
-/// `bin_prefix` is the binary name prefix, e.g. `"grok"` or `"grok-pager"`.
-/// Files must match `{bin_prefix}-{digit}*` to be considered versioned binaries
-/// (this avoids `grok-*` matching `grok-pager-*` or `grok-latest`).
-///
-/// Temporary/partial files (containing `.tmp`) are deleted only once they
-/// are **stale** (mtime older than [`STALE_TMP_AGE`]). A fresh `.tmp` may be
-/// a concurrent updater's in-flight download — the same-instant race the
-/// lock-free design accepts — and deleting it out from under that updater
-/// would make its atomic rename fail.
-async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_version: &str) {
-    let prefix = format!("{}-", bin_prefix);
-    let current_semver = match semver::Version::parse(current_version) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: invalid current version '{}': {}",
-                current_version,
-                e
-            );
-            return;
-        }
-    };
-
-    let mut entries = match tokio::fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: failed to read {}: {}",
-                dir.display(),
-                e
-            );
-            return;
-        }
-    };
-
-    let mut versioned: Vec<(semver::Version, String)> = Vec::new();
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(&prefix) {
-            continue;
-        }
-        // Temp/partial files: sweep only STALE ones. A fresh `.tmp` may be a
-        // concurrent updater's in-flight download — deleting it would make
-        // that updater's atomic rename fail with ENOENT.
-        if name.contains(".tmp") {
-            let stale = match entry.metadata().await.and_then(|m| m.modified()) {
-                Ok(modified) => std::time::SystemTime::now()
-                    .duration_since(modified)
-                    .map(|age| age > STALE_TMP_AGE)
-                    // Future mtime (clock skew): can't tell — leave it.
-                    .unwrap_or(false),
-                // Unknown mtime: leave it; it is swept once readable+old.
-                Err(_) => false,
-            };
-            if stale && let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                tracing::warn!("failed to remove stale temp file {}: {}", name, e);
-            }
-            continue;
-        }
-        // Skip symlinks (e.g. grok-latest).
-        if let Ok(ft) = entry.file_type().await
-            && ft.is_symlink()
-        {
-            continue;
-        }
-        // The suffix after the prefix must start with a digit to be a versioned
-        // binary (avoids `grok-latest`, `grok-pager-*` when prefix is `grok`).
-        let suffix = &name[prefix.len()..];
-        if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
-            continue;
-        }
-        // Extract the version portion via the shared parser (handles the
-        // internal `grok-0.1.150-macos-aarch64`, pre-release, and npm
-        // `grok-0.1.150` layouts — see `version_from_versioned_binary_name`).
-        let Some(ver_str) = crate::version::version_from_versioned_binary_name(&name, bin_prefix)
-        else {
-            continue;
-        };
-        if let Ok(v) = semver::Version::parse(&ver_str) {
-            // Skip the current version — never delete it.
-            if v == current_semver {
-                continue;
-            }
-            versioned.push((v, name));
-        }
-    }
-
-    // Sort descending by version so the newest is first.
-    versioned.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Keep the most recent old version (index 0), delete the rest (index 1+).
-    // This matches the npm policy: current + 1 previous.
-    for (_, name) in versioned.iter().skip(1) {
-        let path = dir.join(name);
-        // Same freshness guard as the `.tmp` sweep: a versioned binary
-        // written moments ago is likely a concurrent installer's
-        // just-renamed download (its symlink swap hasn't happened yet) —
-        // deleting it would leave that installer's swap pointing at
-        // nothing. Old binaries from previous releases are days old.
-        let fresh = tokio::fs::metadata(&path)
-            .await
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age <= STALE_TMP_AGE);
-        if fresh {
-            continue;
-        }
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            tracing::warn!("failed to remove old binary {}: {}", name, e);
-        }
-    }
-}
-
 fn installer_manages_bin_entrypoints(installer: &str) -> bool {
     matches!(installer, "internal" | "gh-release")
 }
@@ -2613,7 +2529,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
     eprintln!();
 
-    // Clean up old versioned binaries (keeps current + 1 previous).
+    // Clean up old versioned binaries while retaining the current and previous
+    // versions, plus any executable still in use by a live process.
     cleanup_old_downloads(&download_dir, "grok", &version).await;
     cleanup_old_downloads(&download_dir, "grok-pager", &version).await;
 
@@ -3010,6 +2927,9 @@ async fn refresh_deployment_config() {
         Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
     }
 }
+
+#[path = "windows_payload.rs"]
+mod windows_payload;
 
 #[cfg(test)]
 #[path = "auto_update_tests.rs"]

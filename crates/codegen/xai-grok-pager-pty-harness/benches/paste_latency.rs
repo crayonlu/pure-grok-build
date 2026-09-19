@@ -222,12 +222,13 @@ async fn bench_cell(
     mode: Mode,
     iterations: usize,
 ) -> Result<PasteLatencyResult> {
+    let surface_name: &'static str = surface.into();
     let mode_str = match mode {
         Mode::Text => "text",
         Mode::Image => "image",
         Mode::All => unreachable!("cells are per concrete mode"),
     };
-    tracing::info!(surface = surface.as_str(), mode = mode_str, "running cell");
+    tracing::info!(surface = surface_name, mode = mode_str, "running cell");
 
     let content = ContentController::start()
         .await
@@ -255,10 +256,7 @@ async fn bench_cell(
                 harness.inject_keys(&[CTRL_V]).context("inject Ctrl+V")?;
                 wait_visible(&mut harness, &sentinel, Duration::from_secs(10))?;
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
-                eprintln!(
-                    "  [{}/{mode_str}] iter {i}: paste {ms:.1} ms",
-                    surface.as_str()
-                );
+                eprintln!("  [{}/{mode_str}] iter {i}: paste {ms:.1} ms", surface_name);
                 primary_ms.push(ms);
                 clear_input_or_respawn(
                     binary,
@@ -284,7 +282,7 @@ async fn bench_cell(
                 let chip = start.elapsed().as_secs_f64() * 1000.0;
                 eprintln!(
                     "  [{}/{mode_str}] iter {i}: responsiveness {resp:.1} ms, chip {chip:.1} ms",
-                    surface.as_str()
+                    surface_name
                 );
                 responsiveness_ms.push(resp);
                 primary_ms.push(chip);
@@ -308,7 +306,7 @@ async fn bench_cell(
     let responsiveness_p50 =
         (!responsiveness_ms.is_empty()).then(|| stats(&mut responsiveness_ms).0);
     let result = PasteLatencyResult {
-        surface: surface.as_str(),
+        surface: surface_name,
         mode: mode_str,
         iterations,
         p50_ms: p50,
@@ -392,6 +390,7 @@ fn clear_input_or_respawn(
     harness: &mut PtyHarness,
     stale: &[&str],
 ) -> Result<()> {
+    let surface_name: &'static str = surface.into();
     // Ctrl+U kills to line start, removing pasted text and chip elements.
     harness.inject_keys(b"\x15").context("Ctrl+U clear")?;
     if wait_absent(harness, stale, Duration::from_secs(2)) {
@@ -416,7 +415,7 @@ fn clear_input_or_respawn(
         }
     }
     tracing::warn!(
-        surface = surface.as_str(),
+        surface = surface_name,
         "input did not clear; respawning harness"
     );
     let _ = harness.quit();

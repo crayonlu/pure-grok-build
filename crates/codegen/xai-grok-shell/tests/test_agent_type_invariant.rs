@@ -138,11 +138,9 @@ async fn test_default_model_uses_grok_build_harness() {
             .expect("start mock server");
         let workdir = git_workdir();
         let client = GrokStdioClient::spawn(&server, workdir.workspace()).await;
-        client.initialize_with_timeout().await;
-        let session_id = client
-            .create_session_with_timeout(workdir.workspace())
-            .await;
-        let result = client.prompt_with_timeout(&session_id, "say hello").await;
+        client.initialize().await;
+        let session_id = client.create_session(workdir.workspace()).await;
+        let result = client.prompt(&session_id, "say hello").await;
         assert!(result.is_ok(), "prompt failed: {:?}", result.err());
         let sys_prompt = server
             .last_system_prompt()
@@ -164,20 +162,20 @@ async fn test_same_type_model_switch_no_rebuild() {
         let server = same_type_server().await;
         let workdir = git_workdir();
         let client = GrokStdioClient::spawn(&server, workdir.workspace()).await;
-        client.initialize_with_timeout().await;
+        client.initialize().await;
         let session_id = client
-            .create_session_with_model_timeout(workdir.workspace(), "model-a")
+            .create_session_with_model(workdir.workspace(), "model-a")
             .await;
-        let result = client.prompt_with_timeout(&session_id, "say hello").await;
+        let result = client.prompt(&session_id, "say hello").await;
         assert!(result.is_ok(), "first prompt failed: {:?}", result.err());
-        let switch_result = client.set_model_with_timeout(&session_id, "model-b").await;
+        let switch_result = client.set_model(&session_id, "model-b").await;
         assert!(
             switch_result.is_ok(),
             "same-type model switch should succeed\nerror: {:?}\nstderr: {}",
             switch_result.err(),
             stderr_tail(&client.stderr(), 2000)
         );
-        let result2 = client.prompt_with_timeout(&session_id, "say goodbye").await;
+        let result2 = client.prompt(&session_id, "say goodbye").await;
         assert!(
             result2.is_ok(),
             "second prompt after model switch failed: {:?}",
@@ -197,26 +195,21 @@ async fn test_session_resume_preserves_harness() {
             .await
             .expect("start mock server");
         let workdir = git_workdir();
-        let mut writer = GrokStdioClient::spawn(&server, workdir.workspace()).await;
-        writer.initialize_with_timeout().await;
-        let session_id = writer
-            .create_session_with_timeout(workdir.workspace())
-            .await;
-        let result = writer.prompt_with_timeout(&session_id, "say hello").await;
+        let writer = GrokStdioClient::spawn(&server, workdir.workspace()).await;
+        writer.initialize().await;
+        let session_id = writer.create_session(workdir.workspace()).await;
+        let result = writer.prompt(&session_id, "say hello").await;
         assert!(result.is_ok(), "prompt failed: {:?}", result.err());
         let original_sys_prompt = server
             .last_system_prompt()
             .expect("should have captured system prompt");
-        let shared_sandbox = writer.take_sandbox();
+        let shared_sandbox = writer.into_sandbox();
         invalidate_models_cache(shared_sandbox.home());
-        drop(writer);
         let reader =
             GrokStdioClient::spawn_with_sandbox(&server, workdir.workspace(), shared_sandbox).await;
-        reader.initialize_with_timeout().await;
-        let _ = reader
-            .load_session_with_timeout(&session_id, workdir.workspace())
-            .await;
-        let result2 = reader.prompt_with_timeout(&session_id, "say goodbye").await;
+        reader.initialize().await;
+        let _ = reader.load_session(&session_id, workdir.workspace()).await;
+        let result2 = reader.prompt(&session_id, "say goodbye").await;
         assert!(
             result2.is_ok(),
             "resumed prompt failed: {:?}",
@@ -256,14 +249,14 @@ async fn test_model_without_agent_type_defaults_to_grok_build() {
                 .expect("start mock server");
             let workdir = git_workdir();
             let client = GrokStdioClient::spawn(&server, workdir.workspace()).await;
-            client.initialize_with_timeout().await;
+            client.initialize().await;
             let session_id = client
-                .create_session_with_model_timeout(
+                .create_session_with_model(
                     workdir.workspace(),
                     "no-agent-type-model",
                 )
                 .await;
-            let result = client.prompt_with_timeout(&session_id, "say hello").await;
+            let result = client.prompt(&session_id, "say hello").await;
             assert!(result.is_ok(), "prompt failed: {:?}", result.err());
             let sys_prompt = server
                 .last_system_prompt()
@@ -286,19 +279,16 @@ async fn test_grok_agent_env_overrides_model_agent_type() {
             let server = dual_model_server().await;
             let workdir = git_workdir();
             let sandbox = TestSandbox::builder().mock_url(server.url()).build();
-            let client = GrokStdioClient::spawn_with_sandbox_env_and_args(
-                    &server,
-                    workdir.workspace(),
-                    sandbox,
-                    &[("GROK_AGENT", "grok-build")],
-                    &[],
-                )
-                .await;
-            client.initialize_with_timeout().await;
+            let options = SpawnOptions::new(sandbox)
+                .with_extra_env([("GROK_AGENT", "grok-build")])
+                .with_leading_args(std::iter::empty::<&str>());
+            let client =
+                GrokStdioClient::spawn_with_options(&server, workdir.workspace(), options).await;
+            client.initialize().await;
             let session_id = client
-                .create_session_with_model_timeout(workdir.workspace(), "cursor-model")
+                .create_session_with_model(workdir.workspace(), "cursor-model")
                 .await;
-            let result = client.prompt_with_timeout(&session_id, "say hello").await;
+            let result = client.prompt(&session_id, "say hello").await;
             assert!(
             result.is_ok(),
             "prompt with GROK_AGENT override failed: {:?}\nstderr:\n{}",

@@ -72,7 +72,10 @@ pub fn effective_cli_base_urls() -> Vec<String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
-        return vec![base_url];
+        if is_loopback_base(&base_url) {
+            return vec![base_url];
+        }
+        tracing::warn!("GROK_CLI_BASE_URL ignored: only loopback bases are honored");
     }
     if let Some(source) = runtime.and_then(|runtime| runtime.update_source().cloned())
         && source.kind == "base_url"
@@ -83,6 +86,26 @@ pub fn effective_cli_base_urls() -> Vec<String> {
         .iter()
         .map(|base| (*base).to_owned())
         .collect()
+}
+
+/// Parsed, not prefix-matched: `http://127.0.0.1:9@evil.com` starts with a
+/// loopback prefix but its host is `evil.com` (userinfo trick).
+/// `https` loopback is allowed so merge CI can smoke rustls/aws-lc against a
+/// local SHA-512 server (GB-6134); non-loopback https is still rejected.
+fn is_loopback_base(base: &str) -> bool {
+    let Ok(u) = url::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(u.scheme(), "http" | "https") || !u.username().is_empty() || u.password().is_some()
+    {
+        return false;
+    }
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
 }
 
 /// Whether an installer has an explicitly configured source in Open mode.
@@ -570,7 +593,7 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
         .iter()
         .position(|p| PLATFORM_OS.contains(p))
         .unwrap_or(parts.len());
-    let ver_str = parts[..platform_start].join("-");
+    let ver_str = parts.get(..platform_start).unwrap_or(&[]).join("-");
     semver::Version::parse(&ver_str).ok()?;
     Some(ver_str)
 }
@@ -669,6 +692,22 @@ pub fn channel_label() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loopback_base_rejects_userinfo_and_non_loopback() {
+        use super::is_loopback_base;
+        assert!(is_loopback_base("http://127.0.0.1:8971"));
+        assert!(is_loopback_base("http://localhost:8971"));
+        assert!(is_loopback_base("http://[::1]:8971"));
+        assert!(is_loopback_base("https://127.0.0.1:8971"));
+        assert!(is_loopback_base("https://localhost:8971"));
+        // Prefix-check bypass vectors.
+        assert!(!is_loopback_base("http://127.0.0.1:9@evil.com"));
+        assert!(!is_loopback_base("http://localhost.evil.com:80"));
+        assert!(!is_loopback_base("https://x.ai/cli"));
+        assert!(!is_loopback_base("http://192.168.1.1:80"));
+        assert!(!is_loopback_base(""));
+    }
+
     use super::*;
 
     /// Verifies that a future `checked_at` timestamp (e.g. from clock skew or
