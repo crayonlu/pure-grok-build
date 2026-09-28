@@ -81,9 +81,9 @@ pub enum RewindPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RewindMode {
     /// Roll back both conversation and files (full time-travel).
+    #[default]
     All,
     /// Roll back conversation only; leave files untouched.
-    #[default]
     ConversationOnly,
     /// Roll back files only; leave conversation untouched.
     FilesOnly,
@@ -136,7 +136,7 @@ impl RewindState {
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index,
-            mode: RewindMode::ConversationOnly,
+            mode: RewindMode::default(),
         }
     }
 }
