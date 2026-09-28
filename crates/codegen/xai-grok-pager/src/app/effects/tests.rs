@@ -3085,10 +3085,10 @@ async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity
     }
     assert!(serde_json::from_str::<HydrateTeamCapabilityResponse>("{}").is_err());
     assert!(
-            serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
-                .is_err()
-        );
-
+        serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
+            .is_err()
+    );
+}
 
 #[test]
 fn rewind_execute_params_sends_all_mode() {

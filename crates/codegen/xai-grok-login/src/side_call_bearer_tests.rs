@@ -245,6 +245,8 @@ fn image_client(base_url: &str, mgr: &Arc<AuthManager>) -> ImageGenClient {
         model_override: None,
         edit_model_override: None,
         tier_restricted: false,
+        provider: None,
+        capability_profile: None,
     };
     ImageGenClient::new(&config, Some(Arc::new(SharedAuthKeyProvider(mgr.clone())))).unwrap()
 }
