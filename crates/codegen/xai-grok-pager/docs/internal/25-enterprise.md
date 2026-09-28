@@ -23,4 +23,7 @@ table is a hand-maintained mirror kept honest by
 | `backend_tools` | `GROK_BACKEND_SEARCH` |
 | `auto_wake` | `GROK_AUTO_WAKE` |
 | `subagent_worktree_snapshot` | `GROK_SUBAGENT_WORKTREE_SNAPSHOT` |
+| `subagent_model_inheritance` | `GROK_SUBAGENT_MODEL_INHERITANCE` |
 | `active_agent_messages` | `GROK_ACTIVE_AGENT_MESSAGES` |
+| `dock` | `GROK_DOCK` |
+| `terminal_theme` | `GROK_TERMINAL_THEME` |
