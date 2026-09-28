@@ -499,8 +499,6 @@ fn write_summary(
         num_messages: 8 + ordinal % 24,
         num_chat_messages: 8 + ordinal % 24,
         current_model_id: acp::ModelId::new("benchmark-model"),
-        agent_id: None,
-        attempt_id: None,
         parent_session_id: None,
         forked_at: None,
         collection_id: None,
@@ -523,7 +521,11 @@ fn write_summary(
         generated_title: Some(format!("Benchmark session {ordinal}")),
         title_is_manual: false,
         worktree_label: worktree_label.map(str::to_owned),
-        agent_name: Some("benchmark-agent".to_owned()),
+        agent: xai_grok_shell::session::persistence::PersistedAgentSelection::from(
+            xai_grok_shell::session::persistence::PersistedAgent::Named(
+                "benchmark-agent".to_owned(),
+            ),
+        ),
         sandbox_profile: Some("workspace".to_owned()),
         reasoning_effort: None,
         last_turn_summary: None,

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp;
 
-use super::{ExtResult, parse_params};
+use super::{ExtResult, parse_params, require_overlay_service};
 use crate::agent::MvpAgent;
 use crate::session::{
     CommentDeleteRequest, CommentDeleteResponse, CommentRequest, CommentResponse,
@@ -16,6 +16,11 @@ use xai_grok_telemetry::id::agent_id;
 /// Record inline code review events.
 /// Methods: `x.ai/review/comment`: record a new inline code comment to cloud storage `x.ai/review/comment/delete`: record a tombstone event for a deleted comment
 pub(super) async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::TraceUpload,
+        args.method.as_ref(),
+    )?;
     match args.method.as_ref() {
         "x.ai/review/comment" => {
             let request: CommentRequest = parse_params(args)?;

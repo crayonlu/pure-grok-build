@@ -1,0 +1,10 @@
+{
+  // Keep rust-analyzer's build cache out of the main `target/` directory.
+  // rust-analyzer runs `cargo check --workspace --all-targets` on open/save,
+  // generating gigabytes of incremental sessions; isolating it to
+  // `target/ra` lets the main target be cleaned freely (and vice versa).
+  "rust-analyzer.cargo.targetDir": "target/ra",
+  // Only check library targets on save; checking all-targets multiplies
+  // artifact volume (tests/benches) for every save.
+  "rust-analyzer.cargo.checkOnSave.allTargets": false
+}

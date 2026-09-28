@@ -136,6 +136,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
                 telemetry_enabled: false,
                 supports_backend_search: std::cell::Cell::new(false),
+                supports_vision: std::cell::Cell::new(true),
                 tool_overrides: std::cell::RefCell::new(None),
                 resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 compactions_remaining: std::cell::Cell::new(None),
@@ -683,6 +684,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
                 telemetry_enabled: false,
                 supports_backend_search: std::cell::Cell::new(false),
+                supports_vision: std::cell::Cell::new(true),
                 tool_overrides: std::cell::RefCell::new(None),
                 resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
                 compactions_remaining: std::cell::Cell::new(None),
@@ -1024,6 +1026,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
                 telemetry_enabled: false,
                 supports_backend_search: std::cell::Cell::new(false),
+                supports_vision: std::cell::Cell::new(true),
                 tool_overrides: std::cell::RefCell::new(None),
                 resolved_tool_overrides: std::sync::Arc::new(
                     arc_swap::ArcSwapOption::empty(),
@@ -2596,6 +2599,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
                 telemetry_enabled: false,
                 supports_backend_search: std::cell::Cell::new(false),
+                supports_vision: std::cell::Cell::new(true),
                 tool_overrides: std::cell::RefCell::new(None),
                 resolved_tool_overrides: std::sync::Arc::new(
                     arc_swap::ArcSwapOption::empty(),

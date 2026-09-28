@@ -135,8 +135,13 @@ pub fn bootstrap_with_cancel(
         crate::managed_config::managed_policy_gate()?;
     }
     ensure_bootstrap_not_cancelled(cancel)?;
-    if !cfg!(test) {
+    if !cfg!(test)
+        && cfg
+            .overlay_runtime
+            .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+    {
         let _timer = crate::instrumentation_timer!("startup.bootstrap.refresh_supervisor");
+        // The per-boot orphan cleanup must precede the config read.
         crate::managed_config::start_refresh_supervisor(auth_manager);
     }
     let cfg = {
@@ -180,7 +185,18 @@ pub fn bootstrap_with_cancel(
         }
         ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?
     };
-    models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());
+
+    // Refresh on every auth refresh — the FSEvents watcher can silently die after
+    // macOS sleep, stranding the catalog on bundled defaults.
+    if cfg
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        models_manager.start_auth_refresh_watcher(auth_manager.refresh_notifier());
+    } else {
+        tracing::debug!("model catalog auth-refresh watcher skipped by overlay policy");
+    }
+
     Ok((cfg, models_manager))
 }
 /// Prints the error to the user's real stderr (undoing any TUI redirect) and exits.
@@ -310,6 +326,21 @@ fn ensure_remote_settings_side_effects(
     warmed_auth: Option<&GrokAuth>,
     boot_wait: Option<&SettingsWait>,
 ) -> Result<StartupPrefetch, BootstrapError> {
+    if !cfg
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::RemoteSettings)
+    {
+        tracing::debug!("remote settings fetch skipped by overlay policy");
+        crate::agent::config::apply_remote_settings_side_effects(
+            cfg.remote_settings.as_ref(),
+            &config::EndpointsConfig::from_effective_config().proxy_url(),
+        );
+        return Ok(if cfg.remote_settings.is_some() {
+            StartupPrefetch::ClientSupplied
+        } else {
+            StartupPrefetch::Ran
+        });
+    }
     let prefetch = if let Some(wait) = boot_wait {
         if matches!(wait, SettingsWait::Cancelled) || cancel.is_cancelled() {
             return Err(BootstrapError::Cancelled);
@@ -418,8 +449,14 @@ fn resolve_config(
         cfg.storage_mode =
             StorageMode::from_remote_gated(cfg.remote_settings.as_ref(), has_xai_auth);
     }
-    if cfg.storage_mode == StorageMode::Writeback && !has_xai_auth {
-        tracing::info!("Writeback is disabled: requires auth with grok.com");
+    // A CLI/env-set Writeback still requires grok.com auth.
+    if cfg.storage_mode == StorageMode::Writeback
+        && (!has_xai_auth || cfg.overlay_runtime.policy().mode.is_open())
+    {
+        tracing::info!(
+            open_mode = cfg.overlay_runtime.policy().mode.is_open(),
+            "Writeback is disabled: requires an allowed grok.com cloud policy"
+        );
         cfg.storage_mode = StorageMode::Local;
     }
     if let Some(rs) = cfg.remote_settings.as_ref()
@@ -445,7 +482,16 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
             crate::builtin::purge_stale_extracted_skills(&grok_home);
         }
         crate::extensions::marketplace::purge_default_skills_installs(&grok_home);
-        if cfg.resolve_official_marketplace_auto_register().value {
+
+        // At boot remote_settings may still be None (fetches are backgrounded),
+        // so only an env opt-in fires here; the gate is re-evaluated once
+        // settings arrive (see `MvpAgent::reapply_official_marketplace`).
+        if cfg.resolve_official_marketplace_auto_register().value
+            && cfg
+                .overlay_runtime
+                .policy()
+                .allows_implicit(xai_grok_overlay_api::ServiceKind::ManagedConfig)
+        {
             crate::extensions::marketplace::ensure_official_marketplace_source(&grok_home);
         }
         let telemetry_mode = cfg.resolve_telemetry_mode();
@@ -478,6 +524,28 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
 /// Apply current telemetry config + auth identity. Tears down the client
 /// when telemetry is disabled, so it's safe to call repeatedly.
 pub fn update_telemetry_config(config: &AgentConfig, auth_manager: &AuthManager) {
+    if !config
+        .overlay_runtime
+        .allows_implicit(xai_grok_overlay_api::ServiceKind::Telemetry)
+    {
+        xai_grok_telemetry::client::init(
+            config.telemetry.clone(),
+            xai_grok_telemetry::config::TelemetryMode::Disabled,
+            None,
+            None,
+            None,
+            crate::http::origin_client_info_from_env(),
+            xai_grok_version::VERSION.to_owned(),
+            None,
+            crate::http::shared_client(),
+        );
+        tracing::debug!("telemetry client disabled by overlay policy");
+        return;
+    }
+    // shared_client() aborts (panic = "abort") on an invalid user agent,
+    // and that string comes from the GROK_CLIENT_NAME env var. Telemetry
+    // init must never take down its caller — `grok update` is a repair
+    // command — so validate the one user-controlled input first.
     let user_agent = crate::http::process_user_agent_string();
     if reqwest::header::HeaderValue::from_str(&user_agent).is_err() {
         tracing::warn!("telemetry init skipped: GROK_CLIENT_NAME yields an invalid user agent");

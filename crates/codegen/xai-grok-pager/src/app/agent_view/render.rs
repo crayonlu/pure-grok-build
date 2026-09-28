@@ -2737,6 +2737,7 @@ impl AgentView {
                     buf,
                     layout.prompt,
                     &rw.phase,
+                    rw.mode,
                     prompt_focused,
                 );
             }

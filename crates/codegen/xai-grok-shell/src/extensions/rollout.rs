@@ -4,14 +4,19 @@
 
 use agent_client_protocol as acp;
 
-use super::{ExtResult, parse_params, to_raw_response};
+use super::{ExtResult, parse_params, require_overlay_service, to_raw_response};
 use crate::agent::MvpAgent;
 use crate::session::{RolloutSurveyRequest, RolloutSurveyResponse};
 use xai_grok_telemetry::events::RolloutSurvey;
 use xai_grok_telemetry::session_ctx::log_event;
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
-pub async fn handle(_agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    require_overlay_service(
+        agent,
+        xai_grok_overlay_api::ServiceKind::Telemetry,
+        args.method.as_ref(),
+    )?;
     match args.method.as_ref() {
         "x.ai/rollout/survey" => {
             let req: RolloutSurveyRequest = parse_params(args)?;
