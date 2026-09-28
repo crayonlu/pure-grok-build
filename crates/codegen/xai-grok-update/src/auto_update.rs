@@ -1966,12 +1966,21 @@ async fn swap_managed_bin_links(
 ) -> Result<std::path::PathBuf> {
     let grok_name = if cfg!(windows) { "grok.exe" } else { "grok" };
     let grok_link = bin_dir.join(grok_name);
-    let link_paths: [std::path::PathBuf; 1] = [grok_link.clone()];
+    let pairs = [(binary_path.to_path_buf(), grok_link.clone())];
+    replace_managed_bins(&pairs).await?;
+    remove_legacy_agent_entrypoint(bin_dir).await;
+    Ok(grok_link)
+}
 
-    // Capture the prior grok state before mutating the active entry point.
-    let mut captured: Vec<LinkRollback> = Vec::with_capacity(link_paths.len());
-    for path in &link_paths {
-        match LinkRollback::capture(path).await {
+/// Point every `dest` in `pairs` at its `src` (a symlink on Unix, a copy through
+/// `windows_replace_exe` on Windows) as one unit: every `dest` is captured
+/// up-front, then replaced in order, and a failure restores the completed ones in
+/// reverse, including removing a `dest` that did not exist before.
+async fn replace_managed_bins(pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Result<()> {
+    // Capture every dest up-front so a later capture failure can't strand an earlier one mid-swap
+    let mut captured: Vec<LinkRollback> = Vec::with_capacity(pairs.len());
+    for (_, dest) in pairs {
+        match LinkRollback::capture(dest).await {
             Ok(rb) => captured.push(rb),
             Err(e) => {
                 // Nothing swapped yet; drop any Windows .rollback.bak files.
@@ -1979,34 +1988,32 @@ async fn swap_managed_bin_links(
                     prior.cleanup().await;
                 }
                 return Err(e)
-                    .with_context(|| format!("capturing rollback state for {}", path.display()));
+                    .with_context(|| format!("capturing rollback state for {}", dest.display()));
             }
         }
     }
 
     let mut completed: Vec<&LinkRollback> = Vec::with_capacity(captured.len());
-    for (i, (link_path, rollback)) in link_paths.iter().zip(captured.iter()).enumerate() {
+    for (i, ((src, dest), rollback)) in pairs.iter().zip(captured.iter()).enumerate() {
         #[cfg(unix)]
         let swap_result = {
-            let rel_target = relative_symlink_target(binary_path, link_path);
-            atomic_symlink_swap(&rel_target, link_path).await
+            let rel_target = relative_symlink_target(src, dest);
+            atomic_symlink_swap(&rel_target, dest).await
         };
         #[cfg(windows)]
-        let swap_result = windows_replace_exe(binary_path, link_path).await;
+        let swap_result = windows_replace_exe(src, dest).await;
         #[cfg(not(any(unix, windows)))]
         let swap_result: Result<()> = {
             // No managed bin layout on this target; no-op.
-            let _ = (binary_path, link_path);
+            let _ = (src, dest);
             Ok(())
         };
 
         match swap_result {
             Ok(()) => completed.push(rollback),
             Err(e) => {
-                // Restore each successful swap in reverse. On restore
-                // failure keep the .rollback.bak as a recovery artifact
-                // (Windows only) and warn!; the swap error propagates so
-                // `reinstall_hint` is the user-visible message.
+                // Restore each successful swap in reverse
+                // A failed restore keeps its .rollback.bak as a recovery artifact (Windows only)
                 for prior in completed.iter().rev() {
                     if let Err(restore_err) = prior.restore().await {
                         let backup_note = prior.backup_path().map_or(String::new(), |p| {
@@ -2023,10 +2030,10 @@ async fn swap_managed_bin_links(
                 // Failed swap had no active state to restore; drop its backup.
                 rollback.cleanup().await;
                 // Drop backups for never-attempted later captures (Windows orphans).
-                for later in &captured[i + 1..] {
+                for later in captured.get(i + 1..).unwrap_or(&[]) {
                     later.cleanup().await;
                 }
-                return Err(e);
+                return Err(e).with_context(|| format!("replacing {}", dest.display()));
             }
         }
     }
@@ -2034,8 +2041,7 @@ async fn swap_managed_bin_links(
     for cap in &captured {
         cap.cleanup().await;
     }
-    remove_legacy_agent_entrypoint(bin_dir).await;
-    Ok(grok_link)
+    Ok(())
 }
 
 /// Snapshot of a managed-bin link's prior state for rollback in
