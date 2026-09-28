@@ -146,7 +146,7 @@ pub struct VideoGenClient {
     base_url: String,
     writer: super::storage::SessionFileWriter,
     zdr_video_output_s3: Option<ZdrVideoOutputS3Config>,
-    api_key_provider: Option<SharedApiKeyProvider>,
+    bearer: super::media_bearer::MediaBearer,
     /// Optional 401-attribution hook. Hosts wire this so a 401 from the Video Generation API emits
     /// an `auth_401_attribution` event with `consumer` of `"VideoGen.start"` (start request) or
     /// `"VideoGen.poll"` (poll request) for unified auth-failure telemetry.
@@ -188,18 +188,6 @@ impl VideoGenClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        // Always bake the static api_key as the default Authorization header.
-        // The dynamic provider overrides per-request; this is the fallback.
-        if capability_profile.is_none() {
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                    xai_tool_runtime::ToolError::invalid_arguments(format!(
-                        "Invalid API key for header: {e}"
-                    ))
-                })?,
-            );
-        }
 
         extra_headers.into_iter().try_for_each(|(key, value)| {
             let header_name =
@@ -258,7 +246,7 @@ impl VideoGenClient {
                 .as_ref()
                 .map(|c| (**c).clone())
                 .filter(ZdrVideoOutputS3Config::is_valid),
-            api_key_provider,
+            bearer: super::media_bearer::MediaBearer::new(api_key_provider, api_key.clone()),
             attribution_callback: None,
             tier_restricted: *tier_restricted,
             zdr_restricted: *zdr_restricted,
@@ -275,12 +263,12 @@ impl VideoGenClient {
         &self,
         method: reqwest::Method,
         url: &str,
-        sent_bearer: Option<&str>,
+        sent_bearer: &str,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.http.request(method, url);
-        if let Some(key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
+        let mut req = self
+            .http
+            .request(method, url)
+            .header(AUTHORIZATION, format!("Bearer {sent_bearer}"));
         if let Some(ref session) = self.session_header {
             req = req.header(super::image_gen::SESSION_ID_HEADER, session.clone());
         }
@@ -318,8 +306,9 @@ impl VideoGenClient {
         self
     }
 
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    /// `Err` means no request may leave; see `MediaBearer::resolve`.
+    async fn current_bearer(&self) -> Result<String, xai_tool_runtime::ToolError> {
+        self.bearer.resolve().await
     }
 
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -352,6 +341,9 @@ impl VideoGenClient {
                 .await;
         }
         let start_url = format!("{}/videos/generations", self.base_url.trim_end_matches('/'));
+
+        // Before the ZDR presign, a network call that must not happen on a refused bearer
+        let sent_bearer = self.current_bearer().await?;
 
         let presigned = match &self.zdr_video_output_s3 {
             Some(config) => Some(self.presign_zdr_output_urls(config).await?),
@@ -387,9 +379,8 @@ impl VideoGenClient {
             }),
         };
 
-        let sent_bearer = self.current_bearer().await;
         let req = self
-            .request(reqwest::Method::POST, &start_url, sent_bearer.as_deref())
+            .request(reqwest::Method::POST, &start_url, &sent_bearer)
             .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
             .json(&payload);
 
@@ -401,7 +392,7 @@ impl VideoGenClient {
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(ToolConsumer::VideoGenStart, sent_bearer.as_deref());
+            self.record_401_attribution(ToolConsumer::VideoGenStart, Some(&sent_bearer));
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -454,9 +445,9 @@ impl VideoGenClient {
                 )));
             }
 
-            let poll_sent_bearer = self.current_bearer().await;
+            let poll_sent_bearer = self.current_bearer().await?;
             let poll_req = self
-                .request(reqwest::Method::GET, &poll_url, poll_sent_bearer.as_deref())
+                .request(reqwest::Method::GET, &poll_url, &poll_sent_bearer)
                 .timeout(poll_timeout);
 
             let poll_response = poll_req.send().await.map_err(|e| {
@@ -467,10 +458,7 @@ impl VideoGenClient {
 
             let poll_status = poll_response.status();
             if poll_status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(
-                    ToolConsumer::VideoGenPoll,
-                    poll_sent_bearer.as_deref(),
-                );
+                self.record_401_attribution(ToolConsumer::VideoGenPoll, Some(&poll_sent_bearer));
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
                 let body = poll_response.text().await.unwrap_or_default();
@@ -1038,7 +1026,8 @@ pub enum VideoGenConfig {
     #[default]
     Disabled,
     Enabled {
-        api_key: String,
+        /// `None`: the per-request provider is the only bearer source.
+        api_key: Option<String>,
         base_url: String,
         extra_headers: indexmap::IndexMap<String, String>,
         zdr_video_output_s3: Option<Box<ZdrVideoOutputS3Config>>,
@@ -1746,7 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn request_attaches_session_and_bearer_headers() {
         let cfg = VideoGenConfig::Enabled {
-            api_key: "k".into(),
+            api_key: Some("k".into()),
             base_url: "https://api.x.ai/v1".into(),
             extra_headers: indexmap::IndexMap::new(),
             zdr_video_output_s3: None,
@@ -1758,11 +1747,7 @@ mod tests {
             .unwrap()
             .with_session_id("sess-7");
         let req = client
-            .request(
-                reqwest::Method::POST,
-                "https://api.x.ai/v1/videos",
-                Some("tok"),
-            )
+            .request(reqwest::Method::POST, "https://api.x.ai/v1/videos", "tok")
             .build()
             .unwrap();
         assert_eq!(
@@ -2531,7 +2516,7 @@ mod tests {
             ..Default::default()
         };
         let config = VideoGenConfig::Enabled {
-            api_key: String::new(),
+            api_key: None,
             base_url: server.uri(),
             extra_headers: indexmap::IndexMap::new(),
             zdr_video_output_s3: None,

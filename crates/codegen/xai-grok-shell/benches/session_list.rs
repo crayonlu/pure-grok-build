@@ -521,7 +521,11 @@ fn write_summary(
         generated_title: Some(format!("Benchmark session {ordinal}")),
         title_is_manual: false,
         worktree_label: worktree_label.map(str::to_owned),
-        agent_name: Some("benchmark-agent".to_owned()),
+        agent: xai_grok_shell::session::persistence::PersistedAgentSelection::from(
+            xai_grok_shell::session::persistence::PersistedAgent::Named(
+                "benchmark-agent".to_owned(),
+            ),
+        ),
         sandbox_profile: Some("workspace".to_owned()),
         reasoning_effort: None,
         last_turn_summary: None,
