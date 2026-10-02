@@ -218,7 +218,7 @@ pub struct PruningSettings {
     pub hard_clear_age_turns: Option<usize>,
 }
 
-use crate::{ProviderAuthConfig, RequestMapping, ResponseMapping};
+use xai_grok_provider::{ProviderAuthConfig, RequestMapping, ResponseMapping};
 
 /// One or more environment variable names used for an embedding API key.
 ///

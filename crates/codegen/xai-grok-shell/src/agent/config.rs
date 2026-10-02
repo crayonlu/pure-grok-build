@@ -780,7 +780,7 @@ pub struct Config {
         Option<xai_grok_tools::implementations::grok_build::image_gen::ImageGenProviderConfig>,
     /// Provider-neutral capability profiles consumed by search/media adapters.
     #[serde(default)]
-    pub capabilities: xai_grok_config_types::CapabilityProvidersConfig,
+    pub capabilities: xai_grok_provider::CapabilityProvidersConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
@@ -1160,7 +1160,7 @@ impl Default for Config {
             shell_environment_policy: ShellEnvironmentPolicyKnownKeys::default(),
             endpoints,
             image_gen: None,
-            capabilities: xai_grok_config_types::CapabilityProvidersConfig::default(),
+            capabilities: xai_grok_provider::CapabilityProvidersConfig::default(),
             telemetry: TelemetryConfig::default(),
             session: SessionConfig::default(),
             agent: AgentSelectionConfig::default(),
