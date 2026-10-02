@@ -19,7 +19,11 @@ jobs:
   check:
     name: cargo check / test / clippy / fmt
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The tree grows with every upstream sync (this sync added ~130k lines), and
+    # the job builds everything from a cold cache. At 30 minutes the run was cut
+    # off inside the informational clippy step, which runs last, so the whole
+    # check reported cancelled even though fmt/check/tests had passed.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
