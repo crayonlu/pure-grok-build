@@ -27,3 +27,4 @@ table is a hand-maintained mirror kept honest by
 | `active_agent_messages` | `GROK_ACTIVE_AGENT_MESSAGES` |
 | `dock` | `GROK_DOCK` |
 | `terminal_theme` | `GROK_TERMINAL_THEME` |
+| `file_acceleration` | `GROK_FILE_ACCELERATION` |

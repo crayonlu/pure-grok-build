@@ -109,7 +109,7 @@ pub(crate) fn resolve_embedding_runtime(
 
     let mut auth = config.auth.clone();
     if config.auth_scheme.is_some()
-        && auth == xai_grok_config_types::ProviderAuthConfig::default()
+        && auth == xai_grok_provider::ProviderAuthConfig::default()
         && matches!(
             config.auth_scheme.as_deref(),
             Some("x_api_key" | "x-api-key")
