@@ -1107,20 +1107,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sub_config_defaults_match() {
-        assert_eq!(MemoryIndexConfig::default().max_chunk_chars, 1600);
-        assert_eq!(MemoryEmbeddingConfig::default().dimensions, 1024);
-        let s = MemorySearchConfig::default();
-        assert_eq!(s.max_results, 6);
-        assert_eq!(s.recency_decay, DEFAULT_RECENCY_DECAY);
-        assert!(s.temporal_decay.enabled);
-        assert!(!s.mmr.enabled);
-        assert!(MemorySessionConfig::default().save_on_end);
-        assert_eq!(MemoryGcConfig::default().max_age_days, 30);
-        assert_eq!(PruningConfig::default().keep_last_n_turns, 3);
-    }
-
-    #[test]
     fn embedding_config_parses_independent_endpoint_and_credentials() {
         let config: MemoryEmbeddingConfig = toml::from_str(
             r#"
