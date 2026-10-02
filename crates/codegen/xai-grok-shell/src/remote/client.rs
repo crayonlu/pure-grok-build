@@ -678,6 +678,8 @@ pub(crate) fn parse_remote_model_value(
         model_family,
         base_url,
         name,
+        supports_parallel_tool_calls: false,
+        supports_vision: false,
         description: get_string(obj, "description"),
         notice: obj
             .get(MODEL_NOTICE_META_KEY)

@@ -5758,12 +5758,6 @@ fn known_non_serde_config_paths_are_not_reported_unused() {
         "features.remote_fetch must not be treated as a typo: {unused:?}"
     );
     assert!(
-        !unused
-            .iter()
-            .any(|k| k == "marketplace.plugin_cta_marketplace"),
-        "the pager-read CTA marketplace override must not warn: {unused:?}"
-    );
-    assert!(
         !unused.iter().any(|k| k == "features.session_search"),
         "a registered feature has no typed field and must not look like a typo: {unused:?}"
     );
@@ -7454,7 +7448,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     cfg.models.max_completion_tokens = Some(4096);
     cfg.models.max_retries = Some(9);
     cfg.models.inference_idle_timeout_secs = Some(600);
-    cfg.models.subagent_rate_limit_max_attempts = Some(12);
     cfg.models.stream_tool_calls = Some(true);
     let entry = prefetch_model_entry("remote-only-model", 200_000, ApiBackend::default());
     let mut prefetched = IndexMap::new();
@@ -7469,7 +7462,6 @@ fn global_model_defaults_apply_to_model_without_override() {
     assert_eq!(info.max_completion_tokens, Some(4096));
     assert_eq!(info.max_retries, Some(9));
     assert_eq!(info.inference_idle_timeout_secs, Some(600));
-    assert_eq!(info.subagent_rate_limit_max_attempts, Some(12));
     assert_eq!(info.stream_tool_calls, Some(true));
 }
 #[test]
@@ -8593,4 +8585,36 @@ fn test_model_entry(
         auth_provider: None,
         api_base_url: api_base_url.map(|s| s.to_string()),
     }
+}
+
+#[test]
+fn host_config_does_not_resolve_overlay_namespace() {
+    let raw_config: toml::Value = toml::from_str(
+        r#"
+        [overlay]
+        mode = "open"
+        "#,
+    )
+    .expect("overlay config should parse");
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+}
+
+#[test]
+fn overlay_defaults_to_upstream_without_overlay_table() {
+    let raw_config = toml::Value::Table(Default::default());
+    let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+
+    assert_eq!(
+        cfg.overlay_runtime.policy().mode,
+        xai_grok_overlay_api::OverlayMode::Upstream
+    );
+    assert_eq!(
+        cfg.overlay_runtime.auth_policy(),
+        xai_grok_overlay_api::AuthPolicy::Inherited
+    );
 }

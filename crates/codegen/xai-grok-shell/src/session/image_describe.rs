@@ -18,7 +18,7 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use xai_chat_state::compaction_image_context::render_image_files_block;
+pub(crate) use xai_chat_state::compaction_image_context::render_image_files_block;
 use xai_chat_state::compaction_utils::{extract_real_user_queries, extract_user_query};
 use xai_grok_sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
 use xai_grok_tools::util::truncate::truncate_middle;

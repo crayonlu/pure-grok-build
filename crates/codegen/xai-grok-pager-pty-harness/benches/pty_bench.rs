@@ -121,7 +121,7 @@ async fn run() -> Result<ExitCode> {
 
     let mut results: Vec<BenchResults> = Vec::with_capacity(scenarios.len());
     for scenario in scenarios {
-        tracing::info!(scenario = scenario.as_str(), "running scenario");
+        tracing::info!(scenario = scenario.as_ref(), "running scenario");
         let content = ContentController::start()
             .await
             .context("start ContentController")?;
@@ -146,9 +146,9 @@ async fn run() -> Result<ExitCode> {
                 results.push(r);
             }
             Err(e) => {
-                tracing::warn!(scenario = scenario.as_str(), error = %e, "scenario failed");
+                tracing::warn!(scenario = scenario.as_ref(), error = %e, "scenario failed");
                 results.push(BenchResults::from_timings(
-                    scenario.as_str(),
+                    scenario.as_ref(),
                     &[],
                     std::time::Duration::ZERO,
                 ));

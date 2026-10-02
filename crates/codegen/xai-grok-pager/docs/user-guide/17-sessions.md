@@ -140,7 +140,7 @@ Alias: `/title`. `/rename --auto` clears a manual title and re-enables auto-titl
 
 ## The /rewind Command
 
-`/rewind` (alias `/undo`) rewinds the conversation to an earlier turn, dropping later turns. File changes made after that turn are left as-is on disk.
+`/rewind` (alias `/undo`) rolls the session back to an earlier turn, dropping later turns and restoring the files those turns changed.
 
 ```
 /rewind
@@ -151,11 +151,19 @@ When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle 
 
 1. Shows a list of rewind points (one per user prompt)
 2. Lets you select which point to rewind to
-3. Truncates the conversation history to that point
+3. Rolls the conversation and the files back to that point
 
 When **Confirm before rewind** is on (default in `/settings`), every pick asks for confirmation (Yes / Yes, and don't ask again / No). **Yes, and don't ask again** turns that setting off. With the setting off, picks run immediately.
 
-**Important:** `/rewind` does not restore files on disk. Only conversation history is truncated.
+**Modes:** the picker header shows the current scope (`mode: …`). Press `m` to cycle it:
+
+| Mode | What it rolls back |
+|------|--------------------|
+| **Conversation + Files** (default) | Conversation history and the file changes made after the target turn |
+| **Conversation only** | Conversation history; files stay as they are on disk |
+| **Files only** | Files only; the conversation is left intact |
+
+File restoration covers the edits Grok's own tools made after the target turn. Changes made outside the session (another editor, a running process) are not tracked and stay as they are.
 
 ---
 
@@ -412,6 +420,6 @@ Session history (`updates.jsonl`, `chat_history.jsonl`) dominates disk usage in 
 
 - Use `/new` to start fresh when your current context is no longer relevant.
 - Use `/compact` proactively in long sessions to keep the context window effective.
-- Use `/rewind` to undo mistakes; it rewinds the conversation to an earlier turn (file changes from removed turns are left as-is).
+- Use `/rewind` to undo mistakes; it rolls the conversation and the files back to an earlier turn (press `m` in the picker to narrow the scope).
 - In headless mode, capture the `sessionId` from JSON output and pass it to `-r` to build multi-step automations that maintain context.
 - Check `/session-info` to see how much of your context window has been used.

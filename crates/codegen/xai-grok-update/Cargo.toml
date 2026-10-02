@@ -26,6 +26,7 @@ xai-grok-shell = { path = "../xai-grok-shell", default-features = false }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-grok-overlay = { workspace = true }
 flate2 = { workspace = true }
 zstd = { workspace = true }
 sha2 = { workspace = true }

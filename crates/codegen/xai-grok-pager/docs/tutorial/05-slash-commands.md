@@ -11,7 +11,7 @@ A few worth knowing on day one:
 | `/new` | Start a fresh session |
 | `/compact` | Compress a long conversation to free up context |
 | `/btw` | Send Grok an aside *without* interrupting its current task |
-| `/rewind` (alias `/undo`) | Rewind the conversation to an earlier turn |
+| `/rewind` (alias `/undo`) | Roll the conversation and files back to an earlier turn |
 | `/docs` | Full How-to Guides, in the TUI or on the web |
 | `/feedback` | Send feedback to the team |
 
@@ -20,8 +20,10 @@ Two of those deserve a second look:
 - **`/compact`** compresses the conversation history to free up context.
   Check context usage anytime with `/context` — Grok also auto-compacts
   when the window fills up.
-- **`/rewind`** (or **`/undo`**) rewinds the conversation to an earlier
-  turn, dropping later turns (file changes are left as-is).
+- **`/rewind`** (or **`/undo`**) rolls the session back to an earlier
+  turn, dropping later turns and restoring the files those turns changed.
+  Press `m` in the picker to roll back only the conversation or only the
+  files instead.
 
 ## The command palette
 

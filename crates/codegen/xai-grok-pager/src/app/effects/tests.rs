@@ -41,6 +41,7 @@ fn j<'a, V: JsonKeyed + ?Sized>(v: &'a V, key: &str) -> &'a serde_json::Value {
     };
     got
 }
+use crate::views::rewind::RewindMode;
 use std::path::PathBuf;
 use actions::ProbedAttachment;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
@@ -3031,12 +3032,11 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
 }
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
-    assert_eq!(j(&params, "sessionId"), "sess-1");
-    assert_eq!(j(&params, "targetPromptIndex"), 3);
-    assert_eq!(j(&params, "force"), true);
-    assert_eq!(j(&params, "mode"), REWIND_MODE_WIRE);
-    assert_eq!(j(&params, "mode"), "conversation_only");
+    let params = rewind_execute_params("sess-1", 3, RewindMode::ConversationOnly);
+    assert_eq!(params["sessionId"], "sess-1");
+    assert_eq!(params["targetPromptIndex"], 3);
+    assert_eq!(params["force"], true);
+    assert_eq!(params["mode"], "conversation_only");
 }
 #[tokio::test]
 async fn rewind_points_are_asked_only_after_the_cancel_is_answered() {
@@ -3179,7 +3179,19 @@ async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity
     }
     assert!(serde_json::from_str::<HydrateTeamCapabilityResponse>("{}").is_err());
     assert!(
-            serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
-                .is_err()
-        );
+        serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn rewind_execute_params_sends_all_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::All);
+    assert_eq!(params["mode"], "all");
+}
+
+#[test]
+fn rewind_execute_params_sends_files_only_mode() {
+    let params = rewind_execute_params("sess-1", 3, RewindMode::FilesOnly);
+    assert_eq!(params["mode"], "files_only");
 }

@@ -473,7 +473,9 @@ pub fn render_modal(
         }
         Modal::Rewind => {
             if let Some(rw) = minimal_api::rewind_state(agent) {
-                xai_grok_pager::views::rewind::render_rewind_overlay(buf, area, &rw.phase, true);
+                xai_grok_pager::views::rewind::render_rewind_overlay(
+                    buf, area, &rw.phase, rw.mode, true,
+                );
             }
             None
         }

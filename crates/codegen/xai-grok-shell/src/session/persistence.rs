@@ -1102,8 +1102,16 @@ impl From<&xai_grok_agent::AgentDefinition> for PersistedAgent {
 
 /// Serializes as the legacy `agent_name`/`agent_profile` summary keys; a malformed or name-mismatched profile is dropped so the pair can never load as an inconsistent selection.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PersistedAgentSelection {
+pub struct PersistedAgentSelection {
     selected: Option<PersistedAgent>,
+}
+
+impl From<PersistedAgent> for PersistedAgentSelection {
+    fn from(agent: PersistedAgent) -> Self {
+        Self {
+            selected: Some(agent),
+        }
+    }
 }
 
 impl serde::Serialize for PersistedAgentSelection {
@@ -1248,7 +1256,7 @@ pub struct Summary {
     pub worktree_label: Option<String>,
     /// The agent active when the session was last saved, persisted so resume doesn't re-derive it from the mutable model catalog.
     #[serde(flatten)]
-    pub(crate) agent: PersistedAgentSelection,
+    pub agent: PersistedAgentSelection,
     /// Persisted so a resumed session is restored to the same profile instead of silently falling back to the config default.
     /// A fallback would break commands that worked before (a stricter profile denies filesystem/network the session relied on).
     /// `None` for sessions created before this field existed.

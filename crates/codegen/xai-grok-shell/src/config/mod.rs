@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicU8, Ordering};
 pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryConfig, MemoryDreamConfig, MemoryDreamSettings,
-    MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryFlushConfig, MemoryFlushSettings,
-    MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
+    MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryEnvKeys, MemoryFlushConfig,
+    MemoryFlushSettings, MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
     MemoryInitialInjectionConfig, MemoryInitialInjectionSettings, MemoryMode, MemorySearchConfig,
     MemorySearchSettings, MemorySessionConfig, MemorySessionSettings, MemorySettings,
     MemoryV2Config, MemoryV2Rollout, MemoryV2Settings, MemoryWatcherConfig, MemoryWatcherSettings,
