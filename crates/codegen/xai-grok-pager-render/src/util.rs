@@ -160,11 +160,11 @@ pub fn parse_schedule_interval_secs(human: &str) -> Option<u64> {
     let rest = s.get(6..)?.trim_start();
     let (num_str, unit) = if let Some(sp) = rest.find(char::is_whitespace) {
         (rest.get(..sp)?, rest.get(sp + 1..)?)
-    } else if rest.len() >= 2 {
-        let (d, u) = rest.split_at(rest.len() - 1);
-        (d, u)
     } else {
-        return None;
+        // Split on the last char boundary; slicing at `len() - 1` panics on
+        // multi-byte characters.
+        let (index, _) = rest.char_indices().next_back()?;
+        rest.split_at(index)
     };
     let n: u64 = num_str.parse().ok()?;
     let unit = unit.trim();
@@ -389,6 +389,9 @@ mod tests {
             ("foo bar", None),
             ("every foo", None),
             ("every 5x", None),
+            // Multi-byte input must not panic on a non-char-boundary split.
+            ("every 继续实现", None),
+            ("every 5分", None),
         ];
         for (input, expected) in cases {
             assert_eq!(parse_schedule_interval_secs(input), expected, "{input:?}");

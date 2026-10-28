@@ -33,42 +33,45 @@ fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
 /// Whether a token is a schedulable interval: non-zero digits followed by one of s/m/h/d.
 /// Zero is rejected so the preview never shows a cadence the tool would reject (`parse_interval` errors on zero).
 fn is_interval_token(s: &str) -> bool {
-    if s.len() < 2 {
+    // `strip_suffix` only removes a char boundary prefix, so any UTF-8 token is safe.
+    let Some(digits) = s.strip_suffix(|c: char| matches!(c, 's' | 'm' | 'h' | 'd')) else {
         return false;
-    }
-    let (digits, suffix) = s.split_at(s.len() - 1);
-    matches!(suffix, "s" | "m" | "h" | "d")
+    };
+    !digits.is_empty()
         && digits.chars().all(|c| c.is_ascii_digit())
         && digits.parse::<u64>().is_ok_and(|n| n > 0)
 }
 
 /// Convert an interval token like "5m" to a human string like "every 5 minutes".
 fn interval_to_human(token: &str) -> String {
-    let (digits, suffix) = token.split_at(token.len() - 1);
+    let Some(suffix) = token.chars().last() else {
+        return format!("every {token}");
+    };
+    let digits = &token[..token.len() - suffix.len_utf8()];
     let n: u64 = digits.parse().unwrap_or(0);
     match suffix {
-        "s" => {
+        's' => {
             if n <= 1 {
                 "every 1 second".into()
             } else {
                 format!("every {n} seconds")
             }
         }
-        "m" => {
+        'm' => {
             if n == 1 {
                 "every 1 minute".into()
             } else {
                 format!("every {n} minutes")
             }
         }
-        "h" => {
+        'h' => {
             if n == 1 {
                 "every 1 hour".into()
             } else {
                 format!("every {n} hours")
             }
         }
-        "d" => {
+        'd' => {
             if n == 1 {
                 "every 1 day".into()
             } else {
@@ -201,6 +204,17 @@ mod tests {
             assert_eq!(interval, None, "input {input:?} must not yield a token");
             assert_eq!(prompt, input);
         }
+    }
+
+    #[test]
+    fn non_ascii_leading_token_is_not_an_interval() {
+        // A multi-byte first token must not be sliced at `len() - 1`.
+        for input in ["继续实现 登录流程", "日本語 テスト", "é x"] {
+            let (interval, prompt) = parse_loop_args(input);
+            assert_eq!(interval, None, "input {input:?} must not yield a token");
+            assert_eq!(prompt, input);
+        }
+        assert_eq!(interval_to_human("继续实现"), "every 继续实现");
     }
 
     #[test]

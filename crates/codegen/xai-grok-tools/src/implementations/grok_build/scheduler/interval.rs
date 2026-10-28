@@ -12,7 +12,14 @@ pub fn parse_interval(s: &str) -> Result<u64, SchedulerError> {
         ));
     }
 
-    let (digits, suffix) = s.split_at(s.len() - 1);
+    // The suffix is one character; split on its char boundary so non-ASCII
+    // input reaches the format error instead of panicking.
+    let Some(suffix) = s.chars().last() else {
+        return Err(SchedulerError::InvalidInterval(
+            "interval cannot be empty".into(),
+        ));
+    };
+    let digits = &s[..s.len() - suffix.len_utf8()];
     let value: u64 = digits.parse().map_err(|_| {
         SchedulerError::InvalidInterval(format!(
             "invalid interval format: {s:?} (expected e.g. 5m, 2h, 1d)"
@@ -26,10 +33,10 @@ pub fn parse_interval(s: &str) -> Result<u64, SchedulerError> {
     }
 
     let unit_secs: u64 = match suffix {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
         _ => {
             return Err(SchedulerError::InvalidInterval(format!(
                 "invalid interval suffix: {suffix:?} (expected s, m, h, or d)"
@@ -116,6 +123,10 @@ mod tests {
         assert!(parse_interval("abc").is_err());
         assert!(parse_interval("5x").is_err());
         assert!(parse_interval("m").is_err());
+        // Multi-byte input must return a format error, never panic on a
+        // non-char-boundary split.
+        assert!(parse_interval("继续实现").is_err());
+        assert!(parse_interval("5分").is_err());
     }
 
     #[test]
